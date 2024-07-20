@@ -10,5 +10,9 @@ struct Atom: ParsableCommand {
         let result = Assignment.consume(stream: &stream)
         print("result =", result)
         print("end =", stream.isEnd())
+
+        if case let .doConsume(ir) = result {
+            print("swift =", ir?.swift())
+        }
     }
 }
