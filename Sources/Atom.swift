@@ -12,7 +12,7 @@ struct Atom: ParsableCommand {
         print("end =", stream.isEnd())
 
         if case let .doConsume(ir) = result {
-            print("swift =", ir?.swift())
+            print("swift =", ir!.swift())
         }
     }
 }
