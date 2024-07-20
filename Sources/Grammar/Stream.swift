@@ -31,7 +31,7 @@ struct Stream {
         }
         if char == c {
             string.formIndex(after: &index)
-            return .doConsume(String(char))
+            return .doConsume(nil)
         }
         return .dontConsume
     }
