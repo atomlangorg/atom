@@ -39,6 +39,6 @@ struct Stream {
 
 enum StreamState {
     case dontConsume
-    case doConsume(String?)
+    case doConsume((any IR)?)
     case end
 }

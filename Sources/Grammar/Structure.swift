@@ -25,7 +25,7 @@ protocol GrammarMatch: Grammar {
 
 extension GrammarMatch {
     static func consume(stream: inout Stream) -> StreamState {
-        var greediest: (index: String.Index, swift: String?)? = nil
+        var greediest: (index: String.Index, ir: (any IR)?)? = nil
 
         for pattern in patterns {
             var s = stream
@@ -33,13 +33,13 @@ extension GrammarMatch {
             switch pattern.consume(stream: &s) {
             case .dontConsume:
                 continue
-            case let .doConsume(swift):
+            case let .doConsume(ir):
                 if let g = greediest {
                     if s.index > g.index {
-                        greediest = (index: s.index, swift: swift)
+                        greediest = (index: s.index, ir: ir)
                     }
                 } else {
-                    greediest = (index: s.index, swift: swift)
+                    greediest = (index: s.index, ir: ir)
                 }
             case .end:
                 return .dontConsume
@@ -48,7 +48,7 @@ extension GrammarMatch {
 
         if let greediest {
             stream.index = greediest.index
-            return .doConsume(greediest.swift)
+            return .doConsume(greediest.ir)
         }
         return .dontConsume
     }
@@ -56,23 +56,23 @@ extension GrammarMatch {
 
 struct GrammarPattern {
     let parts: [GrammarPart]
-    let swift: (([String?]) -> String)?
+    let gen: (([(any IR)?]) -> any IR)?
 
-    init(parts: [GrammarPart], swift: (([String?]) -> String)? = nil) {
+    init(parts: [GrammarPart], gen: (([(any IR)?]) -> any IR)? = nil) {
         self.parts = parts
-        self.swift = swift
+        self.gen = gen
     }
 
     func consume(stream: inout Stream) -> StreamState {
         var s = stream
-        var strings = [String?]()
+        var irs = [(any IR)?]()
 
         for part in parts {
             switch part.consume(stream: &s) {
             case .dontConsume:
                 return .dontConsume
-            case let .doConsume(swift):
-                strings.append(swift)
+            case let .doConsume(ir):
+                irs.append(ir)
                 continue
             case .end:
                 return .dontConsume
@@ -80,7 +80,7 @@ struct GrammarPattern {
         }
 
         stream = s
-        let result = swift?(strings)
+        let result = gen?(irs)
         return .doConsume(result)
     }
 }

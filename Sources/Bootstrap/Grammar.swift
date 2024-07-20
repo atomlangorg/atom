@@ -75,15 +75,15 @@ enum Variable: GrammarMatch {
     static let patterns = [
         GrammarPattern(
             parts: [.literal(CharX.self)],
-            swift: { _ in "x" }
+            gen: { _ in VariableIr(name: "x") }
         ),
         GrammarPattern(
             parts: [.literal(CharY.self)],
-            swift: { _ in "y" }
+            gen: { _ in VariableIr(name: "y") }
         ),
         GrammarPattern(
             parts: [.literal(CharZ.self)],
-            swift: { _ in "z" }
+            gen: { _ in VariableIr(name: "z") }
         )
     ]
 }
@@ -92,12 +92,21 @@ enum CharThree: GrammarLiteral {
     static let literal: Character = "3"
 }
 
+enum Integer: GrammarMatch {
+    static let patterns = [
+        GrammarPattern(
+            parts: [.literal(CharThree.self)],
+            gen: { _ in IntegerIr(value: 3) }
+        )
+    ]
+}
+
 enum Assignment: GrammarMatch {
     static let patterns = [
         GrammarPattern(
-            parts: [.match(LetKeyword.self), .match(WhitespaceOneOrMore.self), .match(Variable.self), .match(WhitespaceZeroOrMore.self), .literal(CharEq.self), .match(WhitespaceZeroOrMore.self), .literal(CharThree.self)],
-            swift: { parts in
-                "let \(parts[2]!) = \(parts[6]!)"
+            parts: [.match(LetKeyword.self), .match(WhitespaceOneOrMore.self), .match(Variable.self), .match(WhitespaceZeroOrMore.self), .literal(CharEq.self), .match(WhitespaceZeroOrMore.self), .match(Integer.self)],
+            gen: { irs in
+                AssignmentIr(variable: irs[2]! as! VariableIr, integer: irs[6]! as! IntegerIr)
             }
         )
     ]
