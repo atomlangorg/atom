@@ -12,7 +12,7 @@ enum Whitespace: GrammarLiteral {
 enum WhitespaceZeroOrMore: GrammarMatch {
     typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: ()
         ),
@@ -25,7 +25,7 @@ enum WhitespaceZeroOrMore: GrammarMatch {
 enum WhitespaceOneOrMore: GrammarMatch {
     typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (Whitespace.self)
         ),
@@ -54,7 +54,7 @@ enum CharT: GrammarLiteral {
 enum LetKeyword: GrammarMatch {
     typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (CharL.self, CharE.self, CharT.self)
         )
@@ -80,7 +80,7 @@ enum CharZ: GrammarLiteral {
 enum Variable: GrammarMatch {
     typealias Output = VariableIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (CharX.self),
             gen: { _ in VariableIr(name: "x") }
@@ -103,7 +103,7 @@ enum CharThree: GrammarLiteral {
 enum Integer: GrammarMatch {
     typealias Output = IntegerIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (CharThree.self),
             gen: { _ in IntegerIr(value: 3) }
@@ -118,7 +118,7 @@ enum CharPlus: GrammarLiteral {
 enum IntegerAddExpr: GrammarMatch {
     typealias Output = IntegerIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (Integer.self),
             gen: { integer in
@@ -137,7 +137,7 @@ enum IntegerAddExpr: GrammarMatch {
 enum IntegerAddPartialExpr: GrammarMatch {
     typealias Output = IntegerIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (WhitespaceZeroOrMore.self, CharPlus.self, WhitespaceZeroOrMore.self, IntegerAddExpr.self),
             gen: { _, _, _, expr in
@@ -150,7 +150,7 @@ enum IntegerAddPartialExpr: GrammarMatch {
 enum Assignment: GrammarMatch {
     typealias Output = AssignmentIr
 
-    static let patterns: [any GrammarPatternProtocol<_>] = [
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, CharEq.self, WhitespaceZeroOrMore.self, IntegerAddExpr.self),
             gen: { _, _, variable, _, _, _, integer in
