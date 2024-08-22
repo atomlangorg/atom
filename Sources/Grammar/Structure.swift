@@ -6,26 +6,28 @@
 //
 
 protocol Grammar {
-    static func consume(stream: inout Stream) -> StreamState
+    associatedtype Output: IR
+
+    static func consume(stream: inout Stream) -> StreamState<Output>
 }
 
-protocol GrammarLiteral: Grammar {
+protocol GrammarLiteral: Grammar where Output == NeverIr {
     static var literal: Character { get }
 }
 
 extension GrammarLiteral {
-    static func consume(stream: inout Stream) -> StreamState {
+    static func consume(stream: inout Stream) -> StreamState<Output> {
         stream.nextIf(char: literal)
     }
 }
 
 protocol GrammarMatch: Grammar {
-    static var patterns: [GrammarPattern] { get }
+    static var patterns: [any GrammarPatternProtocol<Output>] { get }
 }
 
 extension GrammarMatch {
-    static func consume(stream: inout Stream) -> StreamState {
-        var greediest: (index: String.Index, ir: (any IR)?)? = nil
+    static func consume(stream: inout Stream) -> StreamState<Output> {
+        var greediest: (index: String.Index, ir: Output)? = nil
 
         for pattern in patterns {
             var s = stream
@@ -54,25 +56,36 @@ extension GrammarMatch {
     }
 }
 
-struct GrammarPattern {
-    let parts: [GrammarPart]
-    let gen: (([(any IR)?]) -> any IR)?
+protocol GrammarPatternProtocol<Output> {
+    associatedtype Output: IR
 
-    init(parts: [GrammarPart], gen: (([(any IR)?]) -> any IR)? = nil) {
+    func consume(stream: inout Stream) -> StreamState<Output>
+}
+
+struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
+    let parts: (repeat (each Part).Type)
+    let gen: (repeat (each Part).Output) -> Output
+
+    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output) {
         self.parts = parts
         self.gen = gen
     }
 
-    func consume(stream: inout Stream) -> StreamState {
-        var s = stream
-        var irs = [(any IR)?]()
+    init(parts: (repeat (each Part).Type)) where Output == NeverIr {
+        self.parts = parts
+        gen = { (_: repeat (each Part).Output) in NeverIr() }
+    }
 
-        for part in parts {
+    func consume(stream: inout Stream) -> StreamState<Output> {
+        var s = stream
+        var irPack: any IrPackProtocol = IrPack< >(irs: ())
+
+        for part in repeat each parts {
             switch part.consume(stream: &s) {
             case .dontConsume:
                 return .dontConsume
             case let .doConsume(ir):
-                irs.append(ir)
+                irPack = irPack.appending(ir: ir)
                 continue
             case .end:
                 return .dontConsume
@@ -80,21 +93,24 @@ struct GrammarPattern {
         }
 
         stream = s
-        let result = gen?(irs)
+        let irPackConcrete = irPack as! IrPack<repeat (each Part).Output>
+        let result = gen(repeat each irPackConcrete.irs)
         return .doConsume(result)
     }
 }
 
-enum GrammarPart {
-    case literal(GrammarLiteral.Type)
-    case match(GrammarMatch.Type)
+fileprivate protocol IrPackProtocol {
+    func appending<T: IR>(ir: T) -> any IrPackProtocol
+}
 
-    func consume(stream: inout Stream) -> StreamState {
-        switch self {
-        case let .literal(literal):
-            literal.consume(stream: &stream)
-        case let .match(match):
-            match.consume(stream: &stream)
-        }
+fileprivate struct IrPack<each I: IR>: IrPackProtocol {
+    let irs: (repeat each I)
+
+    init(irs: (repeat each I)) {
+        self.irs = irs
+    }
+
+    func appending<T: IR>(ir: T) -> any IrPackProtocol {
+        IrPack<repeat each I, T>(irs: (repeat each irs, ir))
     }
 }

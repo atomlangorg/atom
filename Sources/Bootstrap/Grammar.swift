@@ -10,23 +10,27 @@ enum Whitespace: GrammarLiteral {
 }
 
 enum WhitespaceZeroOrMore: GrammarMatch {
-    static let patterns = [
+    typealias Output = NeverIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: []
+            parts: ()
         ),
         GrammarPattern(
-            parts: [.literal(Whitespace.self), .match(WhitespaceZeroOrMore.self)]
+            parts: (Whitespace.self, WhitespaceZeroOrMore.self)
         )
     ]
 }
 
 enum WhitespaceOneOrMore: GrammarMatch {
-    static let patterns = [
+    typealias Output = NeverIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.literal(Whitespace.self)]
+            parts: (Whitespace.self)
         ),
         GrammarPattern(
-            parts: [.literal(Whitespace.self), .match(WhitespaceOneOrMore.self)]
+            parts: (Whitespace.self, WhitespaceOneOrMore.self)
         )
     ]
 }
@@ -48,9 +52,11 @@ enum CharT: GrammarLiteral {
 }
 
 enum LetKeyword: GrammarMatch {
-    static let patterns = [
+    typealias Output = NeverIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.literal(CharL.self), .literal(CharE.self), .literal(CharT.self)]
+            parts: (CharL.self, CharE.self, CharT.self)
         )
     ]
 }
@@ -72,17 +78,19 @@ enum CharZ: GrammarLiteral {
 }
 
 enum Variable: GrammarMatch {
-    static let patterns = [
+    typealias Output = VariableIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.literal(CharX.self)],
+            parts: (CharX.self),
             gen: { _ in VariableIr(name: "x") }
         ),
         GrammarPattern(
-            parts: [.literal(CharY.self)],
+            parts: (CharY.self),
             gen: { _ in VariableIr(name: "y") }
         ),
         GrammarPattern(
-            parts: [.literal(CharZ.self)],
+            parts: (CharZ.self),
             gen: { _ in VariableIr(name: "z") }
         )
     ]
@@ -93,9 +101,11 @@ enum CharThree: GrammarLiteral {
 }
 
 enum Integer: GrammarMatch {
-    static let patterns = [
+    typealias Output = IntegerIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.literal(CharThree.self)],
+            parts: (CharThree.self),
             gen: { _ in IntegerIr(value: 3) }
         )
     ]
@@ -106,39 +116,45 @@ enum CharPlus: GrammarLiteral {
 }
 
 enum IntegerAddExpr: GrammarMatch {
-    static let patterns = [
+    typealias Output = IntegerIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.match(Integer.self)],
-            gen: { irs in
-                irs[0]!
+            parts: (Integer.self),
+            gen: { integer in
+                integer
             }
         ),
         GrammarPattern(
-            parts: [.match(Integer.self), .match(IntegerAddPartialExpr.self)],
-            gen: { irs in
-                IntegerIr(value: (irs[0]! as! IntegerIr).value + (irs[1]! as! IntegerIr).value)
+            parts: (Integer.self, IntegerAddPartialExpr.self),
+            gen: { (integer, expr) in
+                IntegerIr(value: integer.value + expr.value)
             }
         )
     ]
 }
 
 enum IntegerAddPartialExpr: GrammarMatch {
-    static let patterns = [
+    typealias Output = IntegerIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.match(WhitespaceZeroOrMore.self), .literal(CharPlus.self), .match(WhitespaceZeroOrMore.self), .match(IntegerAddExpr.self)],
-            gen: { irs in
-                irs[3]!
+            parts: (WhitespaceZeroOrMore.self, CharPlus.self, WhitespaceZeroOrMore.self, IntegerAddExpr.self),
+            gen: { _, _, _, expr in
+                expr
             }
         )
     ]
 }
 
 enum Assignment: GrammarMatch {
-    static let patterns = [
+    typealias Output = AssignmentIr
+
+    static let patterns: [any GrammarPatternProtocol<_>] = [
         GrammarPattern(
-            parts: [.match(LetKeyword.self), .match(WhitespaceOneOrMore.self), .match(Variable.self), .match(WhitespaceZeroOrMore.self), .literal(CharEq.self), .match(WhitespaceZeroOrMore.self), .match(IntegerAddExpr.self)],
-            gen: { irs in
-                AssignmentIr(variable: irs[2]! as! VariableIr, integer: irs[6]! as! IntegerIr)
+            parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, CharEq.self, WhitespaceZeroOrMore.self, IntegerAddExpr.self),
+            gen: { _, _, variable, _, _, _, integer in
+                AssignmentIr(variable: variable, integer: integer)
             }
         )
     ]

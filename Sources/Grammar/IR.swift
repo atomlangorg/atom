@@ -9,6 +9,12 @@ protocol IR {
     func swift() -> String
 }
 
+struct NeverIr: IR {
+    func swift() -> String {
+        fatalError()
+    }
+}
+
 struct VariableIr: IR {
     let name: String
 

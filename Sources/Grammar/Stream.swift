@@ -25,20 +25,20 @@ struct Stream {
         return string[index]
     }
 
-    mutating func nextIf(char: Character) -> StreamState {
+    mutating func nextIf(char: Character) -> StreamState<NeverIr> {
         guard let c = topChar() else {
             return .end
         }
         if char == c {
             string.formIndex(after: &index)
-            return .doConsume(nil)
+            return .doConsume(NeverIr())
         }
         return .dontConsume
     }
 }
 
-enum StreamState {
+enum StreamState<T: IR> {
     case dontConsume
-    case doConsume((any IR)?)
+    case doConsume(T)
     case end
 }
