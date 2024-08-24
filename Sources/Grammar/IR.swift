@@ -39,3 +39,11 @@ struct AssignmentIr: IR {
         "let \(variable.swift()) = \(integer.swift())"
     }
 }
+
+struct StatementIr: IR {
+    let ir: any IR
+
+    func swift() -> String {
+        ir.swift()
+    }
+}

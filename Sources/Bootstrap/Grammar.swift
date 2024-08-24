@@ -159,3 +159,16 @@ enum Assignment: GrammarMatch {
         )
     ]
 }
+
+enum Statement: GrammarMatch {
+    typealias Output = StatementIr
+
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
+        GrammarPattern(
+            parts: (Assignment.self),
+            gen: { assignment in
+                StatementIr(ir: assignment)
+            }
+        )
+    ]
+}
