@@ -47,3 +47,15 @@ struct StatementIr: IR {
         ir.swift()
     }
 }
+
+struct ProgramIr: IR {
+    let statements: [StatementIr]
+
+    func swift() -> String {
+        statements
+            .map { statement in
+                statement.swift()
+            }
+            .joined(separator: "\n")
+    }
+}

@@ -172,3 +172,34 @@ enum Statement: GrammarMatch {
         )
     ]
 }
+
+enum Program: GrammarMatch {
+    typealias Output = ProgramIr
+
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
+        GrammarPattern(
+            parts: (LineSeparator.self, Program.self),
+            gen: { _, program in
+                program
+            }
+        ),
+        GrammarPattern(
+            parts: (Statement.self, LineSeparator.self, Program.self),
+            gen: { statement, _, program in
+                ProgramIr(statements: CollectionOfOne(statement) + program.statements)
+            }
+        ),
+        GrammarPattern(
+            parts: (Statement.self),
+            gen: { statement in
+                ProgramIr(statements: [statement])
+            }
+        ),
+        GrammarPattern(
+            parts: (),
+            gen: {
+                ProgramIr(statements: [])
+            }
+        )
+    ]
+}
