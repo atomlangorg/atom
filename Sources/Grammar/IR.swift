@@ -31,7 +31,7 @@ struct IntegerIr: IR {
     }
 }
 
-struct AssignmentIr: IR {
+struct AssignmentIr: IR, StatementIrProtocol {
     let variable: VariableIr
     let integer: IntegerIr
 
@@ -41,7 +41,7 @@ struct AssignmentIr: IR {
 }
 
 struct StatementIr: IR {
-    let ir: any IR
+    let ir: any StatementIrProtocol
 
     func swift() -> String {
         ir.swift()
@@ -59,3 +59,5 @@ struct ProgramIr: IR {
             .joined(separator: "\n")
     }
 }
+
+protocol StatementIrProtocol: IR {}
