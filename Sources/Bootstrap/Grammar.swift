@@ -111,31 +111,51 @@ enum Integer: GrammarMatch {
     ]
 }
 
-enum CharPlus: GrammarLiteral {
-    static let literal: Character = "+"
-}
-
-enum IntegerAddExpr: GrammarMatch {
-    typealias Output = IntegerIr
+struct IntegerExpr: GrammarMatch {
+    typealias Output = IntegerExprIr
 
     static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
             parts: (Integer.self),
             gen: { integer in
-                integer
+                IntegerExprIr(expression: integer)
             }
         ),
         GrammarPattern(
-            parts: (Integer.self, IntegerAddPartialExpr.self),
-            gen: { (integer, expr) in
-                IntegerIr(value: integer.value + expr.value)
+            parts: (IntegerAddExpr.self),
+            gen: { expr in
+                IntegerExprIr(expression: expr.expression)
+            }
+        ),
+    ]
+}
+
+enum CharPlus: GrammarLiteral {
+    static let literal: Character = "+"
+}
+
+enum IntegerAddExpr: GrammarMatch {
+    typealias Output = IntegerExprIr
+
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
+        GrammarPattern(
+            parts: (IntegerExpr.self),
+            gen: { expr in
+                IntegerExprIr(expression: expr.expression)
+            }
+        ),
+        GrammarPattern(
+            parts: (IntegerExpr.self, IntegerAddPartialExpr.self),
+            gen: { lhs, rhs in
+                let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
+                return IntegerExprIr(expression: expr)
             }
         )
     ]
 }
 
 enum IntegerAddPartialExpr: GrammarMatch {
-    typealias Output = IntegerIr
+    typealias Output = IntegerExprIr
 
     static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
@@ -152,9 +172,9 @@ enum Assignment: GrammarMatch {
 
     static let patterns: [any GrammarPatternProtocol<Output>] = [
         GrammarPattern(
-            parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, CharEq.self, WhitespaceZeroOrMore.self, IntegerAddExpr.self),
-            gen: { _, _, variable, _, _, _, integer in
-                AssignmentIr(variable: variable, integer: integer)
+            parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, CharEq.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+            gen: { _, _, variable, _, _, _, expr in
+                AssignmentIr(variable: variable, expression: expr)
             }
         )
     ]
