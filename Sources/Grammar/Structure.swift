@@ -29,10 +29,10 @@ extension GrammarMatch {
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var greediest: (index: String.Index, ir: Output)? = nil
 
-        for pattern in patterns {
+        for (index, pattern) in patterns.enumerated() {
             var s = stream
 
-            switch pattern.consumeWithContext(stream: &s, context: context) {
+            switch pattern.consumeWithContext(stream: &s, context: context, index: index) {
             case .dontConsume:
                 continue
             case let .doConsume(ir):
@@ -63,8 +63,10 @@ protocol GrammarPatternProtocol<Output> {
 }
 
 extension GrammarPatternProtocol {
-    fileprivate func consumeWithContext(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
-        switch context.addingToHistory(type: Self.self) {
+    fileprivate func consumeWithContext(stream: inout Stream, context: GrammarContext, index: Int) -> StreamState<Output> {
+        let snapshot = HistorySnapshot(type: Self.self, index: index)
+
+        switch context.addingToHistory(snapshot) {
         case .cycle:
             return .dontConsume
         case let .changed(newContext):
@@ -127,28 +129,40 @@ fileprivate struct IrPack<each I: IR>: IrPackProtocol {
 }
 
 struct GrammarContext {
-    typealias Snapshot = any GrammarPatternProtocol.Type
-
-    private var history: [Snapshot]
+    private var history: [HistorySnapshot]
 
     init() {
         history = []
     }
 
-    private init(history: [Snapshot]) {
+    private init(history: [HistorySnapshot]) {
         self.history = history
     }
 
-    fileprivate func addingToHistory(type: Snapshot) -> HistoryResult {
-        for historyType in history.reversed() {
-            if historyType == type {
+    fileprivate func addingToHistory(_ snapshot: HistorySnapshot) -> HistoryResult {
+        for historySnapshot in history.reversed() {
+            if historySnapshot == snapshot {
                 return .cycle
             }
         }
 
         var history = history
-        history.append(type)
+        history.append(snapshot)
         return .changed(GrammarContext(history: history))
+    }
+}
+
+fileprivate struct HistorySnapshot: Equatable {
+    private let type: any GrammarPatternProtocol.Type
+    private let index: Int
+
+    init(type: any GrammarPatternProtocol.Type, index: Int) {
+        self.type = type
+        self.index = index
+    }
+
+    static func == (lhs: HistorySnapshot, rhs: HistorySnapshot) -> Bool {
+        lhs.type == rhs.type && lhs.index == rhs.index
     }
 }
 
