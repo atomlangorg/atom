@@ -8,7 +8,7 @@
 protocol Grammar {
     associatedtype Output: IR
 
-    static func consume(stream: inout Stream) -> StreamState<Output>
+    static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output>
 }
 
 protocol GrammarLiteral: Grammar where Output == NeverIr {
@@ -16,7 +16,7 @@ protocol GrammarLiteral: Grammar where Output == NeverIr {
 }
 
 extension GrammarLiteral {
-    static func consume(stream: inout Stream) -> StreamState<Output> {
+    static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         stream.nextIf(char: literal)
     }
 }
@@ -26,13 +26,13 @@ protocol GrammarMatch: Grammar {
 }
 
 extension GrammarMatch {
-    static func consume(stream: inout Stream) -> StreamState<Output> {
+    static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var greediest: (index: String.Index, ir: Output)? = nil
 
         for pattern in patterns {
             var s = stream
 
-            switch pattern.consume(stream: &s) {
+            switch pattern.consumeWithContext(stream: &s, context: context) {
             case .dontConsume:
                 continue
             case let .doConsume(ir):
@@ -59,7 +59,18 @@ extension GrammarMatch {
 protocol GrammarPatternProtocol<Output> {
     associatedtype Output: IR
 
-    func consume(stream: inout Stream) -> StreamState<Output>
+    func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output>
+}
+
+extension GrammarPatternProtocol {
+    fileprivate func consumeWithContext(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
+        switch context.addingToHistory(type: Self.self) {
+        case .cycle:
+            return .dontConsume
+        case let .changed(newContext):
+            return consume(stream: &stream, context: newContext)
+        }
+    }
 }
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
@@ -76,12 +87,12 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         gen = { (_: repeat (each Part).Output) in NeverIr() }
     }
 
-    func consume(stream: inout Stream) -> StreamState<Output> {
+    func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var s = stream
         var irPack: any IrPackProtocol = IrPack< >(irs: ())
 
         for part in repeat each parts {
-            switch part.consume(stream: &s) {
+            switch part.consume(stream: &s, context: context) {
             case .dontConsume:
                 return .dontConsume
             case let .doConsume(ir):
@@ -113,4 +124,35 @@ fileprivate struct IrPack<each I: IR>: IrPackProtocol {
     func appending<T: IR>(ir: T) -> any IrPackProtocol {
         IrPack<repeat each I, T>(irs: (repeat each irs, ir))
     }
+}
+
+struct GrammarContext {
+    typealias Snapshot = any GrammarPatternProtocol.Type
+
+    private var history: [Snapshot]
+
+    init() {
+        history = []
+    }
+
+    private init(history: [Snapshot]) {
+        self.history = history
+    }
+
+    fileprivate func addingToHistory(type: Snapshot) -> HistoryResult {
+        for historyType in history.reversed() {
+            if historyType == type {
+                return .cycle
+            }
+        }
+
+        var history = history
+        history.append(type)
+        return .changed(GrammarContext(history: history))
+    }
+}
+
+fileprivate enum HistoryResult {
+    case cycle // Detected infinite cycle
+    case changed(GrammarContext) // Continue, with new context
 }
