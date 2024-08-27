@@ -28,11 +28,14 @@ protocol GrammarMatch: Grammar {
 extension GrammarMatch {
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var greediest: (index: String.Index, ir: Output)? = nil
+        var context = context
+        context.setGrammarType(Self.self)
 
         for (index, pattern) in patterns.enumerated() {
             var s = stream
+            context.setPatternIndex(index)
 
-            switch pattern.consumeWithContext(stream: &s, context: context, index: index) {
+            switch pattern.consume(stream: &s, context: context) {
             case .dontConsume:
                 continue
             case let .doConsume(ir):
@@ -62,19 +65,6 @@ protocol GrammarPatternProtocol<Output> {
     func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output>
 }
 
-extension GrammarPatternProtocol {
-    fileprivate func consumeWithContext(stream: inout Stream, context: GrammarContext, index: Int) -> StreamState<Output> {
-        let snapshot = HistorySnapshot(type: Self.self, index: index)
-
-        switch context.addingToHistory(snapshot) {
-        case .cycle:
-            return .dontConsume
-        case let .changed(newContext):
-            return consume(stream: &stream, context: newContext)
-        }
-    }
-}
-
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     let parts: (repeat (each Part).Type)
     let gen: (repeat (each Part).Output) -> Output
@@ -91,17 +81,28 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var s = stream
+        var context = context
         var irPack: any IrPackProtocol = IrPack< >(irs: ())
+        var index = 0
 
         for part in repeat each parts {
-            switch part.consume(stream: &s, context: context) {
-            case .dontConsume:
+            context.setPartIndex(index)
+
+            switch context.addingToHistory() {
+            case .cycle:
                 return .dontConsume
-            case let .doConsume(ir):
-                irPack = irPack.appending(ir: ir)
-                continue
-            case .end:
-                return .dontConsume
+            case let .changed(newContext):
+                switch part.consume(stream: &s, context: newContext) {
+                case .dontConsume:
+                    return .dontConsume
+                case let .doConsume(ir):
+                    context.resetHistory()
+                    irPack = irPack.appending(ir: ir)
+                    index += 1
+                    continue
+                case .end:
+                    return .dontConsume
+                }
             }
         }
 
@@ -130,16 +131,24 @@ fileprivate struct IrPack<each I: IR>: IrPackProtocol {
 
 struct GrammarContext {
     private var history: [HistorySnapshot]
+    private var grammarType: (any Grammar.Type)?
+    private var patternIndex: Int?
+    private var partIndex: Int?
 
     init() {
         history = []
+        grammarType = nil
+        patternIndex = nil
+        partIndex = nil
     }
 
     private init(history: [HistorySnapshot]) {
         self.history = history
     }
 
-    fileprivate func addingToHistory(_ snapshot: HistorySnapshot) -> HistoryResult {
+    fileprivate func addingToHistory() -> HistoryResult {
+        let snapshot = HistorySnapshot(grammarType: grammarType!, patternIndex: patternIndex!, partIndex: partIndex!)
+
         for historySnapshot in history.reversed() {
             if historySnapshot == snapshot {
                 return .cycle
@@ -150,19 +159,39 @@ struct GrammarContext {
         history.append(snapshot)
         return .changed(GrammarContext(history: history))
     }
+
+    fileprivate mutating func resetHistory() {
+        history.removeAll()
+    }
+
+    fileprivate mutating func setGrammarType(_ value: any Grammar.Type) {
+        grammarType = value
+    }
+
+    fileprivate mutating func setPatternIndex(_ value: Int) {
+        patternIndex = value
+    }
+
+    fileprivate mutating func setPartIndex(_ value: Int) {
+        partIndex = value
+    }
 }
 
 fileprivate struct HistorySnapshot: Equatable {
-    private let type: any GrammarPatternProtocol.Type
-    private let index: Int
+    private let grammarType: any Grammar.Type
+    private let patternIndex: Int
+    private let partIndex: Int
 
-    init(type: any GrammarPatternProtocol.Type, index: Int) {
-        self.type = type
-        self.index = index
+    init(grammarType: any Grammar.Type, patternIndex: Int, partIndex: Int) {
+        self.grammarType = grammarType
+        self.patternIndex = patternIndex
+        self.partIndex = partIndex
     }
 
     static func == (lhs: HistorySnapshot, rhs: HistorySnapshot) -> Bool {
-        lhs.type == rhs.type && lhs.index == rhs.index
+        lhs.grammarType == rhs.grammarType &&
+        lhs.patternIndex == rhs.patternIndex &&
+        lhs.partIndex == rhs.partIndex
     }
 }
 
