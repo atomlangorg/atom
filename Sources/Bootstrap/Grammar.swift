@@ -111,6 +111,10 @@ enum Integer: GrammarMatch {
     ]
 }
 
+enum CharPlus: GrammarLiteral {
+    static let literal: Character = "+"
+}
+
 struct IntegerExpr: GrammarMatch {
     typealias Output = IntegerExprIr
 
@@ -129,10 +133,6 @@ struct IntegerExpr: GrammarMatch {
             }
         )
     ]
-}
-
-enum CharPlus: GrammarLiteral {
-    static let literal: Character = "+"
 }
 
 enum Assignment: GrammarMatch {
