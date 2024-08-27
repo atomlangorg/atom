@@ -40,12 +40,11 @@ extension GrammarMatch {
                 continue
             case let .doConsume(ir):
                 if let g = greediest {
-                    if s.index > g.index {
-                        greediest = (index: s.index, ir: ir)
+                    if s.index <= g.index {
+                        continue
                     }
-                } else {
-                    greediest = (index: s.index, ir: ir)
                 }
+                greediest = (index: s.index, ir: ir)
             case .end:
                 return .dontConsume
             }
