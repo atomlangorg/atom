@@ -29,11 +29,11 @@ struct Stream {
         guard let c = topChar() else {
             return .end
         }
-        if char == c {
-            string.formIndex(after: &index)
-            return .doConsume(NeverIr())
+        if char != c {
+            return .dontConsume
         }
-        return .dontConsume
+        string.formIndex(after: &index)
+        return .doConsume(NeverIr())
     }
 }
 
