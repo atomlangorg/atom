@@ -115,6 +115,10 @@ enum CharPlus: GrammarLiteral {
     static let literal: Character = "+"
 }
 
+enum CharMultiply: GrammarLiteral {
+    static let literal: Character = "*"
+}
+
 struct IntegerExpr: GrammarMatch {
     typealias Output = IntegerExprIr
 
@@ -129,6 +133,13 @@ struct IntegerExpr: GrammarMatch {
             parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharPlus.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
             gen: { lhs, _, _, _, rhs in
                 let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
+                return IntegerExprIr(expression: expr)
+            }
+        ),
+        GrammarPattern(
+            parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharMultiply.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+            gen: { lhs, _, _, _, rhs in
+                let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                 return IntegerExprIr(expression: expr)
             }
         )

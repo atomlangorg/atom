@@ -5,7 +5,7 @@ struct Atom: ParsableCommand {
     func run() {
         print("atom")
 
-        let input = "let x = 3 + 3 + 3"
+        let input = "let x = 3 * 3 + 3"
         var stream = Stream(string: input)
         let result = Program.consume(stream: &stream, context: GrammarContext())
         print("result =", result)
