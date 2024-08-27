@@ -122,31 +122,8 @@ struct IntegerExpr: GrammarMatch {
             }
         ),
         GrammarPattern(
-            parts: (IntegerAddExpr.self),
-            gen: { expr in
-                IntegerExprIr(expression: expr.expression)
-            }
-        ),
-    ]
-}
-
-enum CharPlus: GrammarLiteral {
-    static let literal: Character = "+"
-}
-
-enum IntegerAddExpr: GrammarMatch {
-    typealias Output = IntegerExprIr
-
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (IntegerExpr.self),
-            gen: { expr in
-                IntegerExprIr(expression: expr.expression)
-            }
-        ),
-        GrammarPattern(
-            parts: (IntegerExpr.self, IntegerAddPartialExpr.self),
-            gen: { lhs, rhs in
+            parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharPlus.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+            gen: { lhs, _, _, _, rhs in
                 let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                 return IntegerExprIr(expression: expr)
             }
@@ -154,17 +131,8 @@ enum IntegerAddExpr: GrammarMatch {
     ]
 }
 
-enum IntegerAddPartialExpr: GrammarMatch {
-    typealias Output = IntegerExprIr
-
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (WhitespaceZeroOrMore.self, CharPlus.self, WhitespaceZeroOrMore.self, IntegerAddExpr.self),
-            gen: { _, _, _, expr in
-                expr
-            }
-        )
-    ]
+enum CharPlus: GrammarLiteral {
+    static let literal: Character = "+"
 }
 
 enum Assignment: GrammarMatch {
