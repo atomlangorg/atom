@@ -134,14 +134,16 @@ struct IntegerExpr: GrammarMatch {
             gen: { lhs, _, _, _, rhs in
                 let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                 return IntegerExprIr(expression: expr)
-            }
+            },
+            precedence: .addition
         ),
         GrammarPattern(
             parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharMultiply.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
             gen: { lhs, _, _, _, rhs in
                 let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                 return IntegerExprIr(expression: expr)
-            }
+            },
+            precedence: .multiplication
         )
     ]
 }

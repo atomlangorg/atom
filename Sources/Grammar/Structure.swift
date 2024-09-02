@@ -67,20 +67,26 @@ protocol GrammarPatternProtocol<Output> {
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     let parts: (repeat (each Part).Type)
     let gen: (repeat (each Part).Output) -> Output
+    let precedence: Precedence
 
-    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output) {
+    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output, precedence: Precedence = .none) {
         self.parts = parts
         self.gen = gen
+        self.precedence = precedence
     }
 
-    init(parts: (repeat (each Part).Type)) where Output == NeverIr {
+    init(parts: (repeat (each Part).Type), precedence: Precedence = .none) where Output == NeverIr {
         self.parts = parts
         gen = { (_: repeat (each Part).Output) in NeverIr() }
+        self.precedence = precedence
     }
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var s = stream
         var context = context
+        guard context.acceptPrecedence(precedence) else {
+            return .dontConsume
+        }
         var irPack: any IrPackProtocol = IrPack< >(irs: ())
         var index = 0
 
@@ -133,12 +139,14 @@ struct GrammarContext {
     private var grammarType: (any Grammar.Type)?
     private var patternIndex: Int?
     private var partIndex: Int?
+    private var minPrecedence: Precedence
 
     init() {
         history = []
         grammarType = nil
         patternIndex = nil
         partIndex = nil
+        minPrecedence = .lowest
     }
 
     fileprivate func addingToHistory() -> HistoryResult {
@@ -169,6 +177,20 @@ struct GrammarContext {
 
     fileprivate mutating func setPartIndex(_ value: Int) {
         partIndex = value
+    }
+
+    fileprivate mutating func acceptPrecedence(_ value: Precedence) -> Bool {
+        if case .none = value {
+            // No priority so just accept
+            return true
+        }
+
+        // Accept and update if new is higher than current
+        let isAccepted = value >= minPrecedence
+        if isAccepted {
+            minPrecedence = value
+        }
+        return isAccepted
     }
 }
 
