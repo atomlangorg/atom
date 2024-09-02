@@ -141,10 +141,6 @@ struct GrammarContext {
         partIndex = nil
     }
 
-    private init(history: [HistorySnapshot]) {
-        self.history = history
-    }
-
     fileprivate func addingToHistory() -> HistoryResult {
         let snapshot = HistorySnapshot(grammarType: grammarType!, patternIndex: patternIndex!, partIndex: partIndex!)
 
@@ -154,9 +150,9 @@ struct GrammarContext {
             }
         }
 
-        var history = history
-        history.append(snapshot)
-        return .changed(GrammarContext(history: history))
+        var new = self
+        new.history.append(snapshot)
+        return .changed(new)
     }
 
     fileprivate mutating func resetHistory() {
