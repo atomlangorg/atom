@@ -46,7 +46,7 @@ extension GrammarMatch {
                 }
                 greediest = (index: s.index, ir: ir)
             case .end:
-                return .dontConsume
+                continue
             }
         }
 
@@ -107,7 +107,7 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
                     index += 1
                     continue
                 case .end:
-                    return .dontConsume
+                    return .end
                 }
             }
         }
