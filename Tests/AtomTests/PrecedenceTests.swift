@@ -12,9 +12,9 @@ import Testing
 struct PrecedenceTests {
     @Test("Check precedence of three additions")
     func threeAdditions() {
-        let input = "let x = 3 + 3 + 3 + 3"
+        let input = "3 + 3 + 3 + 3"
         var stream = Stream(string: input)
-        let result = Program.consume(stream: &stream, context: GrammarContext())
+        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -23,6 +23,6 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(ir.swift() == "let x = (((3 + 3) + 3) + 3)")
+        #expect(ir.swift() == "(((3 + 3) + 3) + 3)")
     }
 }
