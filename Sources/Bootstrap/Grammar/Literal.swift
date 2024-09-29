@@ -14,7 +14,7 @@ enum Literal {
         static let literal: Character = "\r\n"
     }
 
-    enum Whitespace: GrammarLiteral {
+    enum Space: GrammarLiteral {
         static let literal: Character = " "
     }
 

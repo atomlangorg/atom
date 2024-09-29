@@ -14,7 +14,7 @@ enum Match {
                 parts: ()
             ),
             GrammarPattern(
-                parts: (Literal.Whitespace.self, WhitespaceZeroOrMore.self)
+                parts: (Literal.Space.self, WhitespaceZeroOrMore.self)
             )
         ]
     }
@@ -24,10 +24,10 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (Literal.Whitespace.self)
+                parts: (Literal.Space.self)
             ),
             GrammarPattern(
-                parts: (Literal.Whitespace.self, WhitespaceOneOrMore.self)
+                parts: (Literal.Space.self, WhitespaceOneOrMore.self)
             )
         ]
     }
