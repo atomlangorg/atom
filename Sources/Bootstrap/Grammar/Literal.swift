@@ -18,43 +18,43 @@ enum Literal {
         static let literal: Character = " "
     }
 
-    enum CharMultiply: GrammarLiteral {
+    enum Asterisk: GrammarLiteral {
         static let literal: Character = "*"
     }
 
-    enum CharPlus: GrammarLiteral {
+    enum Plus: GrammarLiteral {
         static let literal: Character = "+"
     }
 
-    enum CharThree: GrammarLiteral {
+    enum Three: GrammarLiteral {
         static let literal: Character = "3"
     }
 
-    enum CharEq: GrammarLiteral {
+    enum Equals: GrammarLiteral {
         static let literal: Character = "="
     }
 
-    enum CharE: GrammarLiteral {
+    enum LowercaseE: GrammarLiteral {
         static let literal: Character = "e"
     }
 
-    enum CharL: GrammarLiteral {
+    enum LowercaseL: GrammarLiteral {
         static let literal: Character = "l"
     }
 
-    enum CharT: GrammarLiteral {
+    enum LowercaseT: GrammarLiteral {
         static let literal: Character = "t"
     }
 
-    enum CharX: GrammarLiteral {
+    enum LowercaseX: GrammarLiteral {
         static let literal: Character = "x"
     }
 
-    enum CharY: GrammarLiteral {
+    enum LowercaseY: GrammarLiteral {
         static let literal: Character = "y"
     }
 
-    enum CharZ: GrammarLiteral {
+    enum LowercaseZ: GrammarLiteral {
         static let literal: Character = "z"
     }
 }
