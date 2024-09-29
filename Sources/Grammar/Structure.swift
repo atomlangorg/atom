@@ -213,6 +213,12 @@ fileprivate struct HistorySnapshot: Equatable {
     }
 }
 
+extension HistorySnapshot: CustomDebugStringConvertible {
+    var debugDescription: String {
+        "\(String(describing: grammarType))[\(patternIndex), \(partIndex)]"
+    }
+}
+
 fileprivate enum HistoryResult {
     case cycle // Detected infinite cycle
     case changed(GrammarContext) // Continue, with new context
