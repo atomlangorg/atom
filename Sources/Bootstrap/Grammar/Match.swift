@@ -5,167 +5,169 @@
 //  Created by George Elsham on 29/09/2024.
 //
 
-enum WhitespaceZeroOrMore: GrammarMatch {
-    typealias Output = NeverIr
+enum Match {
+    enum WhitespaceZeroOrMore: GrammarMatch {
+        typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: ()
-        ),
-        GrammarPattern(
-            parts: (Whitespace.self, WhitespaceZeroOrMore.self)
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: ()
+            ),
+            GrammarPattern(
+                parts: (Literal.Whitespace.self, WhitespaceZeroOrMore.self)
+            )
+        ]
+    }
 
-enum WhitespaceOneOrMore: GrammarMatch {
-    typealias Output = NeverIr
+    enum WhitespaceOneOrMore: GrammarMatch {
+        typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (Whitespace.self)
-        ),
-        GrammarPattern(
-            parts: (Whitespace.self, WhitespaceOneOrMore.self)
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.Whitespace.self)
+            ),
+            GrammarPattern(
+                parts: (Literal.Whitespace.self, WhitespaceOneOrMore.self)
+            )
+        ]
+    }
 
-enum LineSeparator: GrammarMatch {
-    typealias Output = NeverIr
+    enum LineSeparator: GrammarMatch {
+        typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (LineFeed.self)
-        ),
-        GrammarPattern(
-            parts: (CarriageReturnLineFeed.self)
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LineFeed.self)
+            ),
+            GrammarPattern(
+                parts: (Literal.CarriageReturnLineFeed.self)
+            )
+        ]
+    }
 
-enum LetKeyword: GrammarMatch {
-    typealias Output = NeverIr
+    enum LetKeyword: GrammarMatch {
+        typealias Output = NeverIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (CharL.self, CharE.self, CharT.self)
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.CharL.self, Literal.CharE.self, Literal.CharT.self)
+            )
+        ]
+    }
 
-enum Variable: GrammarMatch {
-    typealias Output = VariableIr
+    enum Variable: GrammarMatch {
+        typealias Output = VariableIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (CharX.self),
-            gen: { _ in VariableIr(name: "x") }
-        ),
-        GrammarPattern(
-            parts: (CharY.self),
-            gen: { _ in VariableIr(name: "y") }
-        ),
-        GrammarPattern(
-            parts: (CharZ.self),
-            gen: { _ in VariableIr(name: "z") }
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.CharX.self),
+                gen: { _ in VariableIr(name: "x") }
+            ),
+            GrammarPattern(
+                parts: (Literal.CharY.self),
+                gen: { _ in VariableIr(name: "y") }
+            ),
+            GrammarPattern(
+                parts: (Literal.CharZ.self),
+                gen: { _ in VariableIr(name: "z") }
+            )
+        ]
+    }
 
-enum Integer: GrammarMatch {
-    typealias Output = IntegerIr
+    enum Integer: GrammarMatch {
+        typealias Output = IntegerIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (CharThree.self),
-            gen: { _ in IntegerIr(value: 3) }
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.CharThree.self),
+                gen: { _ in IntegerIr(value: 3) }
+            )
+        ]
+    }
 
-struct IntegerExpr: GrammarMatch {
-    typealias Output = IntegerExprIr
+    struct IntegerExpr: GrammarMatch {
+        typealias Output = IntegerExprIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (Integer.self),
-            gen: { integer in
-                IntegerExprIr(expression: integer)
-            }
-        ),
-        GrammarPattern(
-            parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharPlus.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
-            gen: { lhs, _, _, _, rhs in
-                let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
-                return IntegerExprIr(expression: expr)
-            },
-            precedence: Precedence(priority: .addition, associativity: .left)
-        ),
-        GrammarPattern(
-            parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharMultiply.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
-            gen: { lhs, _, _, _, rhs in
-                let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
-                return IntegerExprIr(expression: expr)
-            },
-            precedence: Precedence(priority: .multiplication, associativity: .left)
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Integer.self),
+                gen: { integer in
+                    IntegerExprIr(expression: integer)
+                }
+            ),
+            GrammarPattern(
+                parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, Literal.CharPlus.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+                gen: { lhs, _, _, _, rhs in
+                    let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
+                    return IntegerExprIr(expression: expr)
+                },
+                precedence: Precedence(priority: .addition, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, Literal.CharMultiply.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+                gen: { lhs, _, _, _, rhs in
+                    let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
+                    return IntegerExprIr(expression: expr)
+                },
+                precedence: Precedence(priority: .multiplication, associativity: .left)
+            )
+        ]
+    }
 
-enum Assignment: GrammarMatch {
-    typealias Output = AssignmentIr
+    enum Assignment: GrammarMatch {
+        typealias Output = AssignmentIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, CharEq.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
-            gen: { _, _, variable, _, _, _, expr in
-                AssignmentIr(variable: variable, expression: expr)
-            }
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, Literal.CharEq.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+                gen: { _, _, variable, _, _, _, expr in
+                    AssignmentIr(variable: variable, expression: expr)
+                }
+            )
+        ]
+    }
 
-enum Statement: GrammarMatch {
-    typealias Output = StatementIr
+    enum Statement: GrammarMatch {
+        typealias Output = StatementIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (Assignment.self),
-            gen: { assignment in
-                StatementIr(ir: assignment)
-            }
-        )
-    ]
-}
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Assignment.self),
+                gen: { assignment in
+                    StatementIr(ir: assignment)
+                }
+            )
+        ]
+    }
 
-enum Program: GrammarMatch {
-    typealias Output = ProgramIr
+    enum Program: GrammarMatch {
+        typealias Output = ProgramIr
 
-    static let patterns: [any GrammarPatternProtocol<Output>] = [
-        GrammarPattern(
-            parts: (LineSeparator.self, Program.self),
-            gen: { _, program in
-                program
-            }
-        ),
-        GrammarPattern(
-            parts: (Statement.self, LineSeparator.self, Program.self),
-            gen: { statement, _, program in
-                ProgramIr(statements: CollectionOfOne(statement) + program.statements)
-            }
-        ),
-        GrammarPattern(
-            parts: (Statement.self),
-            gen: { statement in
-                ProgramIr(statements: [statement])
-            }
-        ),
-        GrammarPattern(
-            parts: (),
-            gen: {
-                ProgramIr(statements: [])
-            }
-        )
-    ]
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (LineSeparator.self, Program.self),
+                gen: { _, program in
+                    program
+                }
+            ),
+            GrammarPattern(
+                parts: (Statement.self, LineSeparator.self, Program.self),
+                gen: { statement, _, program in
+                    ProgramIr(statements: CollectionOfOne(statement) + program.statements)
+                }
+            ),
+            GrammarPattern(
+                parts: (Statement.self),
+                gen: { statement in
+                    ProgramIr(statements: [statement])
+                }
+            ),
+            GrammarPattern(
+                parts: (),
+                gen: {
+                    ProgramIr(statements: [])
+                }
+            )
+        ]
+    }
 }

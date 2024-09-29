@@ -14,7 +14,7 @@ struct PrecedenceTests {
     func oneAddition() {
         let input = "3 + 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -30,7 +30,7 @@ struct PrecedenceTests {
     func twoAdditions() {
         let input = "3 + 3 + 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -46,7 +46,7 @@ struct PrecedenceTests {
     func threeAdditions() {
         let input = "3 + 3 + 3 + 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -62,7 +62,7 @@ struct PrecedenceTests {
     func oneMultiplication() {
         let input = "3 * 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -78,7 +78,7 @@ struct PrecedenceTests {
     func twoMultiplications() {
         let input = "3 * 3 * 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -94,7 +94,7 @@ struct PrecedenceTests {
     func threeMultiplications() {
         let input = "3 * 3 * 3 * 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -110,7 +110,7 @@ struct PrecedenceTests {
     func additionMultiplicationMix1() {
         let input = "3 + 3 * 3 + 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -126,7 +126,7 @@ struct PrecedenceTests {
     func additionMultiplicationMix2() {
         let input = "3 + 3 + 3 * 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -142,7 +142,7 @@ struct PrecedenceTests {
     func additionMultiplicationMix3() {
         let input = "3 * 3 + 3 + 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
@@ -158,7 +158,7 @@ struct PrecedenceTests {
     func additionMultiplicationMix4() {
         let input = "3 * 3 + 3 * 3"
         var stream = Stream(string: input)
-        let result = IntegerExpr.consume(stream: &stream, context: GrammarContext())
+        let result = Match.IntegerExpr.consume(stream: &stream, context: GrammarContext())
 
         #expect(stream.isEnd())
 
