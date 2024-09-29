@@ -135,7 +135,7 @@ struct IntegerExpr: GrammarMatch {
                 let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                 return IntegerExprIr(expression: expr)
             },
-            precedence: .addition
+            precedence: Precedence(priority: .addition, associativity: .left)
         ),
         GrammarPattern(
             parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, CharMultiply.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
@@ -143,7 +143,7 @@ struct IntegerExpr: GrammarMatch {
                 let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                 return IntegerExprIr(expression: expr)
             },
-            precedence: .multiplication
+            precedence: Precedence(priority: .multiplication, associativity: .left)
         )
     ]
 }

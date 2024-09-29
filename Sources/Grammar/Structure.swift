@@ -76,15 +76,15 @@ protocol GrammarPatternProtocol<Output> {
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     let parts: (repeat (each Part).Type)
     let gen: (repeat (each Part).Output) -> Output
-    let precedence: Precedence
+    let precedence: Precedence?
 
-    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output, precedence: Precedence = .none) {
+    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output, precedence: Precedence? = nil) {
         self.parts = parts
         self.gen = gen
         self.precedence = precedence
     }
 
-    init(parts: (repeat (each Part).Type), precedence: Precedence = .none) where Output == NeverIr {
+    init(parts: (repeat (each Part).Type), precedence: Precedence? = nil) where Output == NeverIr {
         self.parts = parts
         gen = { (_: repeat (each Part).Output) in NeverIr() }
         self.precedence = precedence
@@ -121,6 +121,7 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
                 case .dontConsume:
                     return .dontConsume
                 case let .doConsume(ir):
+                    context.resetHistory()
                     irPack = irPack.appending(ir: ir)
                 case .end:
                     return .end
@@ -171,7 +172,7 @@ struct GrammarContext {
         grammarType = nil
         patternIndex = nil
         partIndex = nil
-        minPrecedence = .lowest
+        minPrecedence = Precedence(priority: .lowest, associativity: .left)
         firstIr = nil
     }
 
@@ -209,14 +210,14 @@ struct GrammarContext {
         partIndex = value
     }
 
-    fileprivate mutating func acceptPrecedence(_ value: Precedence) -> Bool {
-        if case .none = value {
+    fileprivate mutating func acceptPrecedence(_ value: Precedence?) -> Bool {
+        guard let value else {
             // No priority so just accept
             return true
         }
 
-        // Accept and update if new is higher than current
-        let isAccepted = value >= minPrecedence
+        // Accept and update if new is higher than current or the priority is the same but now with right associativity
+        let isAccepted = value.priority > minPrecedence.priority || (value.priority == minPrecedence.priority && value.associativity == .right)
         if isAccepted {
             minPrecedence = value
         }

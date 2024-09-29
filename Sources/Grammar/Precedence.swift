@@ -5,9 +5,20 @@
 //  Created by George Elsham on 03/09/2024.
 //
 
-enum Precedence: Comparable {
-    case none
-    case lowest
-    case addition
-    case multiplication
+struct Precedence {
+    let priority: Priority
+    let associativity: Associativity
+}
+
+extension Precedence {
+    enum Priority: Comparable {
+        case lowest
+        case addition
+        case multiplication
+    }
+
+    enum Associativity {
+        case left
+        case right
+    }
 }
