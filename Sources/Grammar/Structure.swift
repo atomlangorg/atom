@@ -52,6 +52,15 @@ extension GrammarMatch {
 
         if let greediest {
             stream.index = greediest.index
+
+            // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
+            var context = context
+            context.firstIr = greediest.ir
+            let state = consume(stream: &stream, context: context)
+            if case .doConsume = state {
+                return state
+            }
+
             return .doConsume(greediest.ir)
         }
         return .dontConsume
@@ -92,6 +101,16 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         var index = 0
 
         for part in repeat each parts {
+            if let firstIr = context.firstIr {
+                context.firstIr = nil
+                guard context.isGrammarType(part) else {
+                    return .dontConsume
+                }
+                irPack = irPack.appending(ir: firstIr)
+                index += 1
+                continue
+            }
+
             context.setPartIndex(index)
 
             switch context.addingToHistory() {
@@ -102,14 +121,18 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
                 case .dontConsume:
                     return .dontConsume
                 case let .doConsume(ir):
-                    context.resetHistory()
                     irPack = irPack.appending(ir: ir)
-                    index += 1
-                    continue
                 case .end:
                     return .end
                 }
             }
+
+            index += 1
+        }
+
+        if context.firstIr != nil {
+            // No parts existed to consume but a first IR was given
+            return .dontConsume
         }
 
         stream = s
@@ -141,6 +164,7 @@ struct GrammarContext {
     private var patternIndex: Int?
     private var partIndex: Int?
     private var minPrecedence: Precedence
+    fileprivate var firstIr: (any IR)?
 
     init() {
         history = []
@@ -148,6 +172,7 @@ struct GrammarContext {
         patternIndex = nil
         partIndex = nil
         minPrecedence = .lowest
+        firstIr = nil
     }
 
     fileprivate func addingToHistory() -> HistoryResult {
@@ -170,6 +195,10 @@ struct GrammarContext {
 
     fileprivate mutating func setGrammarType(_ value: any Grammar.Type) {
         grammarType = value
+    }
+
+    fileprivate func isGrammarType(_ type: any Grammar.Type) -> Bool {
+        grammarType == type
     }
 
     fileprivate mutating func setPatternIndex(_ value: Int) {
