@@ -35,8 +35,25 @@ enum WhitespaceOneOrMore: GrammarMatch {
     ]
 }
 
-enum LineSeparator: GrammarLiteral {
+enum LineFeed: GrammarLiteral {
     static let literal: Character = "\n"
+}
+
+enum CarriageReturnLineFeed: GrammarLiteral {
+    static let literal: Character = "\r\n"
+}
+
+enum LineSeparator: GrammarMatch {
+    typealias Output = NeverIr
+
+    static let patterns: [any GrammarPatternProtocol<Output>] = [
+        GrammarPattern(
+            parts: (LineFeed.self)
+        ),
+        GrammarPattern(
+            parts: (CarriageReturnLineFeed.self)
+        )
+    ]
 }
 
 enum CharL: GrammarLiteral {
