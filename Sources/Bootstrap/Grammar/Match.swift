@@ -6,7 +6,7 @@
 //
 
 enum Match {
-    enum WhitespaceZeroOrMore: GrammarMatch {
+    enum SpaceZeroOrMore: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -14,12 +14,12 @@ enum Match {
                 parts: ()
             ),
             GrammarPattern(
-                parts: (Literal.Space.self, WhitespaceZeroOrMore.self)
+                parts: (Literal.Space.self, SpaceZeroOrMore.self)
             )
         ]
     }
 
-    enum WhitespaceOneOrMore: GrammarMatch {
+    enum SpaceOneOrMore: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -27,7 +27,7 @@ enum Match {
                 parts: (Literal.Space.self)
             ),
             GrammarPattern(
-                parts: (Literal.Space.self, WhitespaceOneOrMore.self)
+                parts: (Literal.Space.self, SpaceOneOrMore.self)
             )
         ]
     }
@@ -96,7 +96,7 @@ enum Match {
                 }
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, Literal.CharPlus.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.CharPlus.self, SpaceZeroOrMore.self, IntegerExpr.self),
                 gen: { lhs, _, _, _, rhs in
                     let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -104,7 +104,7 @@ enum Match {
                 precedence: Precedence(priority: .addition, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, WhitespaceZeroOrMore.self, Literal.CharMultiply.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.CharMultiply.self, SpaceZeroOrMore.self, IntegerExpr.self),
                 gen: { lhs, _, _, _, rhs in
                     let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -119,7 +119,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LetKeyword.self, WhitespaceOneOrMore.self, Variable.self, WhitespaceZeroOrMore.self, Literal.CharEq.self, WhitespaceZeroOrMore.self, IntegerExpr.self),
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Variable.self, SpaceZeroOrMore.self, Literal.CharEq.self, SpaceZeroOrMore.self, IntegerExpr.self),
                 gen: { _, _, variable, _, _, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }
