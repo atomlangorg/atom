@@ -413,6 +413,14 @@ enum Match {
                 precedence: Precedence(priority: .addition, associativity: .left)
             ),
             GrammarPattern(
+                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Minus.self, SpaceZeroOrMore.self, IntegerExpr.self),
+                gen: { lhs, _, _, _, rhs in
+                    let expr = IntegerSubtractExprIr(lhs: lhs, rhs: rhs)
+                    return IntegerExprIr(expression: expr)
+                },
+                precedence: Precedence(priority: .addition, associativity: .left)
+            ),
+            GrammarPattern(
                 parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Asterisk.self, SpaceZeroOrMore.self, IntegerExpr.self),
                 gen: { lhs, _, _, _, rhs in
                     let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
