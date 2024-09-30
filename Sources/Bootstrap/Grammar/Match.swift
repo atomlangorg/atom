@@ -92,13 +92,34 @@ enum Match {
         ]
     }
 
+    enum IntegerString: GrammarMatch {
+        typealias Output = RawStringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Digit.self),
+                gen: { digit in
+                    digit
+                }
+            ),
+            GrammarPattern(
+                parts: (Digit.self, IntegerString.self),
+                gen: { digit, rest in
+                    RawStringIr(string: digit.string + rest.string)
+                }
+            )
+        ]
+    }
+
     enum Integer: GrammarMatch {
         typealias Output = IntegerIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (Literal.Three.self),
-                gen: { _ in IntegerIr(value: 3) }
+                parts: (IntegerString.self),
+                gen: { integer in
+                    IntegerIr(value: Int(integer.string)!)
+                }
             )
         ]
     }
