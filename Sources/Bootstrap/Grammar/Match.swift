@@ -92,6 +92,17 @@ enum Match {
         ]
     }
 
+    enum Integer: GrammarMatch {
+        typealias Output = IntegerIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.Three.self),
+                gen: { _ in IntegerIr(value: 3) }
+            )
+        ]
+    }
+
     enum LetKeyword: GrammarMatch {
         typealias Output = NeverIr
 
@@ -117,17 +128,6 @@ enum Match {
             GrammarPattern(
                 parts: (Literal.LowercaseZ.self),
                 gen: { _ in VariableIr(name: "z") }
-            )
-        ]
-    }
-
-    enum Integer: GrammarMatch {
-        typealias Output = IntegerIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (Literal.Three.self),
-                gen: { _ in IntegerIr(value: 3) }
             )
         ]
     }
