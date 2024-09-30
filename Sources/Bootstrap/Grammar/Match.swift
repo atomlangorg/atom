@@ -6,6 +6,19 @@
 //
 
 enum Match {
+    enum LineSeparator: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LineFeed.self)
+            ),
+            GrammarPattern(
+                parts: (Literal.CarriageReturnLineFeed.self)
+            )
+        ]
+    }
+
     enum SpaceZeroOrMore: GrammarMatch {
         typealias Output = NeverIr
 
@@ -28,19 +41,6 @@ enum Match {
             ),
             GrammarPattern(
                 parts: (Literal.Space.self, SpaceOneOrMore.self)
-            )
-        ]
-    }
-
-    enum LineSeparator: GrammarMatch {
-        typealias Output = NeverIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (Literal.LineFeed.self)
-            ),
-            GrammarPattern(
-                parts: (Literal.CarriageReturnLineFeed.self)
             )
         ]
     }
