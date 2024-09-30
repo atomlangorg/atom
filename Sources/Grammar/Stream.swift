@@ -25,7 +25,7 @@ struct Stream {
         return string[index]
     }
 
-    mutating func nextIf(char: Character) -> StreamState<NeverIr> {
+    mutating func nextIf(char: Character) -> StreamState<RawStringIr> {
         guard let c = topChar() else {
             return .end
         }
@@ -33,7 +33,7 @@ struct Stream {
             return .dontConsume
         }
         string.formIndex(after: &index)
-        return .doConsume(NeverIr())
+        return .doConsume(RawStringIr(string: "\(c)"))
     }
 }
 

@@ -11,7 +11,7 @@ protocol Grammar {
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output>
 }
 
-protocol GrammarLiteral: Grammar where Output == NeverIr {
+protocol GrammarLiteral: Grammar where Output == RawStringIr {
     static var literal: Character { get }
 }
 

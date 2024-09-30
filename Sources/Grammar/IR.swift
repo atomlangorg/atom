@@ -15,6 +15,14 @@ struct NeverIr: IR {
     }
 }
 
+struct RawStringIr: IR {
+    let string: String
+
+    func swift() -> String {
+        string
+    }
+}
+
 struct VariableIr: IR {
     let name: String
 
