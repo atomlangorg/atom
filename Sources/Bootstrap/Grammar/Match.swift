@@ -45,6 +45,53 @@ enum Match {
         ]
     }
 
+    enum Digit: GrammarMatch {
+        typealias Output = RawStringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.Zero.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.One.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Two.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Three.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Four.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Five.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Six.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Seven.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Eight.self),
+                gen: { d in d }
+            ),
+            GrammarPattern(
+                parts: (Literal.Nine.self),
+                gen: { d in d }
+            )
+        ]
+    }
+
     enum LetKeyword: GrammarMatch {
         typealias Output = NeverIr
 
