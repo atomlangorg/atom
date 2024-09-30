@@ -361,16 +361,35 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (Literal.LowercaseX.self),
-                gen: { _ in VariableIr(name: "x") }
+                parts: (VariableChar.self),
+                gen: { c in
+                    VariableIr(name: c.string)
+                }
             ),
             GrammarPattern(
-                parts: (Literal.LowercaseY.self),
-                gen: { _ in VariableIr(name: "y") }
+                parts: (VariableChar.self, Variable.self),
+                gen: { c, rest in
+                    VariableIr(name: c.string + rest.name)
+                }
+            )
+        ]
+    }
+
+    enum VariableChar: GrammarMatch {
+        typealias Output = RawStringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (LowercaseLetter.self),
+                gen: { c in c }
             ),
             GrammarPattern(
-                parts: (Literal.LowercaseZ.self),
-                gen: { _ in VariableIr(name: "z") }
+                parts: (UppercaseLetter.self),
+                gen: { c in c }
+            ),
+            GrammarPattern(
+                parts: (Literal.Underscore.self),
+                gen: { c in c }
             )
         ]
     }
