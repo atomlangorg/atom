@@ -56,6 +56,15 @@ struct IntegerAddExprIr: IR, IntegerExprIrProtocol {
     }
 }
 
+struct IntegerSubtractExprIr: IR, IntegerExprIrProtocol {
+    let lhs: IntegerExprIr
+    let rhs: IntegerExprIr
+
+    func swift() -> String {
+        "(\(lhs.swift()) - \(rhs.swift()))"
+    }
+}
+
 struct IntegerMultiplyExprIr: IR, IntegerExprIrProtocol {
     let lhs: IntegerExprIr
     let rhs: IntegerExprIr
