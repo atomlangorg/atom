@@ -70,6 +70,110 @@ enum Literal {
         static let literal: Character = "="
     }
 
+    enum UppercaseA: GrammarLiteral {
+        static let literal: Character = "A"
+    }
+
+    enum UppercaseB: GrammarLiteral {
+        static let literal: Character = "B"
+    }
+
+    enum UppercaseC: GrammarLiteral {
+        static let literal: Character = "C"
+    }
+
+    enum UppercaseD: GrammarLiteral {
+        static let literal: Character = "D"
+    }
+
+    enum UppercaseE: GrammarLiteral {
+        static let literal: Character = "E"
+    }
+
+    enum UppercaseF: GrammarLiteral {
+        static let literal: Character = "F"
+    }
+
+    enum UppercaseG: GrammarLiteral {
+        static let literal: Character = "G"
+    }
+
+    enum UppercaseH: GrammarLiteral {
+        static let literal: Character = "H"
+    }
+
+    enum UppercaseI: GrammarLiteral {
+        static let literal: Character = "I"
+    }
+
+    enum UppercaseJ: GrammarLiteral {
+        static let literal: Character = "J"
+    }
+
+    enum UppercaseK: GrammarLiteral {
+        static let literal: Character = "K"
+    }
+
+    enum UppercaseL: GrammarLiteral {
+        static let literal: Character = "L"
+    }
+
+    enum UppercaseM: GrammarLiteral {
+        static let literal: Character = "M"
+    }
+
+    enum UppercaseN: GrammarLiteral {
+        static let literal: Character = "N"
+    }
+
+    enum UppercaseO: GrammarLiteral {
+        static let literal: Character = "O"
+    }
+
+    enum UppercaseP: GrammarLiteral {
+        static let literal: Character = "P"
+    }
+
+    enum UppercaseQ: GrammarLiteral {
+        static let literal: Character = "Q"
+    }
+
+    enum UppercaseR: GrammarLiteral {
+        static let literal: Character = "R"
+    }
+
+    enum UppercaseS: GrammarLiteral {
+        static let literal: Character = "S"
+    }
+
+    enum UppercaseT: GrammarLiteral {
+        static let literal: Character = "T"
+    }
+
+    enum UppercaseU: GrammarLiteral {
+        static let literal: Character = "U"
+    }
+
+    enum UppercaseV: GrammarLiteral {
+        static let literal: Character = "V"
+    }
+
+    enum UppercaseW: GrammarLiteral {
+        static let literal: Character = "W"
+    }
+
+    enum UppercaseX: GrammarLiteral {
+        static let literal: Character = "X"
+    }
+
+    enum UppercaseY: GrammarLiteral {
+        static let literal: Character = "Y"
+    }
+
+    enum UppercaseZ: GrammarLiteral {
+        static let literal: Character = "Z"
+    }
+
     enum LowercaseA: GrammarLiteral {
         static let literal: Character = "a"
     }
