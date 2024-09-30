@@ -26,6 +26,10 @@ enum Literal {
         static let literal: Character = "+"
     }
 
+    enum Minus: GrammarLiteral {
+        static let literal: Character = "-"
+    }
+
     enum Zero: GrammarLiteral {
         static let literal: Character = "0"
     }
