@@ -26,8 +26,44 @@ enum Literal {
         static let literal: Character = "+"
     }
 
+    enum Zero: GrammarLiteral {
+        static let literal: Character = "0"
+    }
+
+    enum One: GrammarLiteral {
+        static let literal: Character = "1"
+    }
+
+    enum Two: GrammarLiteral {
+        static let literal: Character = "2"
+    }
+
     enum Three: GrammarLiteral {
         static let literal: Character = "3"
+    }
+
+    enum Four: GrammarLiteral {
+        static let literal: Character = "4"
+    }
+
+    enum Five: GrammarLiteral {
+        static let literal: Character = "5"
+    }
+
+    enum Six: GrammarLiteral {
+        static let literal: Character = "6"
+    }
+
+    enum Seven: GrammarLiteral {
+        static let literal: Character = "7"
+    }
+
+    enum Eight: GrammarLiteral {
+        static let literal: Character = "8"
+    }
+
+    enum Nine: GrammarLiteral {
+        static let literal: Character = "9"
     }
 
     enum Equals: GrammarLiteral {
