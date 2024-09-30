@@ -174,6 +174,10 @@ enum Literal {
         static let literal: Character = "Z"
     }
 
+    enum Underscore: GrammarLiteral {
+        static let literal: Character = "_"
+    }
+
     enum LowercaseA: GrammarLiteral {
         static let literal: Character = "a"
     }
