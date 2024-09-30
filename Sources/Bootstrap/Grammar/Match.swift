@@ -427,6 +427,14 @@ enum Match {
                     return IntegerExprIr(expression: expr)
                 },
                 precedence: Precedence(priority: .multiplication, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Slash.self, SpaceZeroOrMore.self, IntegerExpr.self),
+                gen: { lhs, _, _, _, rhs in
+                    let expr = IntegerDivideExprIr(lhs: lhs, rhs: rhs)
+                    return IntegerExprIr(expression: expr)
+                },
+                precedence: Precedence(priority: .multiplication, associativity: .left)
             )
         ]
     }
