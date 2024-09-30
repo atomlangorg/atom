@@ -74,6 +74,15 @@ struct IntegerMultiplyExprIr: IR, IntegerExprIrProtocol {
     }
 }
 
+struct IntegerDivideExprIr: IR, IntegerExprIrProtocol {
+    let lhs: IntegerExprIr
+    let rhs: IntegerExprIr
+
+    func swift() -> String {
+        "(\(lhs.swift()) / \(rhs.swift()))"
+    }
+}
+
 struct AssignmentIr: IR, StatementIrProtocol {
     let variable: VariableIr
     let expression: IntegerExprIr
