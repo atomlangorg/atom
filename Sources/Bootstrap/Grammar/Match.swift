@@ -235,6 +235,117 @@ enum Match {
         ]
     }
 
+    enum LowercaseLetter: GrammarMatch {
+        typealias Output = RawStringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LowercaseA.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseB.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseC.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseD.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseE.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseF.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseG.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseH.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseI.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseJ.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseK.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseL.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseM.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseN.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseO.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseP.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseQ.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseR.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseS.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseT.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseU.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseV.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseW.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseX.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseY.self),
+                gen: { l in l }
+            ),
+            GrammarPattern(
+                parts: (Literal.LowercaseZ.self),
+                gen: { l in l }
+            )
+        ]
+    }
+
     enum LetKeyword: GrammarMatch {
         typealias Output = NeverIr
 
