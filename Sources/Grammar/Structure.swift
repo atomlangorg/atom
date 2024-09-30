@@ -101,6 +101,7 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         var index = 0
 
         for part in repeat each parts {
+            // Use up first IR if it exists, which can only be used iff the first part is recursive
             if let firstIr = context.firstIr {
                 context.firstIr = nil
                 guard context.isGrammarType(part) else {
