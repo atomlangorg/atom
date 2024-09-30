@@ -30,6 +30,10 @@ enum Literal {
         static let literal: Character = "-"
     }
 
+    enum Slash: GrammarLiteral {
+        static let literal: Character = "/"
+    }
+
     enum Zero: GrammarLiteral {
         static let literal: Character = "0"
     }
