@@ -405,9 +405,10 @@ enum Match {
                 }
             ),
             GrammarPattern(
-                parts: (Literal.Minus.self, Integer.self),
+                parts: (Literal.Minus.self, IntegerExpr.self),
                 gen: { _, integer in
-                    IntegerExprIr(expression: IntegerIr(value: -integer.value))
+                    let expr = IntegerNegateExprIr(expr: integer)
+                    return IntegerExprIr(expression: expr)
                 }
             ),
             GrammarPattern(
