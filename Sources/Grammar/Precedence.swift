@@ -15,6 +15,7 @@ extension Precedence {
         case lowest
         case add
         case multiply
+        case negate
     }
 
     enum Associativity {

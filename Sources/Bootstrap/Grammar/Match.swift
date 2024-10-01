@@ -409,7 +409,8 @@ enum Match {
                 gen: { _, integer in
                     let expr = IntegerNegateExprIr(expr: integer)
                     return IntegerExprIr(expression: expr)
-                }
+                },
+                precedence: Precedence(priority: .negate, associativity: .right)
             ),
             GrammarPattern(
                 parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Plus.self, SpaceZeroOrMore.self, IntegerExpr.self),
