@@ -417,7 +417,7 @@ enum Match {
                     let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
-                precedence: Precedence(priority: .addition, associativity: .left)
+                precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
                 parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Minus.self, SpaceZeroOrMore.self, IntegerExpr.self),
@@ -425,7 +425,7 @@ enum Match {
                     let expr = IntegerSubtractExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
-                precedence: Precedence(priority: .addition, associativity: .left)
+                precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
                 parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Asterisk.self, SpaceZeroOrMore.self, IntegerExpr.self),
@@ -433,7 +433,7 @@ enum Match {
                     let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
-                precedence: Precedence(priority: .multiplication, associativity: .left)
+                precedence: Precedence(priority: .multiply, associativity: .left)
             ),
             GrammarPattern(
                 parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Slash.self, SpaceZeroOrMore.self, IntegerExpr.self),
@@ -441,7 +441,7 @@ enum Match {
                     let expr = IntegerDivideExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
-                precedence: Precedence(priority: .multiplication, associativity: .left)
+                precedence: Precedence(priority: .multiply, associativity: .left)
             )
         ]
     }

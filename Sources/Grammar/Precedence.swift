@@ -13,8 +13,8 @@ struct Precedence {
 extension Precedence {
     enum Priority: Comparable {
         case lowest
-        case addition
-        case multiplication
+        case add
+        case multiply
     }
 
     enum Associativity {
