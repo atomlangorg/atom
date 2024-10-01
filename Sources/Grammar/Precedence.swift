@@ -11,6 +11,12 @@ struct Precedence {
 }
 
 extension Precedence {
+    static func `default`() -> Precedence {
+        Precedence(priority: .lowest, associativity: .left)
+    }
+}
+
+extension Precedence {
     enum Priority: Comparable {
         case lowest
         case add

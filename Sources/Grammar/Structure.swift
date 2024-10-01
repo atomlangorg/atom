@@ -173,7 +173,7 @@ struct GrammarContext {
         grammarType = nil
         patternIndex = nil
         partIndex = nil
-        minPrecedence = Precedence(priority: .lowest, associativity: .left)
+        minPrecedence = .default()
         firstIr = nil
     }
 
