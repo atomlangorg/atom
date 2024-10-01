@@ -18,6 +18,14 @@ enum Literal {
         static let literal: Character = " "
     }
 
+    enum OpenRoundBracket: GrammarLiteral {
+        static let literal: Character = "("
+    }
+
+    enum CloseRoundBracket: GrammarLiteral {
+        static let literal: Character = ")"
+    }
+
     enum Asterisk: GrammarLiteral {
         static let literal: Character = "*"
     }
