@@ -47,6 +47,14 @@ struct IntegerExprIr: IR {
     }
 }
 
+struct IntegerNegateExprIr: IR, IntegerExprIrProtocol {
+    let expr: IntegerExprIr
+
+    func swift() -> String {
+        "-\(expr.swift())"
+    }
+}
+
 struct IntegerAddExprIr: IR, IntegerExprIrProtocol {
     let lhs: IntegerExprIr
     let rhs: IntegerExprIr
