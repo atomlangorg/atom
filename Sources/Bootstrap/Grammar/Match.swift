@@ -405,6 +405,13 @@ enum Match {
                 }
             ),
             GrammarPattern(
+                parts: (Literal.OpenRoundBracket.self, SpaceZeroOrMore.self, IntegerExpr.self, SpaceZeroOrMore.self, Literal.CloseRoundBracket.self),
+                gen: { _, _, expr, _, _ in
+                    expr
+                },
+                options: [.resetPrecedence]
+            ),
+            GrammarPattern(
                 parts: (Literal.Minus.self, IntegerExpr.self),
                 gen: { _, integer in
                     let expr = IntegerNegateExprIr(expr: integer)

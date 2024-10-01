@@ -77,23 +77,30 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     let parts: (repeat (each Part).Type)
     let gen: (repeat (each Part).Output) -> Output
     let precedence: Precedence?
+    let options: Set<Option>
 
-    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output, precedence: Precedence? = nil) {
+    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output, precedence: Precedence? = nil, options: Set<Option> = []) {
         self.parts = parts
         self.gen = gen
         self.precedence = precedence
+        self.options = options
     }
 
-    init(parts: (repeat (each Part).Type), precedence: Precedence? = nil) where Output == NeverIr {
+    init(parts: (repeat (each Part).Type), precedence: Precedence? = nil, options: Set<Option> = []) where Output == NeverIr {
         self.parts = parts
         gen = { (_: repeat (each Part).Output) in NeverIr() }
         self.precedence = precedence
+        self.options = options
     }
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
         var context = context
         guard context.acceptPrecedence(precedence) else {
             return .dontConsume
+        }
+
+        if options.contains(.resetPrecedence) {
+            context.resetPrecedence()
         }
 
         var s = stream
@@ -223,6 +230,10 @@ struct GrammarContext {
             minPrecedence = value
         }
         return isAccepted
+    }
+
+    fileprivate mutating func resetPrecedence() {
+        minPrecedence = .default()
     }
 }
 
