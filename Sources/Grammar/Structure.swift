@@ -44,6 +44,7 @@ extension GrammarMatch {
             case let .doConsume(ir):
                 if let g = greediest {
                     if s.index <= g.stream.index {
+                        // Current stream did not consume more characters than the greediest so far
                         continue
                     }
                 }
