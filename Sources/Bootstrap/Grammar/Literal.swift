@@ -18,6 +18,10 @@ enum Literal {
         static let literal: Character = " "
     }
 
+    enum DoubleQuote: GrammarLiteral {
+        static let literal: Character = "\""
+    }
+
     enum OpenRoundBracket: GrammarLiteral {
         static let literal: Character = "("
     }
