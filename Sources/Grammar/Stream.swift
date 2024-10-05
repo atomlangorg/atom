@@ -8,10 +8,12 @@
 struct Stream {
     let string: String
     var index: String.Index
+    var wildcardIndexes: [String.Index]
 
     init(string: String) {
         self.string = string
         index = string.startIndex
+        wildcardIndexes = []
     }
 
     func isEnd() -> Bool {
@@ -40,8 +42,14 @@ struct Stream {
         guard let c = topChar() else {
             return .end
         }
+        wildcardIndexes.append(index)
         string.formIndex(after: &index)
         return .doConsume(RawStringIr(string: "\(c)"))
+    }
+
+    func firstWildcardIndex(from index: String.Index) -> String.Index? {
+        // TODO: implement as binary search to make faster
+        wildcardIndexes.first(where: { $0 >= index })
     }
 }
 
