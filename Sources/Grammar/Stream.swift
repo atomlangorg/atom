@@ -51,12 +51,7 @@ struct Stream {
         index > stream.index
     }
 
-    func isGreedierThan(stream: Stream, since commonAncestorStream: Stream) -> Bool {
-        guard isAheadOf(stream: stream) else {
-            // Current stream did not consume more characters than the greediest so far
-            return false
-        }
-
+    func isLessEagerWithWildcardsThan(stream: Stream, since commonAncestorStream: Stream) -> Bool {
         if let ci = firstWildcardIndex(from: commonAncestorStream.index) {
             if let gi = stream.firstWildcardIndex(from: commonAncestorStream.index) {
                 if ci < gi {
@@ -70,6 +65,15 @@ struct Stream {
         }
 
         return true
+    }
+
+    func isGreedierThan(stream: Stream, since commonAncestorStream: Stream) -> Bool {
+        guard isAheadOf(stream: stream) else {
+            // Current stream did not consume more characters than the greediest so far
+            return false
+        }
+
+        return isLessEagerWithWildcardsThan(stream: stream, since: commonAncestorStream)
     }
 
     private func firstWildcardIndex(from index: String.Index) -> String.Index? {
