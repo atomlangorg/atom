@@ -394,7 +394,7 @@ enum Match {
         ]
     }
 
-    struct IntegerExpr: GrammarMatch {
+    enum IntegerExpr: GrammarMatch {
         typealias Output = IntegerExprIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
