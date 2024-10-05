@@ -91,6 +91,14 @@ struct IntegerDivideExprIr: IR, IntegerExprIrProtocol {
     }
 }
 
+struct StringIr: IR {
+    let string: String
+
+    func swift() -> String {
+        "\"\(string)\""
+    }
+}
+
 struct AssignmentIr: IR, StatementIrProtocol {
     let variable: VariableIr
     let expression: IntegerExprIr
