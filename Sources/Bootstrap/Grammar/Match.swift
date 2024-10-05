@@ -463,6 +463,12 @@ enum Match {
                 gen: { char in
                     char
                 }
+            ),
+            GrammarPattern(
+                parts: (Literal.Backslash.self, Literal.LowercaseN.self),
+                gen: { _, _ in
+                    RawStringIr(string: "\n")
+                }
             )
         ]
     }
