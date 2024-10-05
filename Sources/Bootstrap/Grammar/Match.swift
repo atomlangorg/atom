@@ -499,12 +499,31 @@ enum Match {
         ]
     }
 
+    enum Expression: GrammarMatch {
+        typealias Output = ExpressionIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (IntegerExpr.self),
+                gen: { expr in
+                    ExpressionIr(expression: expr)
+                }
+            ),
+            GrammarPattern(
+                parts: (String.self),
+                gen: { expr in
+                    ExpressionIr(expression: expr)
+                }
+            )
+        ]
+    }
+
     enum Assignment: GrammarMatch {
         typealias Output = AssignmentIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LetKeyword.self, SpaceOneOrMore.self, Variable.self, SpaceZeroOrMore.self, Literal.Equals.self, SpaceZeroOrMore.self, IntegerExpr.self),
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Variable.self, SpaceZeroOrMore.self, Literal.Equals.self, SpaceZeroOrMore.self, Expression.self),
                 gen: { _, _, variable, _, _, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }

@@ -99,9 +99,17 @@ struct StringIr: IR, ExpressionIrProtocol {
     }
 }
 
+struct ExpressionIr: IR {
+    let expression: any ExpressionIrProtocol
+
+    func swift() -> String {
+        expression.swift()
+    }
+}
+
 struct AssignmentIr: IR, StatementIrProtocol {
     let variable: VariableIr
-    let expression: any ExpressionIrProtocol
+    let expression: ExpressionIr
 
     func swift() -> String {
         "let \(variable.swift()) = \(expression.swift())"
