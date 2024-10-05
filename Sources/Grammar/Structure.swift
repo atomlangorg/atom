@@ -43,21 +43,8 @@ extension GrammarMatch {
                 continue
             case let .doConsume(ir):
                 if let g = greediest {
-                    guard s.isAheadOf(stream: g.stream) else {
-                        // Current stream did not consume more characters than the greediest so far
+                    guard s.isGreedierThan(stream: g.stream, since: stream) else {
                         continue
-                    }
-
-                    if let si = s.firstWildcardIndex(from: stream.index) {
-                        if let gi = g.stream.firstWildcardIndex(from: stream.index) {
-                            if si < gi {
-                                // Current stream had a wildcard earlier than the greediest so far
-                                continue
-                            }
-                        } else {
-                            // Current stream had a wildcard but the greediest so far does not
-                            continue
-                        }
                     }
                 }
                 greediest = (stream: s, ir: ir)

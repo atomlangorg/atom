@@ -51,6 +51,27 @@ struct Stream {
         index > stream.index
     }
 
+    func isGreedierThan(stream: Stream, since commonAncestorStream: Stream) -> Bool {
+        guard isAheadOf(stream: stream) else {
+            // Current stream did not consume more characters than the greediest so far
+            return false
+        }
+
+        if let ci = firstWildcardIndex(from: commonAncestorStream.index) {
+            if let gi = stream.firstWildcardIndex(from: commonAncestorStream.index) {
+                if ci < gi {
+                    // Current stream had a wildcard earlier than the greediest so far
+                    return false
+                }
+            } else {
+                // Current stream had a wildcard but the greediest so far does not
+                return false
+            }
+        }
+
+        return true
+    }
+
     func firstWildcardIndex(from index: String.Index) -> String.Index? {
         // TODO: implement as binary search to make faster
         wildcardIndexes.first(where: { $0 >= index })
