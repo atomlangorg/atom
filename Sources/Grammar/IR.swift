@@ -39,7 +39,7 @@ struct IntegerIr: IR, IntegerExprIrProtocol {
     }
 }
 
-struct IntegerExprIr: IR {
+struct IntegerExprIr: IR, ExpressionIrProtocol {
     let expression: any IntegerExprIrProtocol
 
     func swift() -> String {
@@ -91,7 +91,7 @@ struct IntegerDivideExprIr: IR, IntegerExprIrProtocol {
     }
 }
 
-struct StringIr: IR {
+struct StringIr: IR, ExpressionIrProtocol {
     let string: String
 
     func swift() -> String {
@@ -101,7 +101,7 @@ struct StringIr: IR {
 
 struct AssignmentIr: IR, StatementIrProtocol {
     let variable: VariableIr
-    let expression: IntegerExprIr
+    let expression: any ExpressionIrProtocol
 
     func swift() -> String {
         "let \(variable.swift()) = \(expression.swift())"
@@ -129,5 +129,7 @@ struct ProgramIr: IR {
 }
 
 protocol IntegerExprIrProtocol: IR {}
+
+protocol ExpressionIrProtocol: IR {}
 
 protocol StatementIrProtocol: IR {}
