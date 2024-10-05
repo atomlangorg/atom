@@ -30,7 +30,7 @@ protocol GrammarMatch: Grammar {
 
 extension GrammarMatch {
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
-        var greediest: (index: String.Index, ir: Output)? = nil
+        var greediest: (stream: Stream, ir: Output)? = nil
         var context = context
         context.setGrammarType(Self.self)
 
@@ -43,18 +43,18 @@ extension GrammarMatch {
                 continue
             case let .doConsume(ir):
                 if let g = greediest {
-                    if s.index <= g.index {
+                    if s.index <= g.stream.index {
                         continue
                     }
                 }
-                greediest = (index: s.index, ir: ir)
+                greediest = (stream: s, ir: ir)
             case .end:
                 continue
             }
         }
 
         if let greediest {
-            stream.index = greediest.index
+            stream = greediest.stream
 
             // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
             var context = context
