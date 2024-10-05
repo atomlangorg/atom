@@ -6,9 +6,9 @@
 //
 
 struct Stream {
-    let string: String
-    var index: String.Index
-    var wildcardIndexes: [String.Index]
+    private let string: String
+    private var index: String.Index
+    private var wildcardIndexes: [String.Index]
 
     init(string: String) {
         self.string = string
