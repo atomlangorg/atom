@@ -72,7 +72,7 @@ struct Stream {
         return true
     }
 
-    func firstWildcardIndex(from index: String.Index) -> String.Index? {
+    private func firstWildcardIndex(from index: String.Index) -> String.Index? {
         // TODO: implement as binary search to make faster
         wildcardIndexes.first(where: { $0 >= index })
     }
