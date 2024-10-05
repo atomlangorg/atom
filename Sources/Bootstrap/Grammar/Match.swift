@@ -454,6 +454,51 @@ enum Match {
         ]
     }
 
+    enum StringChar: GrammarMatch {
+        typealias Output = RawStringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.Wildcard.self),
+                gen: { char in
+                    char
+                }
+            )
+        ]
+    }
+
+    enum StringAfterStart: GrammarMatch {
+        typealias Output = RawStringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.DoubleQuote.self),
+                gen: { _ in
+                    RawStringIr(string: "")
+                }
+            ),
+            GrammarPattern(
+                parts: (StringChar.self, StringAfterStart.self),
+                gen: { char, rest in
+                    RawStringIr(string: char.string + rest.string)
+                }
+            )
+        ]
+    }
+
+    enum String: GrammarMatch {
+        typealias Output = StringIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.DoubleQuote.self, StringAfterStart.self),
+                gen: { _, string in
+                    StringIr(string: string.string)
+                }
+            )
+        ]
+    }
+
     enum Assignment: GrammarMatch {
         typealias Output = AssignmentIr
 
