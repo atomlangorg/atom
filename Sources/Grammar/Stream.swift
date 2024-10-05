@@ -35,6 +35,14 @@ struct Stream {
         string.formIndex(after: &index)
         return .doConsume(RawStringIr(string: "\(c)"))
     }
+
+    mutating func next() -> StreamState<RawStringIr> {
+        guard let c = topChar() else {
+            return .end
+        }
+        string.formIndex(after: &index)
+        return .doConsume(RawStringIr(string: "\(c)"))
+    }
 }
 
 enum StreamState<T: IR> {

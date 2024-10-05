@@ -6,6 +6,10 @@
 //
 
 enum Literal {
+    enum Wildcard: GrammarLiteral {
+        static let literal: Character = "\u{0}" // character never read
+    }
+
     enum LineFeed: GrammarLiteral {
         static let literal: Character = "\n"
     }
