@@ -198,6 +198,10 @@ enum Literal {
         static let literal: Character = "Z"
     }
 
+    enum Backslash: GrammarLiteral {
+        static let literal: Character = "\\"
+    }
+
     enum Underscore: GrammarLiteral {
         static let literal: Character = "_"
     }
