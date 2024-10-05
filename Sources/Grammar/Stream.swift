@@ -47,6 +47,10 @@ struct Stream {
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
+    func isEvenWith(stream: Stream) -> Bool {
+        index == stream.index
+    }
+
     func isAheadOf(stream: Stream) -> Bool {
         index > stream.index
     }
