@@ -95,7 +95,9 @@ struct StringIr: IR, ExpressionIrProtocol {
     let string: String
 
     func swift() -> String {
-        "\"\(string)\""
+        var debugString = ""
+        debugPrint(string, terminator: "", to: &debugString)
+        return debugString
     }
 }
 
