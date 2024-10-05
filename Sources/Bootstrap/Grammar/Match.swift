@@ -465,6 +465,12 @@ enum Match {
                 }
             ),
             GrammarPattern(
+                parts: (LineSeparator.self),
+                gen: { _ in
+                    RawStringIr(string: "\n")
+                }
+            ),
+            GrammarPattern(
                 parts: (Literal.Backslash.self, Literal.LowercaseN.self),
                 gen: { _, _ in
                     RawStringIr(string: "\n")
