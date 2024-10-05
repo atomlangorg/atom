@@ -47,6 +47,10 @@ struct Stream {
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
+    func isAheadOf(stream: Stream) -> Bool {
+        index > stream.index
+    }
+
     func firstWildcardIndex(from index: String.Index) -> String.Index? {
         // TODO: implement as binary search to make faster
         wildcardIndexes.first(where: { $0 >= index })
