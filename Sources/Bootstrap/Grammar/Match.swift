@@ -477,6 +477,12 @@ enum Match {
                 }
             ),
             GrammarPattern(
+                parts: (Literal.Backslash.self, Literal.Backslash.self),
+                gen: { _, _ in
+                    RawStringIr(string: "\\")
+                }
+            ),
+            GrammarPattern(
                 parts: (Literal.Backslash.self, Literal.LowercaseN.self),
                 gen: { _, _ in
                     RawStringIr(string: "\n")
