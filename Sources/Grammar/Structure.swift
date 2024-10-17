@@ -77,19 +77,22 @@ protocol GrammarPatternProtocol<Output> {
 }
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
-    let parts: (repeat (each Part).Type)
-    let gen: (repeat (each Part).Output) -> Output
+    typealias Parts = (repeat (each Part).Type)
+    typealias Gen = (repeat (each Part).Output) -> Output
+
+    let parts: Parts
+    let gen: Gen
     let precedence: Precedence?
     let options: Set<Option>
 
-    init(parts: (repeat (each Part).Type), gen: @escaping (repeat (each Part).Output) -> Output, precedence: Precedence? = nil, options: Set<Option> = []) {
+    init(parts: Parts, gen: @escaping Gen, precedence: Precedence? = nil, options: Set<Option> = []) {
         self.parts = parts
         self.gen = gen
         self.precedence = precedence
         self.options = options
     }
 
-    init(parts: (repeat (each Part).Type), precedence: Precedence? = nil, options: Set<Option> = []) where Output == NeverIr {
+    init(parts: Parts, precedence: Precedence? = nil, options: Set<Option> = []) where Output == NeverIr {
         self.parts = parts
         gen = { (_: repeat (each Part).Output) in NeverIr() }
         self.precedence = precedence
