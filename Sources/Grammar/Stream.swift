@@ -79,6 +79,12 @@ struct Stream {
                     // Grammar was ambiguous, but with difference in wildcards
                     return true
                 }
+
+                if stream.firstWildcardIndex(from: commonAncestorStream.index) == nil {
+                    // Current stream must have some wildcards, while the greediest has none left
+                    return false
+                }
+
                 // Grammar is simply ambiguous
                 fatalError("Ambiguous grammar")
             }
