@@ -15,7 +15,7 @@ enum Match {
             ),
             GrammarPattern(
                 parts: (Literal.CarriageReturnLineFeed.self)
-            )
+            ),
         ]
     }
 
@@ -28,7 +28,7 @@ enum Match {
             ),
             GrammarPattern(
                 parts: (Literal.Space.self, SpaceZeroOrMore.self)
-            )
+            ),
         ]
     }
 
@@ -41,7 +41,7 @@ enum Match {
             ),
             GrammarPattern(
                 parts: (Literal.Space.self, SpaceOneOrMore.self)
-            )
+            ),
         ]
     }
 
@@ -88,7 +88,7 @@ enum Match {
             GrammarPattern(
                 parts: (Literal.Nine.self),
                 gen: { d in d }
-            )
+            ),
         ]
     }
 
@@ -107,7 +107,7 @@ enum Match {
                 gen: { digit, rest in
                     RawStringIr(string: digit.string + rest.string)
                 }
-            )
+            ),
         ]
     }
 
@@ -120,7 +120,7 @@ enum Match {
                 gen: { integer in
                     IntegerIr(value: Int(integer.string)!)
                 }
-            )
+            ),
         ]
     }
 
@@ -231,7 +231,7 @@ enum Match {
             GrammarPattern(
                 parts: (Literal.UppercaseZ.self),
                 gen: { l in l }
-            )
+            ),
         ]
     }
 
@@ -342,7 +342,7 @@ enum Match {
             GrammarPattern(
                 parts: (Literal.LowercaseZ.self),
                 gen: { l in l }
-            )
+            ),
         ]
     }
 
@@ -352,7 +352,7 @@ enum Match {
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (Literal.LowercaseL.self, Literal.LowercaseE.self, Literal.LowercaseT.self)
-            )
+            ),
         ]
     }
 
@@ -371,7 +371,7 @@ enum Match {
                 gen: { c, rest in
                     VariableIr(name: c.string + rest.name)
                 }
-            )
+            ),
         ]
     }
 
@@ -390,7 +390,7 @@ enum Match {
             GrammarPattern(
                 parts: (Literal.Underscore.self),
                 gen: { c in c }
-            )
+            ),
         ]
     }
 
@@ -450,7 +450,7 @@ enum Match {
                     return IntegerExprIr(expression: expr)
                 },
                 precedence: Precedence(priority: .multiply, associativity: .left)
-            )
+            ),
         ]
     }
 
@@ -493,7 +493,7 @@ enum Match {
                 gen: { _, char throws(GrammarError) in
                     throw GrammarError("Invalid escape sequence '\\\(char.string)'")
                 }
-            )
+            ),
         ]
     }
 
@@ -512,7 +512,7 @@ enum Match {
                 gen: { char, rest in
                     RawStringIr(string: char.string + rest.string)
                 }
-            )
+            ),
         ]
     }
 
@@ -525,7 +525,7 @@ enum Match {
                 gen: { _, string in
                     StringIr(string: string.string)
                 }
-            )
+            ),
         ]
     }
 
@@ -544,7 +544,7 @@ enum Match {
                 gen: { expr in
                     ExpressionIr(expression: expr)
                 }
-            )
+            ),
         ]
     }
 
@@ -557,7 +557,7 @@ enum Match {
                 gen: { _, _, variable, _, _, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }
-            )
+            ),
         ]
     }
 
@@ -570,7 +570,7 @@ enum Match {
                 gen: { assignment in
                     StatementIr(ir: assignment)
                 }
-            )
+            ),
         ]
     }
 
@@ -601,7 +601,7 @@ enum Match {
                 gen: {
                     ProgramIr(statements: [])
                 }
-            )
+            ),
         ]
     }
 }
