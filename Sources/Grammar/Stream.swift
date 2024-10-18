@@ -27,7 +27,7 @@ struct Stream {
         return string[index]
     }
 
-    mutating func nextIf(char: Character) -> StreamState<RawStringIr> {
+    mutating func nextIf(char: Character) -> StreamStateMatch<RawStringIr> {
         guard let c = topChar() else {
             return .end
         }
@@ -38,7 +38,7 @@ struct Stream {
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
-    mutating func next() -> StreamState<RawStringIr> {
+    mutating func next() -> StreamStateMatch<RawStringIr> {
         guard let c = topChar() else {
             return .end
         }
@@ -100,8 +100,16 @@ struct Stream {
     }
 }
 
-enum StreamState<T: IR> {
+enum StreamStateMatch<T: IR> {
     case dontConsume
     case doConsume(T)
     case end
+    case error(GrammarError)
+}
+
+enum StreamStatePattern<T: IR> {
+    case dontConsume
+    case doConsume(Result<T, GrammarError>)
+    case end
+    case error(GrammarError)
 }

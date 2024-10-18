@@ -8,7 +8,7 @@
 protocol Grammar {
     associatedtype Output: IR
 
-    static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output>
+    static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output>
 }
 
 protocol GrammarLiteral: Grammar where Output == RawStringIr {
@@ -16,7 +16,7 @@ protocol GrammarLiteral: Grammar where Output == RawStringIr {
 }
 
 extension GrammarLiteral {
-    static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
+    static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
         if Self.self == Literal.Wildcard.self {
             return stream.next()
         }
@@ -29,8 +29,8 @@ protocol GrammarMatch: Grammar {
 }
 
 extension GrammarMatch {
-    static func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
-        var greediest: (stream: Stream, ir: Output)? = nil
+    static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
+        var greediest: (stream: Stream, result: Result<Output, GrammarError>)? = nil
         var context = context
         context.setGrammarType(Self.self)
 
@@ -41,30 +41,43 @@ extension GrammarMatch {
             switch pattern.consume(stream: &s, context: context) {
             case .dontConsume:
                 continue
-            case let .doConsume(ir):
+            case let .doConsume(result):
                 if let g = greediest {
                     guard s.isGreedierThan(stream: g.stream, since: stream) else {
                         continue
                     }
                 }
-                greediest = (stream: s, ir: ir)
+                greediest = (stream: s, result: result)
             case .end:
                 continue
+            case let .error(error):
+                return .error(error)
             }
         }
 
         if let greediest {
-            stream = greediest.stream
+            switch greediest.result {
+            case let .success(ir):
+                stream = greediest.stream
 
-            // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
-            var context = context
-            context.firstIr = greediest.ir
-            let state = consume(stream: &stream, context: context)
-            if case .doConsume = state {
-                return state
+                // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
+                var context = context
+                context.firstIr = ir
+                switch consume(stream: &stream, context: context) {
+                case .dontConsume:
+                    break
+                case let .doConsume(newIr):
+                    return .doConsume(newIr)
+                case .end:
+                    break
+                case let .error(error):
+                    return .error(error)
+                }
+
+                return .doConsume(ir)
+            case let .failure(error):
+                return .error(error)
             }
-
-            return .doConsume(greediest.ir)
         }
         return .dontConsume
     }
@@ -73,12 +86,12 @@ extension GrammarMatch {
 protocol GrammarPatternProtocol<Output> {
     associatedtype Output: IR
 
-    func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output>
+    func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output>
 }
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     typealias Parts = (repeat (each Part).Type)
-    typealias Gen = (repeat (each Part).Output) -> Output
+    typealias Gen = (repeat (each Part).Output) throws(GrammarError) -> Output
 
     let parts: Parts
     let gen: Gen
@@ -99,7 +112,7 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         self.options = options
     }
 
-    func consume(stream: inout Stream, context: GrammarContext) -> StreamState<Output> {
+    func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output> {
         var context = context
         guard context.acceptPrecedence(precedence) else {
             return .dontConsume
@@ -139,6 +152,8 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
                     irPack = irPack.appending(ir: ir)
                 case .end:
                     return .end
+                case let .error(error):
+                    return .error(error)
                 }
             }
 
@@ -152,7 +167,9 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
 
         stream = s
         let irPackConcrete = irPack as! IrPack<repeat (each Part).Output>
-        let result = gen(repeat each irPackConcrete.irs)
+        let result = Result(catching: { () throws(GrammarError) in
+            try gen(repeat each irPackConcrete.irs)
+        })
         return .doConsume(result)
     }
 }
