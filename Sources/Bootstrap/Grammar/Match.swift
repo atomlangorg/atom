@@ -631,6 +631,19 @@ enum Match {
         ]
     }
 
+    enum Struct: GrammarMatch {
+        typealias Output = StructIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (StructKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceZeroOrMore.self, Literal.OpenCurlyBracket.self, StructFields.self, Literal.CloseCurlyBracket.self),
+                gen: { _, _, identifier, _, _, fields, _ in
+                    StructIr(identifier: identifier, fields: fields)
+                }
+            ),
+        ]
+    }
+
     enum Statement: GrammarMatch {
         typealias Output = StatementIr
 
