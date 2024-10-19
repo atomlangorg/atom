@@ -356,26 +356,26 @@ enum Match {
         ]
     }
 
-    enum Variable: GrammarMatch {
-        typealias Output = VariableIr
+    enum Identifier: GrammarMatch {
+        typealias Output = IdentifierIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (VariableChar.self),
+                parts: (IdentifierChar.self),
                 gen: { c in
-                    VariableIr(name: c.string)
+                    IdentifierIr(name: c.string)
                 }
             ),
             GrammarPattern(
-                parts: (VariableChar.self, Variable.self),
+                parts: (IdentifierChar.self, Identifier.self),
                 gen: { c, rest in
-                    VariableIr(name: c.string + rest.name)
+                    IdentifierIr(name: c.string + rest.name)
                 }
             ),
         ]
     }
 
-    enum VariableChar: GrammarMatch {
+    enum IdentifierChar: GrammarMatch {
         typealias Output = RawStringIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -553,7 +553,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LetKeyword.self, SpaceOneOrMore.self, Variable.self, SpaceZeroOrMore.self, Literal.Equals.self, SpaceZeroOrMore.self, Expression.self),
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceZeroOrMore.self, Literal.Equals.self, SpaceZeroOrMore.self, Expression.self),
                 gen: { _, _, variable, _, _, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }

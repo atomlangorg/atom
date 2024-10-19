@@ -23,7 +23,7 @@ struct RawStringIr: IR {
     }
 }
 
-struct VariableIr: IR {
+struct IdentifierIr: IR {
     let name: String
 
     func swift() -> String {
@@ -110,7 +110,7 @@ struct ExpressionIr: IR {
 }
 
 struct AssignmentIr: IR, StatementIrProtocol {
-    let variable: VariableIr
+    let variable: IdentifierIr
     let expression: ExpressionIr
 
     func swift() -> String {
