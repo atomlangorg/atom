@@ -14,19 +14,7 @@ let name: String
 let age: Int
 }
 """#
-        var stream = Stream(string: input)
-        let result = Match.Program.consume(stream: &stream, context: GrammarContext())
-
-        switch result {
-        case .dontConsume:
-            print("Don't consume")
-        case let .doConsume(ir):
-            print("Swift:")
-            print(ir.swift())
-        case .end:
-            print("End")
-        case let .error(error):
-            print("Error: \(error.reason)")
-        }
+        let code = Code(input)
+        code.intoSwift(root: Match.Program.self)
     }
 }
