@@ -128,19 +128,24 @@ struct StructFieldIr: IR {
     }
 }
 
-struct StructIr: IR, StatementIrProtocol {
-    let identifier: IdentifierIr
+struct StructFieldsIr: IR {
     let fields: [StructFieldIr]
 
     func swift() -> String {
-        var code = "struct \(identifier) {\n"
-
+        var str = ""
         for field in fields {
-            code.append(field.swift())
+            str.append("\(field.swift())\n")
         }
+        return str
+    }
+}
 
-        code.append("}")
-        return code
+struct StructIr: IR, StatementIrProtocol {
+    let identifier: IdentifierIr
+    let fields: StructFieldsIr
+
+    func swift() -> String {
+        "struct \(identifier) {\n\(fields.swift())}"
     }
 }
 
