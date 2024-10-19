@@ -8,6 +8,11 @@ struct Atom: ParsableCommand {
         let input = #"""
 let x = 3 + 3 * 3 + 3
 let greeting = "hello\nworld"
+
+struct Person {
+let name: String
+let age: Int
+}
 """#
         var stream = Stream(string: input)
         let result = Match.Program.consume(stream: &stream, context: GrammarContext())
