@@ -145,7 +145,7 @@ struct StructIr: IR, StatementIrProtocol {
     let fields: StructFieldsIr
 
     func swift() -> String {
-        "struct \(identifier) {\n\(fields.swift())}"
+        "struct \(identifier.name) {\n\(fields.swift())}"
     }
 }
 
