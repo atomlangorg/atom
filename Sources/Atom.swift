@@ -15,6 +15,14 @@ let age: Int
 }
 """#
         let code = Code(input)
-        code.intoSwift(root: Match.Program.self)
+        let result = code.intoSwift(root: Match.Program.self)
+
+        switch result {
+        case let .code(code):
+            print("Swift:")
+            print(code)
+        case let .error(diagnostic):
+            print("Diagnostic: \(diagnostic.start) to \(diagnostic.end)")
+        }
     }
 }

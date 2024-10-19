@@ -14,21 +14,34 @@ struct Code {
 }
 
 extension Code {
-    func intoSwift(root: (some GrammarMatch).Type) {
+    func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult {
         var stream = Stream(string: input)
         let result = root.consume(stream: &stream, context: GrammarContext())
 
+        func earlyEndResult() -> ConversionResult {
+            let location = stream.sourceLocation()
+            let error = GrammarError("Unexpected grammar")
+            let diagnostic = Diagnostic(start: location, end: location, error: error)
+            return .error(diagnostic)
+        }
+
         switch result {
         case .dontConsume:
-            print("Don't consume")
+            return earlyEndResult()
         case let .doConsume(ir):
-            print("Swift:")
-            print(ir.swift())
+            guard stream.isEnd() else {
+                return earlyEndResult()
+            }
+            return .code(ir.swift())
         case .end:
             fatalError("Unreachable")
         case let .error(diagnostic):
-            print("Error: \(diagnostic.error.reason)")
-            print("Diagnostic: \(diagnostic.start) to \(diagnostic.end)")
+            return .error(diagnostic)
         }
     }
+}
+
+enum ConversionResult {
+    case code(String)
+    case error(Diagnostic)
 }
