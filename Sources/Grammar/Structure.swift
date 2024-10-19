@@ -55,31 +55,33 @@ extension GrammarMatch {
             }
         }
 
-        if let greediest {
-            switch greediest.result {
-            case let .success(ir):
-                stream = greediest.stream
+        guard let greediest else {
+            // Nothing was able to be consumed
+            return .dontConsume
+        }
 
-                // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
-                var context = context
-                context.firstIr = ir
-                switch consume(stream: &stream, context: context) {
-                case .dontConsume:
-                    break
-                case let .doConsume(newIr):
-                    return .doConsume(newIr)
-                case .end:
-                    break
-                case let .error(error):
-                    return .error(error)
-                }
+        switch greediest.result {
+        case let .success(ir):
+            stream = greediest.stream
 
-                return .doConsume(ir)
-            case let .failure(error):
+            // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
+            var context = context
+            context.firstIr = ir
+            switch consume(stream: &stream, context: context) {
+            case .dontConsume:
+                break
+            case let .doConsume(newIr):
+                return .doConsume(newIr)
+            case .end:
+                break
+            case let .error(error):
                 return .error(error)
             }
+
+            return .doConsume(ir)
+        case let .failure(error):
+            return .error(error)
         }
-        return .dontConsume
     }
 }
 
