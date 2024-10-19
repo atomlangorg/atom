@@ -90,6 +90,10 @@ enum Literal {
         static let literal: Character = "9"
     }
 
+    enum Colon: GrammarLiteral {
+        static let literal: Character = ":"
+    }
+
     enum Equals: GrammarLiteral {
         static let literal: Character = "="
     }
