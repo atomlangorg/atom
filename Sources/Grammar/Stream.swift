@@ -47,6 +47,29 @@ struct Stream {
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
+    func sourceLocation() -> SourceLocation {
+        var line: UInt = 0
+        var column: UInt = 0
+
+        for i in string.indices {
+            if i == index {
+                return SourceLocation(line: line, column: column)
+            }
+
+            let char = string[i]
+            let isLineSep = char == "\n" || char == "\r\n"
+            if isLineSep {
+                line += 1
+                column = 0
+            } else {
+                column += 1
+            }
+        }
+
+        // One character past the end
+        return SourceLocation(line: line, column: column)
+    }
+
     func isEvenWith(stream: Stream) -> Bool {
         index == stream.index
     }
