@@ -654,6 +654,12 @@ enum Match {
                     StatementIr(ir: assignment)
                 }
             ),
+            GrammarPattern(
+                parts: (Struct.self),
+                gen: { `struct` in
+                    StatementIr(ir: `struct`)
+                }
+            ),
         ]
     }
 
