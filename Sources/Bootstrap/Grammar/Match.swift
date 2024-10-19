@@ -600,6 +600,37 @@ enum Match {
         ]
     }
 
+    enum StructFields: GrammarMatch {
+        typealias Output = StructFieldsIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (LineSeparator.self, StructFields.self),
+                gen: { _, rest in
+                    rest
+                }
+            ),
+            GrammarPattern(
+                parts: (StructField.self, LineSeparator.self, StructFields.self),
+                gen: { field, _, rest in
+                    StructFieldsIr(fields: CollectionOfOne(field) + rest.fields)
+                }
+            ),
+            GrammarPattern(
+                parts: (StructField.self),
+                gen: { field in
+                    StructFieldsIr(fields: [field])
+                }
+            ),
+            GrammarPattern(
+                parts: (),
+                gen: {
+                    StructFieldsIr(fields: [])
+                }
+            ),
+        ]
+    }
+
     enum Statement: GrammarMatch {
         typealias Output = StatementIr
 
