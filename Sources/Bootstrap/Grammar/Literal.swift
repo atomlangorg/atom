@@ -309,4 +309,12 @@ enum Literal {
     enum LowercaseZ: GrammarLiteral {
         static let literal: Character = "z"
     }
+
+    enum OpenCurlyBracket: GrammarLiteral {
+        static let literal: Character = "{"
+    }
+
+    enum CloseCurlyBracket: GrammarLiteral {
+        static let literal: Character = "}"
+    }
 }
