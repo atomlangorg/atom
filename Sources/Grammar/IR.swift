@@ -118,6 +118,32 @@ struct AssignmentIr: IR, StatementIrProtocol {
     }
 }
 
+struct StructFieldIr: IR {
+    let identifier: IdentifierIr
+    let type: IdentifierIr
+    let isMutable: Bool
+
+    func swift() -> String {
+        "\(isMutable ? "var" : "let") \(identifier.name): \(type.name)"
+    }
+}
+
+struct StructIr: IR, StatementIrProtocol {
+    let identifier: IdentifierIr
+    let fields: [StructFieldIr]
+
+    func swift() -> String {
+        var code = "struct \(identifier) {\n"
+
+        for field in fields {
+            code.append(field.swift())
+        }
+
+        code.append("}")
+        return code
+    }
+}
+
 struct StatementIr: IR {
     let ir: any StatementIrProtocol
 
