@@ -26,8 +26,9 @@ extension Code {
             print(ir.swift())
         case .end:
             fatalError("Unreachable")
-        case let .error(error):
-            print("Error: \(error.reason)")
+        case let .error(diagnostic):
+            print("Error: \(diagnostic.error.reason)")
+            print("Diagnostic: \(diagnostic.start) to \(diagnostic.end)")
         }
     }
 }

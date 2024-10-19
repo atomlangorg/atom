@@ -127,12 +127,12 @@ enum StreamStateMatch<T: IR> {
     case dontConsume
     case doConsume(T)
     case end
-    case error(GrammarError)
+    case error(Diagnostic)
 }
 
 enum StreamStatePattern<T: IR> {
     case dontConsume
     case doConsume(Result<T, GrammarError>)
     case end
-    case error(GrammarError)
+    case error(Diagnostic)
 }

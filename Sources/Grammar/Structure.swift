@@ -50,8 +50,8 @@ extension GrammarMatch {
                 greediest = (stream: s, result: result)
             case .end:
                 continue
-            case let .error(error):
-                return .error(error)
+            case let .error(diagnostic):
+                return .error(diagnostic)
             }
         }
 
@@ -74,13 +74,14 @@ extension GrammarMatch {
                 return .doConsume(newIr)
             case .end:
                 break
-            case let .error(error):
-                return .error(error)
+            case let .error(diagnostic):
+                return .error(diagnostic)
             }
 
             return .doConsume(ir)
         case let .failure(error):
-            return .error(error)
+            let diagnostic = Diagnostic(start: stream.sourceLocation(), end: greediest.stream.sourceLocation(), error: error)
+            return .error(diagnostic)
         }
     }
 }
@@ -154,8 +155,8 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
                     irPack = irPack.appending(ir: ir)
                 case .end:
                     return .end
-                case let .error(error):
-                    return .error(error)
+                case let .error(diagnostic):
+                    return .error(diagnostic)
                 }
             }
 
