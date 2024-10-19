@@ -581,6 +581,25 @@ enum Match {
         ]
     }
 
+    enum StructField: GrammarMatch {
+        typealias Output = StructFieldIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceZeroOrMore.self, Literal.Colon.self, SpaceZeroOrMore.self, Identifier.self),
+                gen: { _, _, identifier, _, _, _, type in
+                    StructFieldIr(identifier: identifier, type: type, isMutable: false)
+                }
+            ),
+            GrammarPattern(
+                parts: (VarKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceZeroOrMore.self, Literal.Colon.self, SpaceZeroOrMore.self, Identifier.self),
+                gen: { _, _, identifier, _, _, _, type in
+                    StructFieldIr(identifier: identifier, type: type, isMutable: true)
+                }
+            ),
+        ]
+    }
+
     enum Statement: GrammarMatch {
         typealias Output = StatementIr
 
