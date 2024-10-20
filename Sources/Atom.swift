@@ -21,7 +21,7 @@ let age: Int
         case let .program(code):
             print(code.formattedAsCodeBlock())
         case let .error(diagnostic):
-            print("Diagnostic: \(diagnostic.start) to \(diagnostic.end)")
+            print(diagnostic.formatted())
         }
     }
 }
