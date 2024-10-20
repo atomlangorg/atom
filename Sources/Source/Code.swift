@@ -23,6 +23,16 @@ extension Code {
     }
 }
 
+struct AtomCode: Code {
+    static let languageName: StaticString = "atom"
+
+    let code: String
+
+    init(_ code: String) {
+        self.code = code
+    }
+}
+
 struct SwiftCode: Code {
     static let languageName: StaticString = "swift"
 
