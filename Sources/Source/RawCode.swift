@@ -24,8 +24,7 @@ struct RawCode {
             }
 
             let char = string[i]
-            let isLineSep = char == "\n" || char == "\r\n"
-            if isLineSep {
+            if Self.isLineSeparator(char) {
                 line += 1
                 column = 0
             } else {
@@ -35,6 +34,10 @@ struct RawCode {
 
         // One character past the end
         return SourceLocation(index: index, line: line, column: column)
+    }
+
+    private static func isLineSeparator(_ char: Character) -> Bool {
+        char == "\n" || char == "\r\n"
     }
 }
 
