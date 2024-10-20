@@ -163,7 +163,7 @@ struct ProgramIr: IR {
     func swift() -> SwiftCode {
         let code = statements
             .map { statement in
-                statement.swift().code
+                statement.swift().code.string
             }
             .joined(separator: "\n")
         return SwiftCode(code)

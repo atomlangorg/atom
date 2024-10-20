@@ -8,17 +8,21 @@
 protocol Code: CustomStringConvertible {
     static var languageName: StaticString { get }
 
-    var code: String { get }
+    var code: RawCode { get }
 
-    init(_ code: String)
+    init(_ code: RawCode)
 }
 
 extension Code {
-    var description: String {
-        code
+    init(_ string: String) {
+        self.init(RawCode(string))
     }
 
-    func formattedAsCodeBlock(_ preformatting: (String) -> String = { $0 }) -> String {
+    var description: String {
+        code.description
+    }
+
+    func formattedAsCodeBlock(_ preformatting: (RawCode) -> RawCode = { $0 }) -> String {
         let preformatted = preformatting(code)
         return "```\(Self.languageName)\n\(preformatted)\n```"
     }
@@ -27,9 +31,9 @@ extension Code {
 struct AtomCode: Code {
     static let languageName: StaticString = "atom"
 
-    let code: String
+    let code: RawCode
 
-    init(_ code: String) {
+    init(_ code: RawCode) {
         self.code = code
     }
 }
@@ -37,9 +41,9 @@ struct AtomCode: Code {
 struct SwiftCode: Code {
     static let languageName: StaticString = "swift"
 
-    let code: String
+    let code: RawCode
 
-    init(_ code: String) {
+    init(_ code: RawCode) {
         self.code = code
     }
 }

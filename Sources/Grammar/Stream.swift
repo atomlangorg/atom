@@ -6,25 +6,25 @@
 //
 
 struct Stream {
-    private let string: String
-    private var index: String.Index
-    private var wildcardIndexes: [String.Index]
+    private let code: RawCode
+    private var index: RawCode.Index
+    private var wildcardIndexes: [RawCode.Index]
 
-    init(string: String) {
-        self.string = string
-        index = string.startIndex
+    init(code: RawCode) {
+        self.code = code
+        index = code.string.startIndex
         wildcardIndexes = []
     }
 
     func isEnd() -> Bool {
-        index >= string.endIndex
+        index >= code.string.endIndex
     }
 
     func topChar() -> Character? {
         if isEnd() {
             return nil
         }
-        return string[index]
+        return code.string[index]
     }
 
     mutating func nextIf(char: Character) -> StreamStateMatch<RawStringIr> {
@@ -34,7 +34,7 @@ struct Stream {
         if char != c {
             return .dontConsume
         }
-        string.formIndex(after: &index)
+        code.string.formIndex(after: &index)
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
@@ -43,7 +43,7 @@ struct Stream {
             return .end
         }
         wildcardIndexes.append(index)
-        string.formIndex(after: &index)
+        code.string.formIndex(after: &index)
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
@@ -51,12 +51,12 @@ struct Stream {
         var line: UInt = 0
         var column: UInt = 0
 
-        for i in string.indices {
+        for i in code.string.indices {
             if i == index {
                 return SourceLocation(index: index, line: line, column: column)
             }
 
-            let char = string[i]
+            let char = code.string[i]
             let isLineSep = char == "\n" || char == "\r\n"
             if isLineSep {
                 line += 1
