@@ -6,16 +6,16 @@
 //
 
 struct Program {
-    let input: String
+    let source: AtomCode
 
     init(_ input: String) {
-        self.input = input
+        source = AtomCode(input)
     }
 }
 
 extension Program {
     func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult<SwiftCode> {
-        var stream = Stream(string: input)
+        var stream = Stream(string: source.code)
         let result = root.consume(stream: &stream, context: GrammarContext())
 
         func earlyEndResult() -> ConversionResult<SwiftCode> {
