@@ -12,6 +12,6 @@ struct SourceLocation {
 
 extension SourceLocation: CustomDebugStringConvertible {
     var debugDescription: String {
-        "(\(line), \(column))"
+        "(\(line):\(column))"
     }
 }
