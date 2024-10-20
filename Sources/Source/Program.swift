@@ -14,11 +14,11 @@ struct Program {
 }
 
 extension Program {
-    func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult {
+    func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult<SwiftCode> {
         var stream = Stream(string: input)
         let result = root.consume(stream: &stream, context: GrammarContext())
 
-        func earlyEndResult() -> ConversionResult {
+        func earlyEndResult() -> ConversionResult<SwiftCode> {
             let location = stream.sourceLocation()
             let error = GrammarError("Unexpected grammar")
             let diagnostic = Diagnostic(start: location, end: location, error: error)
@@ -41,7 +41,7 @@ extension Program {
     }
 }
 
-enum ConversionResult {
-    case program(String)
+enum ConversionResult<C: Code> {
+    case program(C)
     case error(Diagnostic)
 }

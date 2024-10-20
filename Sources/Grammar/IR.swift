@@ -6,11 +6,11 @@
 //
 
 protocol IR {
-    func swift() -> String
+    func swift() -> SwiftCode
 }
 
 struct NeverIr: IR {
-    func swift() -> String {
+    func swift() -> SwiftCode {
         fatalError()
     }
 }
@@ -18,31 +18,31 @@ struct NeverIr: IR {
 struct RawStringIr: IR {
     let string: String
 
-    func swift() -> String {
-        string
+    func swift() -> SwiftCode {
+        SwiftCode(string)
     }
 }
 
 struct IdentifierIr: IR {
     let name: String
 
-    func swift() -> String {
-        name
+    func swift() -> SwiftCode {
+        SwiftCode(name)
     }
 }
 
 struct IntegerIr: IR, IntegerExprIrProtocol {
     let value: Int
 
-    func swift() -> String {
-        "\(value)"
+    func swift() -> SwiftCode {
+        SwiftCode("\(value)")
     }
 }
 
 struct IntegerExprIr: IR, ExpressionIrProtocol {
     let expression: any IntegerExprIrProtocol
 
-    func swift() -> String {
+    func swift() -> SwiftCode {
         expression.swift()
     }
 }
@@ -50,8 +50,8 @@ struct IntegerExprIr: IR, ExpressionIrProtocol {
 struct IntegerNegateExprIr: IR, IntegerExprIrProtocol {
     let expr: IntegerExprIr
 
-    func swift() -> String {
-        "-\(expr.swift())"
+    func swift() -> SwiftCode {
+        SwiftCode("-\(expr.swift())")
     }
 }
 
@@ -59,8 +59,8 @@ struct IntegerAddExprIr: IR, IntegerExprIrProtocol {
     let lhs: IntegerExprIr
     let rhs: IntegerExprIr
 
-    func swift() -> String {
-        "(\(lhs.swift()) + \(rhs.swift()))"
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) + \(rhs.swift()))")
     }
 }
 
@@ -68,8 +68,8 @@ struct IntegerSubtractExprIr: IR, IntegerExprIrProtocol {
     let lhs: IntegerExprIr
     let rhs: IntegerExprIr
 
-    func swift() -> String {
-        "(\(lhs.swift()) - \(rhs.swift()))"
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) - \(rhs.swift()))")
     }
 }
 
@@ -77,8 +77,8 @@ struct IntegerMultiplyExprIr: IR, IntegerExprIrProtocol {
     let lhs: IntegerExprIr
     let rhs: IntegerExprIr
 
-    func swift() -> String {
-        "(\(lhs.swift()) * \(rhs.swift()))"
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) * \(rhs.swift()))")
     }
 }
 
@@ -86,25 +86,25 @@ struct IntegerDivideExprIr: IR, IntegerExprIrProtocol {
     let lhs: IntegerExprIr
     let rhs: IntegerExprIr
 
-    func swift() -> String {
-        "(\(lhs.swift()) / \(rhs.swift()))"
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) / \(rhs.swift()))")
     }
 }
 
 struct StringIr: IR, ExpressionIrProtocol {
     let string: String
 
-    func swift() -> String {
+    func swift() -> SwiftCode {
         var debugString = ""
         debugPrint(string, terminator: "", to: &debugString)
-        return debugString
+        return SwiftCode(debugString)
     }
 }
 
 struct ExpressionIr: IR {
     let expression: any ExpressionIrProtocol
 
-    func swift() -> String {
+    func swift() -> SwiftCode {
         expression.swift()
     }
 }
@@ -113,8 +113,8 @@ struct AssignmentIr: IR, StatementIrProtocol {
     let variable: IdentifierIr
     let expression: ExpressionIr
 
-    func swift() -> String {
-        "let \(variable.swift()) = \(expression.swift())"
+    func swift() -> SwiftCode {
+        SwiftCode("let \(variable.swift()) = \(expression.swift())")
     }
 }
 
@@ -123,20 +123,20 @@ struct StructFieldIr: IR {
     let type: IdentifierIr
     let isMutable: Bool
 
-    func swift() -> String {
-        "\(isMutable ? "var" : "let") \(identifier.name): \(type.name)"
+    func swift() -> SwiftCode {
+        SwiftCode("\(isMutable ? "var" : "let") \(identifier.name): \(type.name)")
     }
 }
 
 struct StructFieldsIr: IR {
     let fields: [StructFieldIr]
 
-    func swift() -> String {
+    func swift() -> SwiftCode {
         var str = ""
         for field in fields {
             str.append("\(field.swift())\n")
         }
-        return str
+        return SwiftCode(str)
     }
 }
 
@@ -144,15 +144,15 @@ struct StructIr: IR, StatementIrProtocol {
     let identifier: IdentifierIr
     let fields: StructFieldsIr
 
-    func swift() -> String {
-        "struct \(identifier.name) {\n\(fields.swift())}"
+    func swift() -> SwiftCode {
+        SwiftCode("struct \(identifier.name) {\n\(fields.swift())}")
     }
 }
 
 struct StatementIr: IR {
     let ir: any StatementIrProtocol
 
-    func swift() -> String {
+    func swift() -> SwiftCode {
         ir.swift()
     }
 }
@@ -160,12 +160,13 @@ struct StatementIr: IR {
 struct ProgramIr: IR {
     let statements: [StatementIr]
 
-    func swift() -> String {
-        statements
+    func swift() -> SwiftCode {
+        let code = statements
             .map { statement in
-                statement.swift()
+                statement.swift().code
             }
             .joined(separator: "\n")
+        return SwiftCode(code)
     }
 }
 
