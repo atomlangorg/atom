@@ -19,9 +19,7 @@ let age: Int
 
         switch result {
         case let .program(code):
-            print("```swift")
-            print(code)
-            print("```")
+            print(code.formattedAsCodeBlock())
         case let .error(diagnostic):
             print("Diagnostic: \(diagnostic.start) to \(diagnostic.end)")
         }
