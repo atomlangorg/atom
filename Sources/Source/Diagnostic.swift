@@ -10,3 +10,9 @@ struct Diagnostic {
     let end: SourceLocation
     let error: GrammarError
 }
+
+extension Diagnostic {
+    func formatted() -> String {
+        "Error at \(start) to \(end): \(error.reason)"
+    }
+}
