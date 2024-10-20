@@ -53,7 +53,7 @@ struct Stream {
 
         for i in string.indices {
             if i == index {
-                return SourceLocation(line: line, column: column)
+                return SourceLocation(index: index, line: line, column: column)
             }
 
             let char = string[i]
@@ -67,7 +67,7 @@ struct Stream {
         }
 
         // One character past the end
-        return SourceLocation(line: line, column: column)
+        return SourceLocation(index: index, line: line, column: column)
     }
 
     func isEvenWith(stream: Stream) -> Bool {

@@ -6,6 +6,7 @@
 //
 
 struct SourceLocation {
+    let index: String.Index
     let line: UInt
     let column: UInt
 }
