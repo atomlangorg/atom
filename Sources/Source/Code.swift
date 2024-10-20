@@ -32,7 +32,7 @@ extension Code {
             guard stream.isEnd() else {
                 return earlyEndResult()
             }
-            return .code(ir.swift())
+            return .program(ir.swift())
         case .end:
             fatalError("Unreachable")
         case let .error(diagnostic):
@@ -42,6 +42,6 @@ extension Code {
 }
 
 enum ConversionResult {
-    case code(String)
+    case program(String)
     case error(Diagnostic)
 }

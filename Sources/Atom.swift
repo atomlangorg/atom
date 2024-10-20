@@ -18,7 +18,7 @@ let age: Int
         let result = code.intoSwift(root: Match.Program.self)
 
         switch result {
-        case let .code(code):
+        case let .program(code):
             print("```swift")
             print(code)
             print("```")
