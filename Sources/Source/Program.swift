@@ -20,7 +20,7 @@ extension Program {
 
         func earlyEndResult() -> ConversionResult<SwiftCode> {
             let location = stream.sourceLocation()
-            let error = GrammarError("Unexpected grammar")
+            let error = GrammarError("unexpected grammar")
             let diagnostic = Diagnostic(start: location, end: location, error: error)
             return .error(diagnostic)
         }

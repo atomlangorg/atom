@@ -511,7 +511,7 @@ enum Match {
             GrammarPattern(
                 parts: (Literal.Backslash.self, Literal.Wildcard.self),
                 gen: { _, char throws(GrammarError) in
-                    throw GrammarError("Invalid escape sequence '\\\(char.string)'")
+                    throw GrammarError("invalid escape sequence '\\\(char.string)'")
                 }
             ),
         ]
