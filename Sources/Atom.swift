@@ -14,8 +14,8 @@ let name: String
 let age: Int
 }
 """#
-        let code = Code(input)
-        let result = code.intoSwift(root: Match.Program.self)
+        let program = Program(input)
+        let result = program.intoSwift(root: Match.Program.self)
 
         switch result {
         case let .program(code):

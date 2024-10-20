@@ -1,11 +1,11 @@
 //
-//  Code.swift
+//  Program.swift
 //  atom
 //
 //  Created by George Elsham on 19/10/2024.
 //
 
-struct Code {
+struct Program {
     let input: String
 
     init(_ input: String) {
@@ -13,7 +13,7 @@ struct Code {
     }
 }
 
-extension Code {
+extension Program {
     func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult {
         var stream = Stream(string: input)
         let result = root.consume(stream: &stream, context: GrammarContext())
