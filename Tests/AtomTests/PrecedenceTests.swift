@@ -13,9 +13,9 @@ struct PrecedenceTests {
     @Test("Check precedence of one addition")
     func oneAddition() {
         let input = "3 + 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -26,9 +26,9 @@ struct PrecedenceTests {
     @Test("Check precedence of two additions")
     func twoAdditions() {
         let input = "3 + 3 + 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -39,9 +39,9 @@ struct PrecedenceTests {
     @Test("Check precedence of three additions")
     func threeAdditions() {
         let input = "3 + 3 + 3 + 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -52,9 +52,9 @@ struct PrecedenceTests {
     @Test("Check precedence of one multiplication")
     func oneMultiplication() {
         let input = "3 * 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -65,9 +65,9 @@ struct PrecedenceTests {
     @Test("Check precedence of two multiplications")
     func twoMultiplications() {
         let input = "3 * 3 * 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -78,9 +78,9 @@ struct PrecedenceTests {
     @Test("Check precedence of three multiplications")
     func threeMultiplications() {
         let input = "3 * 3 * 3 * 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -91,9 +91,9 @@ struct PrecedenceTests {
     @Test("Check precedence for a mix of additions and multiplications (1)")
     func additionMultiplicationMix1() {
         let input = "3 + 3 * 3 + 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -104,9 +104,9 @@ struct PrecedenceTests {
     @Test("Check precedence for a mix of additions and multiplications (2)")
     func additionMultiplicationMix2() {
         let input = "3 + 3 + 3 * 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -117,9 +117,9 @@ struct PrecedenceTests {
     @Test("Check precedence for a mix of additions and multiplications (3)")
     func additionMultiplicationMix3() {
         let input = "3 * 3 + 3 + 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
@@ -130,9 +130,9 @@ struct PrecedenceTests {
     @Test("Check precedence for a mix of additions and multiplications (4)")
     func additionMultiplicationMix4() {
         let input = "3 * 3 + 3 * 3"
-        let result = Code(input).intoSwift(root: Match.IntegerExpr.self)
+        let result = Program(input).intoSwift(root: Match.IntegerExpr.self)
 
-        guard case let .code(code) = result else {
+        guard case let .program(code) = result else {
             Issue.record("Failed to convert into Swift")
             return
         }
