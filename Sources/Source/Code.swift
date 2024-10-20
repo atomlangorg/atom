@@ -5,7 +5,7 @@
 //  Created by George Elsham on 20/10/2024.
 //
 
-protocol Code: CustomDebugStringConvertible {
+protocol Code: CustomStringConvertible {
     static var languageName: StaticString { get }
 
     var code: String { get }
@@ -14,7 +14,11 @@ protocol Code: CustomDebugStringConvertible {
 }
 
 extension Code {
-    var debugDescription: String {
+    var description: String {
+        code
+    }
+
+    func formattedAsCodeBlock() -> String {
         "```\(Self.languageName)\n\(code)\n```"
     }
 }
