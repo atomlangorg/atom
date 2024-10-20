@@ -12,7 +12,7 @@ struct Diagnostic {
 }
 
 extension Diagnostic {
-    func formatted() -> String {
+    func formattedLine() -> String {
         "Error at \(start) to \(end): \(error.reason)"
     }
 }
