@@ -48,26 +48,7 @@ struct Stream {
     }
 
     func sourceLocation() -> SourceLocation {
-        var line: UInt = 0
-        var column: UInt = 0
-
-        for i in code.string.indices {
-            if i == index {
-                return SourceLocation(index: index, line: line, column: column)
-            }
-
-            let char = code.string[i]
-            let isLineSep = char == "\n" || char == "\r\n"
-            if isLineSep {
-                line += 1
-                column = 0
-            } else {
-                column += 1
-            }
-        }
-
-        // One character past the end
-        return SourceLocation(index: index, line: line, column: column)
+        code.sourceLocation(at: index)
     }
 
     func isEvenWith(stream: Stream) -> Bool {

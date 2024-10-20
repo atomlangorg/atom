@@ -13,6 +13,29 @@ struct RawCode {
     init(_ string: String) {
         self.string = string
     }
+
+    func sourceLocation(at index: Index) -> SourceLocation {
+        var line: UInt = 0
+        var column: UInt = 0
+
+        for i in string.indices {
+            if i == index {
+                return SourceLocation(index: index, line: line, column: column)
+            }
+
+            let char = string[i]
+            let isLineSep = char == "\n" || char == "\r\n"
+            if isLineSep {
+                line += 1
+                column = 0
+            } else {
+                column += 1
+            }
+        }
+
+        // One character past the end
+        return SourceLocation(index: index, line: line, column: column)
+    }
 }
 
 extension RawCode: CustomStringConvertible {
