@@ -71,9 +71,3 @@ struct RawCode {
         char == "\n" || char == "\r\n"
     }
 }
-
-extension RawCode: CustomStringConvertible {
-    var description: String {
-        string
-    }
-}

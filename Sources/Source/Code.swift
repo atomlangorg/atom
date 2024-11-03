@@ -19,11 +19,11 @@ extension Code {
     }
 
     var description: String {
-        code.description
+        code.string
     }
 
     func formattedAsCodeBlock(_ preformatting: (RawCode) -> RawCode = { $0 }) -> String {
-        let preformatted = preformatting(code)
+        let preformatted = preformatting(code).string
         return "```\(Self.languageName)\n\(preformatted)\n```"
     }
 }
