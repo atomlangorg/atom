@@ -9,13 +9,14 @@ protocol Code: CustomStringConvertible {
     static var languageName: StaticString { get }
 
     var code: RawCode { get }
+    var isSource: Bool { get }
 
-    init(_ code: RawCode)
+    init(_ code: RawCode, isSource: Bool)
 }
 
 extension Code {
-    init(_ string: String) {
-        self.init(RawCode(string))
+    init(_ string: String, isSource: Bool = false) {
+        self.init(RawCode(string), isSource: isSource)
     }
 
     var description: String {
@@ -32,9 +33,11 @@ struct AtomCode: Code {
     static let languageName: StaticString = "atom"
 
     let code: RawCode
+    let isSource: Bool
 
-    init(_ code: RawCode) {
+    init(_ code: RawCode, isSource: Bool) {
         self.code = code
+        self.isSource = isSource
     }
 }
 
@@ -42,8 +45,10 @@ struct SwiftCode: Code {
     static let languageName: StaticString = "swift"
 
     let code: RawCode
+    let isSource: Bool
 
-    init(_ code: RawCode) {
+    init(_ code: RawCode, isSource: Bool) {
         self.code = code
+        self.isSource = isSource
     }
 }
