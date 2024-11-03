@@ -15,4 +15,19 @@ extension Diagnostic {
     func formattedLine() -> String {
         "Error at \(start) to \(end): \(error.reason)"
     }
+
+    func formattedInCode(_ program: Program) -> String {
+        program.source.formattedAsCodeBlock({ code in
+            // TODO: account for errors across multiple lines
+            let insertIndex = code.endOfLine(containing: start.index)
+            let leftPadding = String(repeating: " ", count: Int(start.x))
+            let underline = String(repeating: "^", count: Int(end.x - start.x))
+            let reason = error.reason
+            let text = "\n\(leftPadding)\(underline) \(reason)"
+
+            var string = code.string
+            string.insert(contentsOf: text, at: insertIndex)
+            return string
+        })
+    }
 }
