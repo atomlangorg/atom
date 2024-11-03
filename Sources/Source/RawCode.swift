@@ -41,6 +41,11 @@ struct RawCode {
         return SourceLocation(index: index, x: x, y: y)
     }
 
+    func endOfLine(containing index: Index) -> Index {
+        // TODO: implement as binary search to make faster
+        lineSeparators.first(where: { $0 > index }) ?? string.endIndex
+    }
+
     private func countChars(in range: Range<Index>) -> UInt {
         var count: UInt = 0
 
