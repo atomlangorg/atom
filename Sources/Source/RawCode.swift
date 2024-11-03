@@ -17,28 +17,28 @@ struct RawCode {
     }
 
     func sourceLocation(at index: Index) -> SourceLocation {
-        // Calculate line
-        var line: UInt = 0
+        // Calculate y
+        var y: UInt = 0
         var lastLineSepIndex: Index?
         for lineSepIndex in lineSeparators {
             if lineSepIndex > index {
                 break
             }
             lastLineSepIndex = lineSepIndex
-            line += 1
+            y += 1
         }
 
-        // Calculate column
+        // Calculate x
         let lineStartIndex: Index
         if let lastLineSepIndex {
             lineStartIndex = string.index(after: lastLineSepIndex)
         } else {
             lineStartIndex = string.startIndex
         }
-        let column = countChars(in: lineStartIndex ..< index)
+        let x = countChars(in: lineStartIndex ..< index)
 
         // Return location
-        return SourceLocation(index: index, line: line, column: column)
+        return SourceLocation(index: index, x: x, y: y)
     }
 
     private func countChars(in range: Range<Index>) -> UInt {

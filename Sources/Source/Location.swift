@@ -7,8 +7,16 @@
 
 struct SourceLocation {
     let index: RawCode.Index
-    let line: UInt
-    let column: UInt
+    let x: UInt
+    let y: UInt
+
+    var line: UInt {
+        y + 1
+    }
+
+    var column: UInt {
+        x + 1
+    }
 }
 
 extension SourceLocation: CustomDebugStringConvertible {
