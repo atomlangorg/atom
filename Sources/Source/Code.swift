@@ -22,8 +22,8 @@ extension Code {
         code.string
     }
 
-    func formattedAsCodeBlock(_ preformatting: (RawCode) -> RawCode = { $0 }) -> String {
-        let preformatted = preformatting(code).string
+    func formattedAsCodeBlock(_ preformatting: (RawCode) -> String = { $0.string }) -> String {
+        let preformatted = preformatting(code)
         return "```\(Self.languageName)\n\(preformatted)\n```"
     }
 }
