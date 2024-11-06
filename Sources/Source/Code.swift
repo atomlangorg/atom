@@ -24,8 +24,19 @@ extension Code {
     }
 
     func formattedAsCodeBlock(_ preformatting: (RawCode) -> String = { $0.string }) -> String {
-        let preformatted = preformatting(code)
-        return "```\(Self.languageName)\n\(preformatted)\n```"
+        let formatted: String
+        if isSource {
+            var preformatted = ""
+            for (lineNumber, lineContent) in zip(1..., code.lines()) {
+                // TODO: fix for when line number has different number of characters
+                preformatted.append("\(lineNumber) | \(lineContent)\n")
+            }
+            _ = preformatted.popLast()
+            formatted = preformatted
+        } else {
+            formatted = preformatting(code)
+        }
+        return "```\(Self.languageName)\n\(formatted)\n```"
     }
 }
 
