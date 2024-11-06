@@ -9,7 +9,7 @@ struct Program {
     let source: AtomCode
 
     init(_ input: String) {
-        source = AtomCode(input)
+        source = AtomCode(input, isSource: true)
     }
 }
 
