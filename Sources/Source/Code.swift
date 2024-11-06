@@ -27,9 +27,11 @@ extension Code {
         let formatted: String
         if isSource {
             var preformatted = ""
+            let digitCount = String(code.lineCount()).count
             for (lineNumber, lineContent) in zip(1..., code.lines()) {
-                // TODO: fix for when line number has different number of characters
-                preformatted.append("\(lineNumber) | \(lineContent)\n")
+                let paddingCount = digitCount - String(lineNumber).count
+                let padding = String(String(repeating: " ", count: paddingCount))
+                preformatted.append("\(padding)\(lineNumber) | \(lineContent)\n")
             }
             _ = preformatted.popLast()
             formatted = preformatted
