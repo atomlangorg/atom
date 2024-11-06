@@ -46,6 +46,11 @@ struct RawCode {
         lineSeparators.first(where: { $0 > index }) ?? string.endIndex
     }
 
+    func lines() -> [Substring] {
+        // TODO: use precalculated line separators to make faster
+        string.split(omittingEmptySubsequences: false, whereSeparator: Self.isLineSeparator(_:))
+    }
+
     private func countChars(in range: Range<Index>) -> UInt {
         var count: UInt = 0
 
