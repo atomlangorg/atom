@@ -23,7 +23,7 @@ extension Code {
         code.string
     }
 
-    func formattedAsCodeBlock(_ preformatting: (RawCode) -> String = { $0.string }) -> String {
+    func formattedAsCodeBlock(_ preformatting: (RawCode, Int) -> String = { c, _ in c.string }) -> String {
         let formatted: String
         if isSource {
             var preformatted = ""
@@ -36,7 +36,7 @@ extension Code {
             _ = preformatted.popLast()
             formatted = preformatted
         } else {
-            formatted = preformatting(code)
+            formatted = preformatting(code, 0)
         }
         return "```\(Self.languageName)\n\(formatted)\n```"
     }
