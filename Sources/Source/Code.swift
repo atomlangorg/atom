@@ -34,7 +34,7 @@ extension Code {
                 preformatted.append("\(padding)\(lineNumber) | \(lineContent)\n")
             }
             _ = preformatted.popLast()
-            formatted = preformatted
+            formatted = preformatting(RawCode(preformatted), digitCount + 3)
         } else {
             formatted = preformatting(code, 0)
         }
