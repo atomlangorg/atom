@@ -21,7 +21,7 @@ struct RawCode {
         var y: UInt = 0
         var lastLineSepIndex: Index?
         for lineSepIndex in lineSeparators {
-            if lineSepIndex > index {
+            if lineSepIndex >= index {
                 break
             }
             lastLineSepIndex = lineSepIndex
