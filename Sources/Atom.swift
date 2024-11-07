@@ -24,6 +24,10 @@ let age: Int
 
         switch result {
         case let .program(code):
+            print("Source:")
+            print(program.source.formattedAsCodeBlock())
+
+            print("\nOutput:")
             print(code.formattedAsCodeBlock())
         case let .error(diagnostic):
             print(diagnostic.formattedInCode(program))
