@@ -3,7 +3,12 @@ import ArgumentParser
 @main
 struct Atom: ParsableCommand {
     func run() {
-        print("atom")
+        print("""
+╭──────╮
+│ atom │
+╰──────╯
+
+""")
 
         let input = #"""
 let x = 3 + 3 * 3 + 3
