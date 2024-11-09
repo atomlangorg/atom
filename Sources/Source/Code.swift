@@ -36,6 +36,10 @@ extension Code {
         }
         return "```\(Self.languageName)\n\(formatted)\n```"
     }
+
+    func unformatted() -> String {
+        raw.string
+    }
 }
 
 struct AtomCode: Code {
