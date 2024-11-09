@@ -5,7 +5,7 @@
 //  Created by George Elsham on 20/10/2024.
 //
 
-protocol Code: CustomStringConvertible {
+protocol Code {
     static var languageName: StaticString { get }
 
     var code: RawCode { get }
@@ -17,10 +17,6 @@ protocol Code: CustomStringConvertible {
 extension Code {
     init(_ string: String, isSource: Bool = false) {
         self.init(RawCode(string), isSource: isSource)
-    }
-
-    var description: String {
-        code.string
     }
 
     func formattedAsCodeBlock(_ preformatting: (RawCode, Int) -> String = { c, _ in c.string }) -> String {
