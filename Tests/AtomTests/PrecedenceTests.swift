@@ -20,7 +20,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "(3 + 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "(3 + 3)")
     }
 
     @Test("Check precedence of two additions")
@@ -33,7 +34,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "((3 + 3) + 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "((3 + 3) + 3)")
     }
 
     @Test("Check precedence of three additions")
@@ -46,7 +48,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "(((3 + 3) + 3) + 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "(((3 + 3) + 3) + 3)")
     }
 
     @Test("Check precedence of one multiplication")
@@ -59,7 +62,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "(3 * 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "(3 * 3)")
     }
 
     @Test("Check precedence of two multiplications")
@@ -72,7 +76,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "((3 * 3) * 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "((3 * 3) * 3)")
     }
 
     @Test("Check precedence of three multiplications")
@@ -85,7 +90,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "(((3 * 3) * 3) * 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "(((3 * 3) * 3) * 3)")
     }
 
     @Test("Check precedence for a mix of additions and multiplications (1)")
@@ -98,7 +104,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "((3 + (3 * 3)) + 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "((3 + (3 * 3)) + 3)")
     }
 
     @Test("Check precedence for a mix of additions and multiplications (2)")
@@ -111,7 +118,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "((3 + 3) + (3 * 3))")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "((3 + 3) + (3 * 3))")
     }
 
     @Test("Check precedence for a mix of additions and multiplications (3)")
@@ -124,7 +132,8 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "(((3 * 3) + 3) + 3)")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "(((3 * 3) + 3) + 3)")
     }
 
     @Test("Check precedence for a mix of additions and multiplications (4)")
@@ -137,6 +146,7 @@ struct PrecedenceTests {
             return
         }
 
-        #expect(code == "((3 * 3) + (3 * 3))")
+        let codeStr = code.unformatted()
+        #expect(codeStr == "((3 * 3) + (3 * 3))")
     }
 }
