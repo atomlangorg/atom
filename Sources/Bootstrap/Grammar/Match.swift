@@ -687,13 +687,13 @@ enum Match {
                 }
             ),
             GrammarPattern(
-                parts: (Statement.self, LineSeparator.self, Program.self),
+                parts: (Line<Statement>.self, LineSeparator.self, Program.self),
                 gen: { statement, _, program in
                     ProgramIr(statements: CollectionOfOne(statement) + program.statements)
                 }
             ),
             GrammarPattern(
-                parts: (Statement.self),
+                parts: (Line<Statement>.self),
                 gen: { statement in
                     ProgramIr(statements: [statement])
                 }
