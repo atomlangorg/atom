@@ -6,25 +6,25 @@
 //
 
 struct Stream {
-    private let code: RawCode
+    private let raw: RawCode
     private var index: RawCode.Index
     private var wildcardIndexes: [RawCode.Index]
 
-    init(code: RawCode) {
-        self.code = code
-        index = code.string.startIndex
+    init(raw: RawCode) {
+        self.raw = raw
+        index = raw.string.startIndex
         wildcardIndexes = []
     }
 
     func isEnd() -> Bool {
-        index >= code.string.endIndex
+        index >= raw.string.endIndex
     }
 
     func topChar() -> Character? {
         if isEnd() {
             return nil
         }
-        return code.string[index]
+        return raw.string[index]
     }
 
     mutating func nextIf(char: Character) -> StreamStateMatch<RawStringIr> {
@@ -34,7 +34,7 @@ struct Stream {
         if char != c {
             return .dontConsume
         }
-        code.string.formIndex(after: &index)
+        raw.string.formIndex(after: &index)
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
@@ -43,12 +43,12 @@ struct Stream {
             return .end
         }
         wildcardIndexes.append(index)
-        code.string.formIndex(after: &index)
+        raw.string.formIndex(after: &index)
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
     func sourceLocation() -> SourceLocation {
-        code.sourceLocation(at: index)
+        raw.sourceLocation(at: index)
     }
 
     func isEvenWith(stream: Stream) -> Bool {
