@@ -15,7 +15,7 @@ struct Program {
 
 extension Program {
     func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult<SwiftCode> {
-        var stream = Stream(code: source.code)
+        var stream = Stream(code: source.raw)
         let result = root.consume(stream: &stream, context: GrammarContext())
 
         func earlyEndResult() -> ConversionResult<SwiftCode> {

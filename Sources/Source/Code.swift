@@ -8,10 +8,10 @@
 protocol Code {
     static var languageName: StaticString { get }
 
-    var code: RawCode { get }
+    var raw: RawCode { get }
     var isSource: Bool { get }
 
-    init(_ code: RawCode, isSource: Bool)
+    init(_ raw: RawCode, isSource: Bool)
 }
 
 extension Code {
@@ -23,8 +23,8 @@ extension Code {
         let formatted: String
         if isSource {
             var preformatted = ""
-            let digitCount = String(code.lineCount()).count
-            for (lineNumber, lineContent) in zip(1..., code.lines()) {
+            let digitCount = String(raw.lineCount()).count
+            for (lineNumber, lineContent) in zip(1..., raw.lines()) {
                 let paddingCount = digitCount - String(lineNumber).count
                 let padding = String(String(repeating: " ", count: paddingCount))
                 preformatted.append("\(padding)\(lineNumber) | \(lineContent)\n")
@@ -32,7 +32,7 @@ extension Code {
             _ = preformatted.popLast()
             formatted = preformatting(RawCode(preformatted), digitCount + 3)
         } else {
-            formatted = preformatting(code, 0)
+            formatted = preformatting(raw, 0)
         }
         return "```\(Self.languageName)\n\(formatted)\n```"
     }
@@ -41,11 +41,11 @@ extension Code {
 struct AtomCode: Code {
     static let languageName: StaticString = "atom"
 
-    let code: RawCode
+    let raw: RawCode
     let isSource: Bool
 
-    init(_ code: RawCode, isSource: Bool) {
-        self.code = code
+    init(_ raw: RawCode, isSource: Bool) {
+        self.raw = raw
         self.isSource = isSource
     }
 }
@@ -53,11 +53,11 @@ struct AtomCode: Code {
 struct SwiftCode: Code {
     static let languageName: StaticString = "swift"
 
-    let code: RawCode
+    let raw: RawCode
     let isSource: Bool
 
-    init(_ code: RawCode, isSource: Bool) {
-        self.code = code
+    init(_ raw: RawCode, isSource: Bool) {
+        self.raw = raw
         self.isSource = isSource
     }
 }
