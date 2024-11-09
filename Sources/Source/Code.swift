@@ -20,7 +20,7 @@ extension Code {
     }
 
     var description: String {
-        code.string
+        raw.string
     }
 
     func formattedAsCodeBlock(_ preformatting: (RawCode, Int) -> String = { c, _ in c.string }) -> String {
