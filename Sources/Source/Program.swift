@@ -15,10 +15,14 @@ struct Program {
 
 extension Program {
     func intoSwift(root: (some GrammarMatch).Type) -> ConversionResult<SwiftCode> {
+        intoLanguage(root: root)
+    }
+
+    private func intoLanguage<Root: GrammarMatch, C: Code & CodeFromIr>(root: Root.Type) -> ConversionResult<C> {
         var stream = Stream(raw: source.raw)
         let result = root.consume(stream: &stream, context: GrammarContext())
 
-        func earlyEndResult() -> ConversionResult<SwiftCode> {
+        func earlyEndResult() -> ConversionResult<C> {
             let location = stream.sourceLocation()
             let error = GrammarError("unexpected grammar")
             let diagnostic = Diagnostic(start: location, end: location, error: error)
@@ -32,7 +36,7 @@ extension Program {
             guard stream.isEnd() else {
                 return earlyEndResult()
             }
-            return .program(ir.swift())
+            return .program(C.fromIr(ir))
         case .end:
             fatalError("Unreachable")
         case let .error(diagnostic):
