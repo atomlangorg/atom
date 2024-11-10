@@ -28,6 +28,7 @@ extension Code {
         preformatting(&formatted)
 
         if isSource {
+            // Line number preparation
             let digitCount = String(raw.lineCount()).count
             func preLineText(lineNumber: UInt) -> String {
                 let paddingCount = digitCount - String(lineNumber).count
@@ -35,6 +36,7 @@ extension Code {
                 return "\(padding)\(lineNumber) | "
             }
 
+            // Insert line numbers
             let initial = preLineText(lineNumber: 1)
             formatted.insert(initial, at: raw.string.startIndex)
             for (lineNumber, separatorIndex) in zip((2 as UInt)..., raw.lineSeparators) {
@@ -43,6 +45,7 @@ extension Code {
                 formatted.insert(text, at: nextIndex)
             }
 
+            // Indent on new modified lines
             formatted.modify(each: { insertion in
                 if insertion.string.contains("\n") {
                     insertion.string = insertion.string.replacingOccurrences(of: "\n", with: "\n    ")
