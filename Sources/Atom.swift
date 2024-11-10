@@ -30,6 +30,7 @@ let age: Int
             print("\nOutput:")
             print(code.formattedAsCodeBlock())
         case let .error(diagnostic):
+            print(diagnostic.formattedLine())
             print(diagnostic.formattedInCode(program))
         }
     }
