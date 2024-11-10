@@ -15,8 +15,8 @@ let x = 3 + 3 * 3 + 3
 let greeting = "hello\nworld"
 
 struct Person {
-let name: String
-let age: Int
+    let name: String
+    let age: Int
 }
 """#
         let program = Program(input)
