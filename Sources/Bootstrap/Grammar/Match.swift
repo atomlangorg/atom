@@ -611,13 +611,13 @@ enum Match {
                 }
             ),
             GrammarPattern(
-                parts: (StructField.self, LineSeparator.self, StructFields.self),
+                parts: (Line<StructField>.self, LineSeparator.self, StructFields.self),
                 gen: { field, _, rest in
                     StructFieldsIr(fields: CollectionOfOne(field) + rest.fields)
                 }
             ),
             GrammarPattern(
-                parts: (StructField.self),
+                parts: (Line<StructField>.self),
                 gen: { field in
                     StructFieldsIr(fields: [field])
                 }
