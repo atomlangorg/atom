@@ -62,6 +62,10 @@ extension Code {
     }
 }
 
+protocol CodeFromIr where Self: Code {
+    static func fromIr(_ ir: some IR) -> Self
+}
+
 struct AtomCode: Code {
     static let languageName: StaticString = "atom"
 
@@ -74,7 +78,7 @@ struct AtomCode: Code {
     }
 }
 
-struct SwiftCode: Code {
+struct SwiftCode: Code, CodeFromIr {
     static let languageName: StaticString = "swift"
 
     let raw: RawCode
@@ -83,5 +87,9 @@ struct SwiftCode: Code {
     init(_ raw: RawCode, isSource: Bool) {
         self.raw = raw
         self.isSource = isSource
+    }
+
+    static func fromIr(_ ir: some IR) -> SwiftCode {
+        ir.swift()
     }
 }
