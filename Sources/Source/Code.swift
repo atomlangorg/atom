@@ -23,22 +23,35 @@ extension Code {
         raw.string
     }
 
-    func formattedAsCodeBlock(_ preformatting: (RawCode, Int) -> String = { c, _ in c.string }) -> String {
-        let formatted: String
+    func formattedAsCodeBlock(_ preformatting: (inout ModifiedRawCode) -> Void = { _ in }) -> String {
+        var formatted = ModifiedRawCode(base: raw)
+        preformatting(&formatted)
+
         if isSource {
-            var preformatted = ""
             let digitCount = String(raw.lineCount()).count
-            for (lineNumber, lineContent) in zip(1..., raw.lines()) {
+            func preLineText(lineNumber: UInt) -> String {
                 let paddingCount = digitCount - String(lineNumber).count
                 let padding = String(String(repeating: " ", count: paddingCount))
-                preformatted.append("\(padding)\(lineNumber) | \(lineContent)\n")
+                return "\(padding)\(lineNumber) | "
             }
-            _ = preformatted.popLast()
-            formatted = preformatting(RawCode(preformatted), digitCount + 3)
-        } else {
-            formatted = preformatting(raw, 0)
+
+            let initial = preLineText(lineNumber: 1)
+            formatted.insert(initial, at: raw.string.startIndex)
+            for (lineNumber, separatorIndex) in zip((2 as UInt)..., raw.lineSeparators) {
+                let nextIndex = raw.string.index(after: separatorIndex)
+                let text = preLineText(lineNumber: lineNumber)
+                formatted.insert(text, at: nextIndex)
+            }
+
+            formatted.modify(each: { insertion in
+                if insertion.string.contains("\n") {
+                    insertion.string = insertion.string.replacingOccurrences(of: "\n", with: "\n    ")
+                }
+            })
         }
-        return "```\(Self.languageName)\n\(formatted)\n```"
+
+        let formattedStr = formatted.string()
+        return "```\(Self.languageName)\n\(formattedStr)\n```"
     }
 
     func unformatted() -> String {

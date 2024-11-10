@@ -9,7 +9,7 @@ struct RawCode {
     typealias Index = String.Index
 
     let string: String
-    private let lineSeparators: [Index]
+    let lineSeparators: [Index]
 
     init(_ string: String) {
         self.string = string
@@ -83,5 +83,51 @@ struct RawCode {
 
     private static func isLineSeparator(_ char: Character) -> Bool {
         char == "\n" || char == "\r\n"
+    }
+}
+
+struct ModifiedRawCode {
+    let base: RawCode
+    private var insertions: [Insertion]
+
+    init(base: RawCode) {
+        self.base = base
+        insertions = []
+    }
+
+    func string() -> String {
+        var string = base.string
+        for insertion in insertions {
+            string.insert(contentsOf: insertion.string, at: insertion.index)
+        }
+        return string
+    }
+
+    mutating func insert(_ string: String, at index: String.Index) {
+        var i = 0
+        for ins in insertions {
+            if ins.index < index {
+                break
+            }
+            i += 1
+        }
+
+        let insertion = Insertion(index: index, string: string)
+        insertions.insert(insertion, at: i)
+    }
+
+    mutating func modify(each transform: (inout Insertion) -> Void) {
+        for (index, insertion) in insertions.enumerated() {
+            var insertion = insertion
+            transform(&insertion)
+            insertions[index] = insertion
+        }
+    }
+}
+
+extension ModifiedRawCode {
+    struct Insertion {
+        let index: String.Index
+        var string: String
     }
 }
