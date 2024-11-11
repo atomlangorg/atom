@@ -9,6 +9,16 @@ struct Diagnostic {
     let start: SourceLocation
     let end: SourceLocation
     let error: GrammarError
+
+    init(start: SourceLocation, end: SourceLocation, error: GrammarError) {
+        guard start < end else {
+            fatalError("Invalid source location range of \(start) to \(end)")
+        }
+
+        self.start = start
+        self.end = end
+        self.error = error
+    }
 }
 
 extension Diagnostic {
