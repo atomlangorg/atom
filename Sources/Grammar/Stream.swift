@@ -47,7 +47,7 @@ struct Stream {
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
-    func sourceLocation() -> SourceLocation {
+    func currentLocation() -> SourceLocation {
         raw.sourceLocation(at: index)
     }
 

@@ -80,7 +80,7 @@ extension GrammarMatch {
 
             return .doConsume(ir)
         case let .failure(error):
-            let diagnostic = Diagnostic(start: stream.sourceLocation(), end: greediest.stream.sourceLocation(), error: error)
+            let diagnostic = Diagnostic(start: stream.currentLocation(), end: greediest.stream.currentLocation(), error: error)
             return .error(diagnostic)
         }
     }
