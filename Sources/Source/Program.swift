@@ -24,7 +24,11 @@ extension Program {
 
         func earlyEndResult() -> ConversionResult<C> {
             let location = stream.farthestLocation()
-            let error = GrammarError("unexpected grammar")
+            let error = if stream.isFarthestAtEnd() {
+                GrammarError("incomplete grammar")
+            } else {
+                GrammarError("unexpected grammar")
+            }
             let diagnostic = Diagnostic(start: location, end: location.right(), error: error)
             return .error(diagnostic)
         }
