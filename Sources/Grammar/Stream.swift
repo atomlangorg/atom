@@ -8,11 +8,13 @@
 struct Stream {
     private let raw: RawCode
     private var index: RawCode.Index
+    private var farthestIndex: RawCode.Index
     private var wildcardIndexes: [RawCode.Index]
 
     init(raw: RawCode) {
         self.raw = raw
         index = raw.string.startIndex
+        farthestIndex = index
         wildcardIndexes = []
     }
 
@@ -34,7 +36,7 @@ struct Stream {
         if char != c {
             return .dontConsume
         }
-        raw.string.formIndex(after: &index)
+        incrementIndex()
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
@@ -43,12 +45,22 @@ struct Stream {
             return .end
         }
         wildcardIndexes.append(index)
-        raw.string.formIndex(after: &index)
+        incrementIndex()
         return .doConsume(RawStringIr(string: "\(c)"))
     }
 
     func currentLocation() -> SourceLocation {
         raw.sourceLocation(at: index)
+    }
+
+    func farthestLocation() -> SourceLocation {
+        raw.sourceLocation(at: farthestIndex)
+    }
+
+    mutating func updateFarthest(relativeTo stream: Stream) {
+        if stream.farthestIndex > farthestIndex {
+            farthestIndex = stream.farthestIndex
+        }
     }
 
     func isEvenWith(stream: Stream) -> Bool {
@@ -101,6 +113,11 @@ struct Stream {
     private func firstWildcardIndex(from index: RawCode.Index) -> RawCode.Index? {
         // TODO: implement as binary search to make faster
         wildcardIndexes.first(where: { $0 >= index })
+    }
+
+    private mutating func incrementIndex() {
+        raw.string.formIndex(after: &index)
+        farthestIndex = index
     }
 }
 
