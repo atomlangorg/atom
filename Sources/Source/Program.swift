@@ -23,7 +23,7 @@ extension Program {
         let result = root.consume(stream: &stream, context: GrammarContext())
 
         func earlyEndResult() -> ConversionResult<C> {
-            let location = stream.currentLocation()
+            let location = stream.farthestLocation()
             let error = GrammarError("unexpected grammar")
             let diagnostic = Diagnostic(start: location, end: location, error: error)
             return .error(diagnostic)
