@@ -10,11 +10,11 @@ struct SourceLocation {
     let x: UInt
     let y: UInt
 
-    var line: UInt {
+    func line() -> UInt {
         y + 1
     }
 
-    var column: UInt {
+    func column() -> UInt {
         x + 1
     }
 
@@ -37,6 +37,8 @@ extension SourceLocation: Comparable {
 
 extension SourceLocation: CustomDebugStringConvertible {
     var debugDescription: String {
-        "(\(line):\(column))"
+        let l = line()
+        let c = column()
+        return "(\(l):\(c))"
     }
 }
