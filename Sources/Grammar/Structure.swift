@@ -38,7 +38,9 @@ extension GrammarMatch {
             var s = stream
             context.setPatternIndex(index)
 
-            switch pattern.consume(stream: &s, context: context) {
+            let state = pattern.consume(stream: &s, context: context)
+            stream.updateFarthest(relativeTo: s)
+            switch state {
             case .dontConsume:
                 continue
             case let .doConsume(result):
@@ -147,7 +149,9 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
             case .cycle:
                 return .dontConsume
             case let .changed(newContext):
-                switch part.consume(stream: &s, context: newContext) {
+                let state = part.consume(stream: &s, context: newContext)
+                stream.updateFarthest(relativeTo: s)
+                switch state {
                 case .dontConsume:
                     return .dontConsume
                 case let .doConsume(ir):
