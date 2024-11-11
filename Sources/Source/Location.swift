@@ -23,6 +23,18 @@ struct SourceLocation {
     }
 }
 
+extension SourceLocation: Comparable {
+    static func < (lhs: SourceLocation, rhs: SourceLocation) -> Bool {
+        if lhs.y < rhs.y {
+            return true
+        }
+        if lhs.y == rhs.y {
+            return lhs.x < rhs.x
+        }
+        return false
+    }
+}
+
 extension SourceLocation: CustomDebugStringConvertible {
     var debugDescription: String {
         "(\(line):\(column))"
