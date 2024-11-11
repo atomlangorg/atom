@@ -25,7 +25,7 @@ extension Program {
         func earlyEndResult() -> ConversionResult<C> {
             let location = stream.farthestLocation()
             let error = GrammarError("unexpected grammar")
-            let diagnostic = Diagnostic(start: location, end: location, error: error)
+            let diagnostic = Diagnostic(start: location, end: location.right(), error: error)
             return .error(diagnostic)
         }
 

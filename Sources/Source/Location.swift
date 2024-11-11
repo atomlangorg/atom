@@ -17,6 +17,10 @@ struct SourceLocation {
     var column: UInt {
         x + 1
     }
+
+    func right() -> SourceLocation {
+        SourceLocation(index: index, x: x + 1, y: y)
+    }
 }
 
 extension SourceLocation: CustomDebugStringConvertible {
