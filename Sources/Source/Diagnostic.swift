@@ -21,7 +21,7 @@ extension Diagnostic {
             // TODO: account for errors across multiple lines
             let insertIndex = code.base.endOfLine(containing: start.index)
             let leftPadding = String(repeating: " ", count: Int(start.x))
-            let underlineCount = max(1, Int(end.x - start.x))
+            let underlineCount = Int(end.x - start.x)
             let underline = String(repeating: "^", count: underlineCount)
             let reason = error.reason
             let text = "\n\(leftPadding)\(underline) \(reason)"
