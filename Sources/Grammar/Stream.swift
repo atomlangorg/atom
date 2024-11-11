@@ -22,6 +22,10 @@ struct Stream {
         index >= raw.string.endIndex
     }
 
+    func isFarthestAtEnd() -> Bool {
+        farthestIndex >= raw.string.endIndex
+    }
+
     func topChar() -> Character? {
         if isEnd() {
             return nil
