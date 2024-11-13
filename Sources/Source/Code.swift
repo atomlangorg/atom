@@ -48,7 +48,8 @@ extension Code {
             // Indent on new modified lines
             formatted.modify(each: { insertion in
                 if insertion.string.contains("\n") {
-                    insertion.string = insertion.string.replacingOccurrences(of: "\n", with: "\n    ")
+                    let space = String(repeating: " ", count: digitCount)
+                    insertion.string = insertion.string.replacingOccurrences(of: "\n", with: "\n\(space)   ")
                 }
             })
         }
