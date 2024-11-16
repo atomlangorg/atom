@@ -32,7 +32,7 @@ extension Diagnostic {
             let insertIndex = code.base.endOfLine(containing: start.index)
             let leftPadding = String(repeating: " ", count: Int(start.x))
             let underlineCount = Int(end.x - start.x)
-            let underline = String(repeating: "^", count: underlineCount)
+            let underline = String(repeating: PrettyPrint.underline, count: underlineCount)
             let reason = error.reason
             let text = "\n\(leftPadding)\(underline) \(reason)"
             code.insert(text, at: insertIndex)
