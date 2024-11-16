@@ -7,5 +7,11 @@
 
 enum PrettyPrint {
     static let lineNumbersBorder = "│"
+    static let sectionCornerTopLeft = "╭"
+    static let sectionCornerTopRight = "╮"
+    static let sectionCornerBottomLeft = "╰"
+    static let sectionCornerBottomRight = "╯"
+    static let sectionLineHorizontal = "—"
+    static let sectionLineVertical = "│"
     static let underline = "^"
 }
