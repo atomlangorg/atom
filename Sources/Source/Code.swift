@@ -18,7 +18,7 @@ extension Code {
         raw.string
     }
 
-    func formattedAsCodeBlock(preformatting: (inout ModifiedRawCode) -> Void = { _ in }, postformatting: (inout ModifiedRawCode) -> Void = { _ in }) -> String {
+    func formattedAsCodeBlock(preformatting: (inout ModifiedRawCode) -> Void = { _ in }, postformatting: (inout ModifiedRawCode, Int) -> Void = { _, _ in }) -> String {
         var formatted = ModifiedRawCode(base: raw)
         preformatting(&formatted)
 
@@ -47,9 +47,14 @@ extension Code {
                     insertion.string = insertion.string.replacingOccurrences(of: "\n", with: "\n\(space)   ")
                 }
             })
+
+            // Post-formatting
+            let indent = digitCount + 3
+            postformatting(&formatted, indent)
+        } else {
+            postformatting(&formatted, 0)
         }
 
-        postformatting(&formatted)
         let formattedStr = formatted.string()
         return "```\(Self.languageName)\n\(formattedStr)\n```"
     }
