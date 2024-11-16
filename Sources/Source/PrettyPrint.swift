@@ -11,7 +11,7 @@ enum PrettyPrint {
     static let sectionCornerTopRight = "╮"
     static let sectionCornerBottomLeft = "╰"
     static let sectionCornerBottomRight = "╯"
-    static let sectionLineHorizontal = "—"
+    static let sectionLineHorizontal = "─"
     static let sectionLineVertical = "│"
     static let underline = "^"
 }
