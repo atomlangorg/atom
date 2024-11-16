@@ -18,7 +18,7 @@ extension Code {
         raw.string
     }
 
-    func formattedAsCodeBlock(preformatting: (inout ModifiedRawCode) -> Void = { _ in }) -> String {
+    func formattedAsCodeBlock(preformatting: (inout ModifiedRawCode) -> Void = { _ in }, postformatting: (inout ModifiedRawCode) -> Void = { _ in }) -> String {
         var formatted = ModifiedRawCode(base: raw)
         preformatting(&formatted)
 
@@ -49,6 +49,7 @@ extension Code {
             })
         }
 
+        postformatting(&formatted)
         let formattedStr = formatted.string()
         return "```\(Self.languageName)\n\(formattedStr)\n```"
     }
