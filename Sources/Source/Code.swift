@@ -9,16 +9,11 @@ protocol Code: CustomStringConvertible {
     static var languageName: StaticString { get }
 
     var raw: RawCode { get }
-    var isSource: Bool { get }
 
-    init(_ raw: RawCode, isSource: Bool)
+    init(_ string: String)
 }
 
 extension Code {
-    init(_ string: String, isSource: Bool = false) {
-        self.init(RawCode(string), isSource: isSource)
-    }
-
     var description: String {
         raw.string
     }
@@ -27,7 +22,7 @@ extension Code {
         var formatted = ModifiedRawCode(base: raw)
         preformatting(&formatted)
 
-        if isSource {
+        if raw.isSource {
             // Line number preparation
             let digitCount = String(raw.lineCount()).count
             func preLineText(lineNumber: UInt) -> String {
@@ -71,11 +66,9 @@ struct AtomCode: Code {
     static let languageName: StaticString = "atom"
 
     let raw: RawCode
-    let isSource: Bool
 
-    init(_ raw: RawCode, isSource: Bool) {
-        self.raw = raw
-        self.isSource = isSource
+    init(_ string: String) {
+        raw = RawCode(string, isSource: true)
     }
 }
 
@@ -83,11 +76,9 @@ struct SwiftCode: Code, CodeFromIr {
     static let languageName: StaticString = "swift"
 
     let raw: RawCode
-    let isSource: Bool
 
-    init(_ raw: RawCode, isSource: Bool) {
-        self.raw = raw
-        self.isSource = isSource
+    init(_ string: String) {
+        raw = RawCode(string, isSource: false)
     }
 
     static func fromIr(_ ir: some IR) -> SwiftCode {

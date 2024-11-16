@@ -9,10 +9,12 @@ struct RawCode {
     typealias Index = String.Index
 
     let string: String
+    let isSource: Bool
     let lineSeparators: [Index]
 
-    init(_ string: String) {
+    init(_ string: String, isSource: Bool) {
         self.string = string
+        self.isSource = isSource
         lineSeparators = Self.calculateLineSeparatorIndexes(string: string)
     }
 
