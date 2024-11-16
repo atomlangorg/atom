@@ -30,8 +30,43 @@ extension Diagnostic {
         let isMultiline = start.y != end.y
 
         if isMultiline {
-            // TODO: account for errors across multiple lines
-            fatalError("unimplemented")
+            return program.source.formattedAsCodeBlock(preformatting: { code in
+                do {
+                    let insertIndex = code.base.endOfLine(containing: start.index)
+                    let leftPadding = String(repeating: PrettyPrint.sectionLineHorizontal, count: Int(start.x))
+                    let underline = PrettyPrint.underline
+                    let text = "\n\(leftPadding)\(underline)"
+                    code.insert(text, at: insertIndex)
+                }
+                do {
+                    let insertIndex = code.base.endOfLine(containing: end.index)
+                    let leftPadding = String(repeating: PrettyPrint.sectionLineHorizontal, count: Int(end.x - 1))
+                    let underline = PrettyPrint.underline
+                    let reason = error.reason
+                    let text = "\n\(leftPadding)\(underline) \(reason)"
+                    code.insert(text, at: insertIndex)
+                }
+            }, postformatting: { code, indent in
+                let lineCount = end.y - start.y + 1
+                var i: UInt = 0
+                code.modify(each: { insertion in
+                    guard start.index <= insertion.index && insertion.index <= end.index else {
+                        return
+                    }
+
+                    let char = switch lineCount - i {
+                    case 0: PrettyPrint.sectionCornerTopLeft
+                    case lineCount: PrettyPrint.sectionCornerBottomLeft
+                    default: PrettyPrint.sectionLineVertical
+                    }
+
+                    let indexOffset = insertion.string.first == "\n" ? 1 : 0
+                    let index = insertion.string.index(insertion.string.startIndex, offsetBy: indent - 1 + indexOffset)
+                    insertion.string.replaceSubrange(index ... index, with: String(char))
+
+                    i += 1
+                })
+            })
         } else {
             return program.source.formattedAsCodeBlock(preformatting: { code in
                 let insertIndex = code.base.endOfLine(containing: start.index)
