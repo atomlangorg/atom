@@ -27,15 +27,21 @@ extension Diagnostic {
     }
 
     func formattedInCode(_ program: Program) -> String {
-        program.source.formattedAsCodeBlock(preformatting: { code in
+        let isMultiline = start.y != end.y
+
+        if isMultiline {
             // TODO: account for errors across multiple lines
-            let insertIndex = code.base.endOfLine(containing: start.index)
-            let leftPadding = String(repeating: " ", count: Int(start.x))
-            let underlineCount = Int(end.x - start.x)
-            let underline = String(repeating: PrettyPrint.underline, count: underlineCount)
-            let reason = error.reason
-            let text = "\n\(leftPadding)\(underline) \(reason)"
-            code.insert(text, at: insertIndex)
-        })
+            fatalError("unimplemented")
+        } else {
+            return program.source.formattedAsCodeBlock(preformatting: { code in
+                let insertIndex = code.base.endOfLine(containing: start.index)
+                let leftPadding = String(repeating: " ", count: Int(start.x))
+                let underlineCount = Int(end.x - start.x)
+                let underline = String(repeating: PrettyPrint.underline, count: underlineCount)
+                let reason = error.reason
+                let text = "\n\(leftPadding)\(underline) \(reason)"
+                code.insert(text, at: insertIndex)
+            })
+        }
     }
 }
