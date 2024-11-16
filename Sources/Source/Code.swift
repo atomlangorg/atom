@@ -18,7 +18,7 @@ extension Code {
         raw.string
     }
 
-    func formattedAsCodeBlock(_ preformatting: (inout ModifiedRawCode) -> Void = { _ in }) -> String {
+    func formattedAsCodeBlock(preformatting: (inout ModifiedRawCode) -> Void = { _ in }) -> String {
         var formatted = ModifiedRawCode(base: raw)
         preformatting(&formatted)
 

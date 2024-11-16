@@ -27,7 +27,7 @@ extension Diagnostic {
     }
 
     func formattedInCode(_ program: Program) -> String {
-        program.source.formattedAsCodeBlock({ code in
+        program.source.formattedAsCodeBlock(preformatting: { code in
             // TODO: account for errors across multiple lines
             let insertIndex = code.base.endOfLine(containing: start.index)
             let leftPadding = String(repeating: " ", count: Int(start.x))
