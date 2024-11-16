@@ -33,7 +33,7 @@ extension Code {
             func preLineText(lineNumber: UInt) -> String {
                 let paddingCount = digitCount - String(lineNumber).count
                 let padding = String(String(repeating: " ", count: paddingCount))
-                return "\(padding)\(lineNumber) | "
+                return "\(padding)\(lineNumber) │ "
             }
 
             // Insert line numbers
