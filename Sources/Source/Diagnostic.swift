@@ -50,7 +50,7 @@ extension Diagnostic {
                 let lineCount = end.y - start.y + 1
                 var i: UInt = 0
                 code.modify(each: { insertion in
-                    guard start.index <= insertion.index && insertion.index <= end.index else {
+                    guard start.index < insertion.index && insertion.index <= end.index else {
                         return
                     }
 
