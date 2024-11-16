@@ -6,12 +6,12 @@
 //
 
 enum PrettyPrint {
-    static let lineNumbersBorder = "│"
-    static let sectionCornerTopLeft = "╭"
-    static let sectionCornerTopRight = "╮"
-    static let sectionCornerBottomLeft = "╰"
-    static let sectionCornerBottomRight = "╯"
-    static let sectionLineHorizontal = "─"
-    static let sectionLineVertical = "│"
-    static let underline = "^"
+    static let lineNumbersBorder: Character = "│"
+    static let sectionCornerTopLeft: Character = "╭"
+    static let sectionCornerTopRight: Character = "╮"
+    static let sectionCornerBottomLeft: Character = "╰"
+    static let sectionCornerBottomRight: Character = "╯"
+    static let sectionLineHorizontal: Character = "─"
+    static let sectionLineVertical: Character = "│"
+    static let underline: Character = "^"
 }
