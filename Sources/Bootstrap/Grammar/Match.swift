@@ -45,6 +45,32 @@ enum Match {
         ]
     }
 
+    enum SpaceWithPossibleLineSeparatorPart: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.Space.self)
+            ),
+            GrammarPattern(
+                parts: (LineSeparator.self)
+            ),
+        ]
+    }
+
+    enum SpaceWithPossibleLineSeparator: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: ()
+            ),
+            GrammarPattern(
+                parts: (SpaceWithPossibleLineSeparatorPart.self, SpaceWithPossibleLineSeparator.self)
+            ),
+        ]
+    }
+
     enum Digit: GrammarMatch {
         typealias Output = RawStringIr
 
