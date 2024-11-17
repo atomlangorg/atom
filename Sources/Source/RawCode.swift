@@ -45,7 +45,7 @@ struct RawCode {
 
     func endOfLine(containing index: Index) -> Index {
         // TODO: implement as binary search to make faster
-        lineSeparators.first(where: { $0 > index }) ?? string.endIndex
+        lineSeparators.first(where: { $0 >= index }) ?? string.endIndex
     }
 
     func lines() -> [Substring] {
