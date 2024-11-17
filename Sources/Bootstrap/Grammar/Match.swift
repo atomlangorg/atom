@@ -45,7 +45,7 @@ enum Match {
         ]
     }
 
-    enum SpaceWithPossibleLineSeparatorPart: GrammarMatch {
+    enum SpaceOrLineSeparator: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -66,7 +66,7 @@ enum Match {
                 parts: ()
             ),
             GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparatorPart.self, SpaceWithPossibleLineSeparator.self)
+                parts: (SpaceOrLineSeparator.self, SpaceWithPossibleLineSeparator.self)
             ),
         ]
     }
