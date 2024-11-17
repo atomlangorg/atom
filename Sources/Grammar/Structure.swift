@@ -149,13 +149,16 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
             case .cycle:
                 return .dontConsume
             case let .changed(newContext):
+                let saved = s
                 let state = part.consume(stream: &s, context: newContext)
                 stream.updateFarthest(relativeTo: s)
                 switch state {
                 case .dontConsume:
                     return .dontConsume
                 case let .doConsume(ir):
-                    context.resetHistory()
+                    if s.isAheadOf(stream: saved) {
+                        context.resetHistory()
+                    }
                     irPack = irPack.appending(ir: ir)
                 case .end:
                     return .end
