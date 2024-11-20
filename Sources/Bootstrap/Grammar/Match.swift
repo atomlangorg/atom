@@ -641,19 +641,19 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LineSeparator.self, StructFields.self),
+                parts: (SpaceWithPossibleLineSeparator.self, StructFields.self),
                 gen: { _, rest in
                     rest
                 }
             ),
             GrammarPattern(
-                parts: (Line<StructField>.self, LineSeparator.self, StructFields.self),
+                parts: (StructField.self, SpaceWithDefiniteLineSeparator.self, StructFields.self),
                 gen: { field, _, rest in
                     StructFieldsIr(fields: CollectionOfOne(field) + rest.fields)
                 }
             ),
             GrammarPattern(
-                parts: (Line<StructField>.self),
+                parts: (StructField.self),
                 gen: { field in
                     StructFieldsIr(fields: [field])
                 }
