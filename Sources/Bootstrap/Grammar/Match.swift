@@ -717,19 +717,19 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LineSeparator.self, Program.self),
+                parts: (SpaceWithPossibleLineSeparator.self, Program.self),
                 gen: { _, program in
                     program
                 }
             ),
             GrammarPattern(
-                parts: (Line<Statement>.self, LineSeparator.self, Program.self),
+                parts: (Statement.self, SpaceWithDefiniteLineSeparator.self, Program.self),
                 gen: { statement, _, program in
                     ProgramIr(statements: CollectionOfOne(statement) + program.statements)
                 }
             ),
             GrammarPattern(
-                parts: (Line<Statement>.self),
+                parts: (Statement.self),
                 gen: { statement in
                     ProgramIr(statements: [statement])
                 }
