@@ -699,19 +699,6 @@ enum Match {
         ]
     }
 
-    enum Line<T: GrammarMatch>: GrammarMatch {
-        typealias Output = T.Output
-
-        static var patterns: [any GrammarPatternProtocol<Output>] {[
-            GrammarPattern(
-                parts: (SpaceZeroOrMore.self, T.self, SpaceZeroOrMore.self),
-                gen: { _, grammar, _ in
-                    grammar
-                }
-            ),
-        ]}
-    }
-
     enum Program: GrammarMatch {
         typealias Output = ProgramIr
 
