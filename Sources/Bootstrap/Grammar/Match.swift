@@ -730,6 +730,12 @@ enum Match {
                     ExpressionIr(expression: expr)
                 }
             ),
+            GrammarPattern(
+                parts: (Boolean.self),
+                gen: { expr in
+                    ExpressionIr(expression: expr)
+                }
+            ),
         ]
     }
 
