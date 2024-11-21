@@ -511,8 +511,8 @@ enum Match {
                 }
             ),
             GrammarPattern(
-                parts: (Literal.OpenRoundBracket.self, SpaceZeroOrMore.self, IntegerExpr.self, SpaceZeroOrMore.self, Literal.CloseRoundBracket.self),
-                gen: { _, _, expr, _, _ in
+                parts: (SymbolOpenRoundBracket.self, IntegerExpr.self, SymbolCloseRoundBracket.self),
+                gen: { _, expr, _ in
                     expr
                 },
                 options: [.resetPrecedence]
