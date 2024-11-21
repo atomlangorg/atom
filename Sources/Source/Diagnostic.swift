@@ -30,6 +30,7 @@ extension Diagnostic {
         let isMultiline = start.y != end.y
 
         if isMultiline {
+            var endInsertIndex: String.Index!
             return program.source.formattedAsCodeBlock(preformatting: { code in
                 do {
                     let insertIndex = code.base.endOfLine(containing: start.index)
@@ -40,6 +41,7 @@ extension Diagnostic {
                 }
                 do {
                     let insertIndex = code.base.endOfLine(containing: end.index)
+                    endInsertIndex = insertIndex
                     let leftPadding = String(repeating: PrettyPrint.sectionLineHorizontal, count: Int(end.x - 1))
                     let underline = PrettyPrint.underline
                     let reason = error.reason
@@ -50,7 +52,7 @@ extension Diagnostic {
                 let lineCount = end.y - start.y + 1
                 var i: UInt = 0
                 code.modify(each: { insertion in
-                    guard start.index < insertion.index && insertion.index <= end.index else {
+                    guard start.index < insertion.index && insertion.index <= endInsertIndex else {
                         return
                     }
 
