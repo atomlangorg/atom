@@ -13,6 +13,7 @@ struct Atom: ParsableCommand {
         let input = #"""
 let x = 3 + 3 * 3 + 3
 let greeting = "hello\nworld"
+let bool = false
 
 struct Person {
     let name: String
