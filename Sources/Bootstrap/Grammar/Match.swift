@@ -502,6 +502,26 @@ enum Match {
         ]
     }
 
+    enum FalseKeyword: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LowercaseF.self, Literal.LowercaseA.self, Literal.LowercaseL.self, Literal.LowercaseS.self, Literal.LowercaseE.self)
+            ),
+        ]
+    }
+
+    enum TrueKeyword: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LowercaseT.self, Literal.LowercaseR.self, Literal.LowercaseU.self, Literal.LowercaseE.self)
+            ),
+        ]
+    }
+
     enum Identifier: GrammarMatch {
         typealias Output = IdentifierIr
 
