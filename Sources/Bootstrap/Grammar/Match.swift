@@ -101,6 +101,46 @@ enum Match {
         ]
     }
 
+    enum SymbolAsterisk: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Asterisk.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
+    enum SymbolPlus: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Plus.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
+    enum SymbolMinus: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Minus.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
+    enum SymbolSlash: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Slash.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
     enum SymbolEquals: GrammarMatch {
         typealias Output = NeverIr
 
