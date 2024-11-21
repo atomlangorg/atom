@@ -566,32 +566,32 @@ enum Match {
                 precedence: Precedence(priority: .negate, associativity: .right)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Plus.self, SpaceZeroOrMore.self, IntegerExpr.self),
-                gen: { lhs, _, _, _, rhs in
+                parts: (IntegerExpr.self, SymbolPlus.self, IntegerExpr.self),
+                gen: { lhs, _, rhs in
                     let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
                 precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Minus.self, SpaceZeroOrMore.self, IntegerExpr.self),
-                gen: { lhs, _, _, _, rhs in
+                parts: (IntegerExpr.self, SymbolMinus.self, IntegerExpr.self),
+                gen: { lhs, _, rhs in
                     let expr = IntegerSubtractExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
                 precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Asterisk.self, SpaceZeroOrMore.self, IntegerExpr.self),
-                gen: { lhs, _, _, _, rhs in
+                parts: (IntegerExpr.self, SymbolAsterisk.self, IntegerExpr.self),
+                gen: { lhs, _, rhs in
                     let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
                 precedence: Precedence(priority: .multiply, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SpaceZeroOrMore.self, Literal.Slash.self, SpaceZeroOrMore.self, IntegerExpr.self),
-                gen: { lhs, _, _, _, rhs in
+                parts: (IntegerExpr.self, SymbolSlash.self, IntegerExpr.self),
+                gen: { lhs, _, rhs in
                     let expr = IntegerDivideExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
                 },
