@@ -17,10 +17,7 @@ protocol GrammarLiteral: Grammar where Output == RawStringIr {
 
 extension GrammarLiteral {
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
-        if Self.self == Literal.Wildcard.self {
-            return stream.next()
-        }
-        return stream.nextIf(char: literal)
+        stream.nextIf(char: literal)
     }
 }
 

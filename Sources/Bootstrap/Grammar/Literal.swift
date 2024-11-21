@@ -8,6 +8,10 @@
 enum Literal {
     enum Wildcard: GrammarLiteral {
         static let literal: Character = "\u{0}" // character never read
+
+        static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
+            stream.next()
+        }
     }
 
     enum LineFeed: GrammarLiteral {
