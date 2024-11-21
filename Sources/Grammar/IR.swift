@@ -101,6 +101,14 @@ struct StringIr: IR, ExpressionIrProtocol {
     }
 }
 
+struct BooleanIr: IR, ExpressionIrProtocol {
+    let boolean: Bool
+
+    func swift() -> SwiftCode {
+        SwiftCode("\(boolean)")
+    }
+}
+
 struct ExpressionIr: IR {
     let expression: any ExpressionIrProtocol
 
