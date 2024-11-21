@@ -96,7 +96,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceZeroOrMore.self, Literal.OpenCurlyBracket.self, SpaceZeroOrMore.self)
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.OpenCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
             ),
         ]
     }
@@ -106,7 +106,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceZeroOrMore.self, Literal.CloseCurlyBracket.self, SpaceZeroOrMore.self)
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
             ),
         ]
     }
