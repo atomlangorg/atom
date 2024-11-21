@@ -619,8 +619,8 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceZeroOrMore.self, Literal.Equals.self, SpaceZeroOrMore.self, Expression.self),
-                gen: { _, _, variable, _, _, _, expr in
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, SymbolEquals.self, Expression.self),
+                gen: { _, _, variable, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }
             ),
