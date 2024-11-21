@@ -702,8 +702,8 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (StructKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceZeroOrMore.self, Literal.OpenCurlyBracket.self, StructFields.self, Literal.CloseCurlyBracket.self),
-                gen: { _, _, identifier, _, _, fields, _ in
+                parts: (StructKeyword.self, SpaceOneOrMore.self, Identifier.self, SymbolOpenCurlyBracket.self, StructFields.self, SymbolCloseCurlyBracket.self),
+                gen: { _, _, identifier, _, fields, _ in
                     StructIr(identifier: identifier, fields: fields)
                 }
             ),
