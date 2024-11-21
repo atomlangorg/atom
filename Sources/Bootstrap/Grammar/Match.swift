@@ -81,6 +81,26 @@ enum Match {
         ]
     }
 
+    enum SymbolOpenRoundBracket: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.OpenRoundBracket.self, SpaceWithPossibleLineSeparator.self)
+            ),
+        ]
+    }
+
+    enum SymbolCloseRoundBracket: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseRoundBracket.self, SpaceWithPossibleLineSeparator.self)
+            ),
+        ]
+    }
+
     enum SymbolEquals: GrammarMatch {
         typealias Output = NeverIr
 
