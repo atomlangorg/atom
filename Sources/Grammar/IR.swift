@@ -117,6 +117,32 @@ struct BooleanExprIr: IR, ExpressionIrProtocol {
     }
 }
 
+struct BooleanNotExprIr: IR, BooleanExprIrProtocol {
+    let expr: BooleanExprIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("!\(expr.swift())")
+    }
+}
+
+struct BooleanAndExprIr: IR, BooleanExprIrProtocol {
+    let lhs: BooleanExprIr
+    let rhs: BooleanExprIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) && \(rhs.swift()))")
+    }
+}
+
+struct BooleanOrExprIr: IR, BooleanExprIrProtocol {
+    let lhs: BooleanExprIr
+    let rhs: BooleanExprIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) || \(rhs.swift()))")
+    }
+}
+
 struct ExpressionIr: IR {
     let expression: any ExpressionIrProtocol
 
