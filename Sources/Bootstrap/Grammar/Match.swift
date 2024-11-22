@@ -696,19 +696,19 @@ enum Match {
     }
 
     enum Boolean: GrammarMatch {
-        typealias Output = BooleanIr
+        typealias Output = BooleanExprIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (FalseKeyword.self),
                 gen: { _ in
-                    BooleanIr(boolean: false)
+                    BooleanExprIr(expression: BooleanIr(boolean: false))
                 }
             ),
             GrammarPattern(
                 parts: (TrueKeyword.self),
                 gen: { _ in
-                    BooleanIr(boolean: true)
+                    BooleanExprIr(expression: BooleanIr(boolean: true))
                 }
             ),
         ]
