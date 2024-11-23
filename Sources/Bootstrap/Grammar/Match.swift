@@ -745,6 +745,13 @@ enum Match {
                 }
             ),
             GrammarPattern(
+                parts: (SymbolOpenRoundBracket.self, BooleanExpr.self, SymbolCloseRoundBracket.self),
+                gen: { _, expr, _ in
+                    expr
+                },
+                options: [.resetPrecedence]
+            ),
+            GrammarPattern(
                 parts: (BooleanExpr.self, OperatorAnd.self, BooleanExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = BooleanAndExprIr(lhs: lhs, rhs: rhs)
