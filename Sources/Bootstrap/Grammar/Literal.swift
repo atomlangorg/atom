@@ -30,6 +30,10 @@ enum Literal {
         static let literal: Character = "\""
     }
 
+    enum Ampersand: GrammarLiteral {
+        static let literal: Character = "&"
+    }
+
     enum OpenRoundBracket: GrammarLiteral {
         static let literal: Character = "("
     }
