@@ -326,6 +326,10 @@ enum Literal {
         static let literal: Character = "{"
     }
 
+    enum VerticalBar: GrammarLiteral {
+        static let literal: Character = "|"
+    }
+
     enum CloseCurlyBracket: GrammarLiteral {
         static let literal: Character = "}"
     }
