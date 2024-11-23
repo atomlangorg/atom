@@ -101,6 +101,26 @@ enum Match {
         ]
     }
 
+    enum SymbolOpenCurlyBracket: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.OpenCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
+            ),
+        ]
+    }
+
+    enum SymbolCloseCurlyBracket: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
+            ),
+        ]
+    }
+
     enum OperatorAdd: GrammarMatch {
         typealias Output = NeverIr
 
@@ -167,26 +187,6 @@ enum Match {
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (SpaceZeroOrMore.self, Literal.Equals.self, SpaceZeroOrMore.self)
-            ),
-        ]
-    }
-
-    enum SymbolOpenCurlyBracket: GrammarMatch {
-        typealias Output = NeverIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Literal.OpenCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
-            ),
-        ]
-    }
-
-    enum SymbolCloseCurlyBracket: GrammarMatch {
-        typealias Output = NeverIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
             ),
         ]
     }
