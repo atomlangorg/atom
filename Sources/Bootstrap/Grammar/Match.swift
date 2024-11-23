@@ -141,6 +141,16 @@ enum Match {
         ]
     }
 
+    enum SymbolAnd: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Ampersand.self, Literal.Ampersand.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
     enum SymbolEquals: GrammarMatch {
         typealias Output = NeverIr
 
