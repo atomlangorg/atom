@@ -215,7 +215,7 @@ struct GrammarContext {
     }
 
     fileprivate func addingToHistory() -> HistoryResult {
-        let snapshot = HistorySnapshot(grammarType: grammarType!, patternIndex: patternIndex!, partIndex: partIndex!)
+        let snapshot = snapshot()
 
         for historySnapshot in history.reversed() {
             if historySnapshot == snapshot {
@@ -264,6 +264,10 @@ struct GrammarContext {
 
     fileprivate mutating func resetPrecedence() {
         minPrecedence = .default()
+    }
+
+    private func snapshot() -> HistorySnapshot {
+        HistorySnapshot(grammarType: grammarType!, patternIndex: patternIndex!, partIndex: partIndex!)
     }
 }
 
