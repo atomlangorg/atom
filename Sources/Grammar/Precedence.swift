@@ -19,6 +19,8 @@ extension Precedence {
 extension Precedence {
     enum Priority: Comparable {
         case lowest
+        case logicalOr
+        case logicalAnd
         case add
         case multiply
         case negate
