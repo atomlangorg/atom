@@ -764,14 +764,16 @@ enum Match {
                 gen: { lhs, _, rhs in
                     let expr = BooleanAndExprIr(lhs: lhs, rhs: rhs)
                     return BooleanExprIr(expression: expr)
-                }
+                },
+                precedence: Precedence(priority: .logicalAnd, associativity: .left)
             ),
             GrammarPattern(
                 parts: (BooleanExpr.self, OperatorOr.self, BooleanExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = BooleanOrExprIr(lhs: lhs, rhs: rhs)
                     return BooleanExprIr(expression: expr)
-                }
+                },
+                precedence: Precedence(priority: .logicalOr, associativity: .left)
             ),
         ]
     }
