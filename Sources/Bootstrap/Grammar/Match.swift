@@ -101,16 +101,6 @@ enum Match {
         ]
     }
 
-    enum SymbolMultiply: GrammarMatch {
-        typealias Output = NeverIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (SpaceZeroOrMore.self, Literal.Asterisk.self, SpaceZeroOrMore.self)
-            ),
-        ]
-    }
-
     enum SymbolAdd: GrammarMatch {
         typealias Output = NeverIr
 
@@ -127,6 +117,16 @@ enum Match {
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (SpaceZeroOrMore.self, Literal.Minus.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
+    enum SymbolMultiply: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Asterisk.self, SpaceZeroOrMore.self)
             ),
         ]
     }
