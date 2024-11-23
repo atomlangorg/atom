@@ -101,7 +101,7 @@ enum Match {
         ]
     }
 
-    enum SymbolAdd: GrammarMatch {
+    enum OperatorAdd: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -111,7 +111,7 @@ enum Match {
         ]
     }
 
-    enum SymbolSubtract: GrammarMatch {
+    enum OperatorSubtract: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -121,7 +121,7 @@ enum Match {
         ]
     }
 
-    enum SymbolMultiply: GrammarMatch {
+    enum OperatorMultiply: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -131,7 +131,7 @@ enum Match {
         ]
     }
 
-    enum SymbolDivide: GrammarMatch {
+    enum OperatorDivide: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -141,7 +141,7 @@ enum Match {
         ]
     }
 
-    enum SymbolAnd: GrammarMatch {
+    enum OperatorAnd: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -151,7 +151,7 @@ enum Match {
         ]
     }
 
-    enum SymbolOr: GrammarMatch {
+    enum OperatorOr: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -161,7 +161,7 @@ enum Match {
         ]
     }
 
-    enum SymbolEquals: GrammarMatch {
+    enum OperatorEquals: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -606,7 +606,7 @@ enum Match {
                 precedence: Precedence(priority: .negate, associativity: .right)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolAdd.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, OperatorAdd.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -614,7 +614,7 @@ enum Match {
                 precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolSubtract.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, OperatorSubtract.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerSubtractExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -622,7 +622,7 @@ enum Match {
                 precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolMultiply.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, OperatorMultiply.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -630,7 +630,7 @@ enum Match {
                 precedence: Precedence(priority: .multiply, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolDivide.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, OperatorDivide.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerDivideExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -777,7 +777,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, SymbolEquals.self, Expression.self),
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, OperatorEquals.self, Expression.self),
                 gen: { _, _, variable, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }
