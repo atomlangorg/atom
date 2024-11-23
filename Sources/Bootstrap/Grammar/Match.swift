@@ -181,7 +181,7 @@ enum Match {
         ]
     }
 
-    enum OperatorEquals: GrammarMatch {
+    enum OperatorAssign: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -791,7 +791,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, OperatorEquals.self, Expression.self),
+                parts: (LetKeyword.self, SpaceOneOrMore.self, Identifier.self, OperatorAssign.self, Expression.self),
                 gen: { _, _, variable, _, expr in
                     AssignmentIr(variable: variable, expression: expr)
                 }
