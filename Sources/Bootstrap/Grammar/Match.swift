@@ -744,6 +744,13 @@ enum Match {
                     BooleanExprIr(expression: bool)
                 }
             ),
+            GrammarPattern(
+                parts: (BooleanExpr.self, OperatorAnd.self, BooleanExpr.self),
+                gen: { lhs, _, rhs in
+                    let expr = BooleanAndExprIr(lhs: lhs, rhs: rhs)
+                    return BooleanExprIr(expression: expr)
+                }
+            ),
         ]
     }
 
