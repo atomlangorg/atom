@@ -26,6 +26,10 @@ enum Literal {
         static let literal: Character = " "
     }
 
+    enum ExclamationMark: GrammarLiteral {
+        static let literal: Character = "!"
+    }
+
     enum DoubleQuote: GrammarLiteral {
         static let literal: Character = "\""
     }
