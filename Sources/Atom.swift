@@ -14,6 +14,7 @@ struct Atom: ParsableCommand {
 let x = 3 + 3 * 3 + 3
 let greeting = "hello\nworld"
 let bool = false
+let boolExpr = false && true && false || true && false
 
 struct Person {
     let name: String
