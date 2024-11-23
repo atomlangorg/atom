@@ -752,6 +752,14 @@ enum Match {
                 options: [.resetPrecedence]
             ),
             GrammarPattern(
+                parts: (Literal.ExclamationMark.self, BooleanExpr.self),
+                gen: { _, bool in
+                    let expr = BooleanNotExprIr(expr: bool)
+                    return BooleanExprIr(expression: expr)
+                },
+                precedence: Precedence(priority: .negate, associativity: .right)
+            ),
+            GrammarPattern(
                 parts: (BooleanExpr.self, OperatorAnd.self, BooleanExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = BooleanAndExprIr(lhs: lhs, rhs: rhs)
