@@ -101,7 +101,7 @@ enum Match {
         ]
     }
 
-    enum SymbolAsterisk: GrammarMatch {
+    enum SymbolMultiply: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -111,7 +111,7 @@ enum Match {
         ]
     }
 
-    enum SymbolPlus: GrammarMatch {
+    enum SymbolAdd: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -121,7 +121,7 @@ enum Match {
         ]
     }
 
-    enum SymbolMinus: GrammarMatch {
+    enum SymbolSubtract: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -131,7 +131,7 @@ enum Match {
         ]
     }
 
-    enum SymbolSlash: GrammarMatch {
+    enum SymbolDivide: GrammarMatch {
         typealias Output = NeverIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
@@ -586,7 +586,7 @@ enum Match {
                 precedence: Precedence(priority: .negate, associativity: .right)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolPlus.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, SymbolAdd.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -594,7 +594,7 @@ enum Match {
                 precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolMinus.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, SymbolSubtract.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerSubtractExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -602,7 +602,7 @@ enum Match {
                 precedence: Precedence(priority: .add, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolAsterisk.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, SymbolMultiply.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
@@ -610,7 +610,7 @@ enum Match {
                 precedence: Precedence(priority: .multiply, associativity: .left)
             ),
             GrammarPattern(
-                parts: (IntegerExpr.self, SymbolSlash.self, IntegerExpr.self),
+                parts: (IntegerExpr.self, SymbolDivide.self, IntegerExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = IntegerDivideExprIr(lhs: lhs, rhs: rhs)
                     return IntegerExprIr(expression: expr)
