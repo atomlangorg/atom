@@ -191,6 +191,16 @@ enum Match {
         ]
     }
 
+    enum OperatorEqual: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceZeroOrMore.self, Literal.Equals.self, Literal.Equals.self, SpaceZeroOrMore.self)
+            ),
+        ]
+    }
+
     enum Digit: GrammarMatch {
         typealias Output = RawStringIr
 
