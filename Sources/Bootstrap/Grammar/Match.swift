@@ -790,21 +790,24 @@ enum Match {
                 gen: { lhs, _, rhs in
                     let expr = BooleanIntegerEqualExprIr(lhs: lhs, rhs: rhs)
                     return BooleanExprIr(expression: expr)
-                }
+                },
+                precedence: Precedence(priority: .compare, associativity: .left)
             ),
             GrammarPattern(
                 parts: (String.self, OperatorEqual.self, String.self),
                 gen: { lhs, _, rhs in
                     let expr = BooleanStringEqualExprIr(lhs: lhs, rhs: rhs)
                     return BooleanExprIr(expression: expr)
-                }
+                },
+                precedence: Precedence(priority: .compare, associativity: .left)
             ),
             GrammarPattern(
                 parts: (BooleanExpr.self, OperatorEqual.self, BooleanExpr.self),
                 gen: { lhs, _, rhs in
                     let expr = BooleanBooleanEqualExprIr(lhs: lhs, rhs: rhs)
                     return BooleanExprIr(expression: expr)
-                }
+                },
+                precedence: Precedence(priority: .compare, associativity: .left)
             ),
         ]
     }
