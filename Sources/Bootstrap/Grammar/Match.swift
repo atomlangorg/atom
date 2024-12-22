@@ -785,6 +785,27 @@ enum Match {
                 },
                 precedence: Precedence(priority: .logicalOr, associativity: .left)
             ),
+            GrammarPattern(
+                parts: (IntegerExpr.self, OperatorEqual.self, IntegerExpr.self),
+                gen: { lhs, _, rhs in
+                    let expr = BooleanIntegerEqualExprIr(lhs: lhs, rhs: rhs)
+                    return BooleanExprIr(expression: expr)
+                }
+            ),
+            GrammarPattern(
+                parts: (String.self, OperatorEqual.self, String.self),
+                gen: { lhs, _, rhs in
+                    let expr = BooleanStringEqualExprIr(lhs: lhs, rhs: rhs)
+                    return BooleanExprIr(expression: expr)
+                }
+            ),
+            GrammarPattern(
+                parts: (BooleanExpr.self, OperatorEqual.self, BooleanExpr.self),
+                gen: { lhs, _, rhs in
+                    let expr = BooleanBooleanEqualExprIr(lhs: lhs, rhs: rhs)
+                    return BooleanExprIr(expression: expr)
+                }
+            ),
         ]
     }
 
