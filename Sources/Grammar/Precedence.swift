@@ -21,6 +21,7 @@ extension Precedence {
         case lowest
         case logicalOr
         case logicalAnd
+        case compare
         case add
         case multiply
         case negate
