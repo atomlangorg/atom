@@ -143,6 +143,33 @@ struct BooleanOrExprIr: IR, BooleanExprIrProtocol {
     }
 }
 
+struct BooleanIntegerEqualExprIr: IR, BooleanExprIrProtocol {
+    let lhs: IntegerExprIr
+    let rhs: IntegerExprIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) == \(rhs.swift()))")
+    }
+}
+
+struct BooleanStringEqualExprIr: IR, BooleanExprIrProtocol {
+    let lhs: StringIr
+    let rhs: StringIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) == \(rhs.swift()))")
+    }
+}
+
+struct BooleanBooleanEqualExprIr: IR, BooleanExprIrProtocol {
+    let lhs: BooleanExprIr
+    let rhs: BooleanExprIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("(\(lhs.swift()) == \(rhs.swift()))")
+    }
+}
+
 struct ExpressionIr: IR {
     let expression: any ExpressionIrProtocol
 
