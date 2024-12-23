@@ -10,7 +10,9 @@ struct Atom: ParsableCommand {
 
 """)
 
-        convertToSwift()
+        let clock = ContinuousClock()
+        let duration = clock.measure(convertToSwift)
+        print("\nDuration: \(duration)")
     }
 
     private func convertToSwift() {
