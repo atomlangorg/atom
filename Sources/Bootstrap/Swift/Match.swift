@@ -917,6 +917,23 @@ enum Match {
         ]
     }
 
+    enum GrammarLiteralDefinition: GrammarMatch {
+        typealias Output = SwiftIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (GrammarLiteralKeyword.self, SpaceOneOrMore.self, Identifier.self, OperatorAssign.self, String.self),
+                gen: { _, _, identifier, _, character in
+                    SwiftIr(code: """
+enum \(identifier.swift()): GrammarLiteral {
+    static let literal: Character = "\(character.swift())"
+}
+""")
+                }
+            ),
+        ]
+    }
+
     enum Statement: GrammarMatch {
         typealias Output = StatementIr
 
