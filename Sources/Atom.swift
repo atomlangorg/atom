@@ -21,6 +21,8 @@ struct Person {
     let name: String
     let age: Int
 }
+
+grammarliteral LineFeed = "\n"
 """#
         let program = Program(input)
         let result = program.intoSwift(root: Match.Program.self)
