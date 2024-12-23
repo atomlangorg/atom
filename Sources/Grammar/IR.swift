@@ -226,6 +226,36 @@ struct StructIr: IR, StatementIrProtocol {
     }
 }
 
+struct VariantValueIr: IR {
+    let identifier: IdentifierIr
+    let type: IdentifierIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("\(identifier.name)(\(type.name))")
+    }
+}
+
+struct VariantValuesIr: IR {
+    let values: [VariantValueIr]
+
+    func swift() -> SwiftCode {
+        var str = ""
+        for value in values {
+            str.append("\(value.swift())\n")
+        }
+        return SwiftCode(str)
+    }
+}
+
+struct VariantIr: IR, StatementIrProtocol {
+    let identifier: IdentifierIr
+    let values: VariantValuesIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("enum \(identifier.name) {\n\(values.swift())}")
+    }
+}
+
 struct StatementIr: IR {
     let ir: any StatementIrProtocol
 
