@@ -15,7 +15,7 @@ struct NeverIr: IR {
     }
 }
 
-struct SwiftIr: IR {
+struct SwiftIr: IR, StatementIrProtocol {
     let code: String
 
     func swift() -> SwiftCode {
