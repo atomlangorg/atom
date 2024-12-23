@@ -532,6 +532,16 @@ enum Match {
         ]
     }
 
+    enum VariantKeyword: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LowercaseV.self, Literal.LowercaseA.self, Literal.LowercaseR.self, Literal.LowercaseI.self, Literal.LowercaseA.self, Literal.LowercaseN.self, Literal.LowercaseT.self)
+            ),
+        ]
+    }
+
     enum FalseKeyword: GrammarMatch {
         typealias Output = NeverIr
 
