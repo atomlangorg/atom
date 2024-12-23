@@ -926,7 +926,7 @@ enum Match {
                 gen: { _, _, identifier, _, character in
                     SwiftIr(code: """
 enum \(identifier.swift()): GrammarLiteral {
-    static let literal: Character = "\(character.swift())"
+    static let literal: Character = \(character.swift())
 }
 """)
                 }
