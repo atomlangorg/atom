@@ -927,6 +927,57 @@ enum Match {
         ]
     }
 
+    enum VariantValue: GrammarMatch {
+        typealias Output = VariantValueIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Identifier.self, SymbolOpenRoundBracket.self, Identifier.self, SymbolCloseRoundBracket.self),
+                gen: { identifier, _, type, _ in
+                    VariantValueIr(identifier: identifier, type: type)
+                }
+            ),
+        ]
+    }
+
+    enum VariantValues: GrammarMatch {
+        typealias Output = VariantValuesIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (VariantValue.self, SpaceWithDefiniteLineSeparator.self, VariantValues.self),
+                gen: { value, _, rest in
+                    VariantValuesIr(values: CollectionOfOne(value) + rest.values)
+                }
+            ),
+            GrammarPattern(
+                parts: (VariantValue.self),
+                gen: { value in
+                    VariantValuesIr(values: [value])
+                }
+            ),
+            GrammarPattern(
+                parts: (),
+                gen: {
+                    VariantValuesIr(values: [])
+                }
+            ),
+        ]
+    }
+
+    enum Variant: GrammarMatch {
+        typealias Output = VariantIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (VariantKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceWithPossibleLineSeparator.self, SymbolOpenCurlyBracket.self, VariantValues.self, SymbolCloseCurlyBracket.self),
+                gen: { _, _, identifier, _, _, values, _ in
+                    VariantIr(identifier: identifier, values: values)
+                }
+            ),
+        ]
+    }
+
     enum GrammarLiteralDefinition: GrammarMatch {
         typealias Output = SwiftIr
 
