@@ -22,6 +22,11 @@ struct Person {
     let age: Int
 }
 
+variant Kind {
+    number(Int)
+    string(String)
+}
+
 grammarliteral LineFeed = "\n"
 """#
         let program = Program(input)
