@@ -12,6 +12,7 @@ struct Atom: ParsableCommand {
 
         let input = #"""
 let x = 3 + 3 * 3 + 3
+let y = (1 + 2)
 let greeting = "hello\nworld"
 let bool = false
 let boolExpr = false && true && false || 5 == 6 && "hi" == "there" && false == true
