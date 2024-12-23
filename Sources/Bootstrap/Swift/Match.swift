@@ -1012,6 +1012,12 @@ enum \(identifier.swift()): GrammarLiteral {
                 }
             ),
             GrammarPattern(
+                parts: (Variant.self),
+                gen: { variant in
+                    StatementIr(ir: variant)
+                }
+            ),
+            GrammarPattern(
                 parts: (GrammarLiteralDefinition.self),
                 gen: { grammarLiteral in
                     StatementIr(ir: grammarLiteral)
