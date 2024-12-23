@@ -950,6 +950,12 @@ enum \(identifier.swift()): GrammarLiteral {
                     StatementIr(ir: `struct`)
                 }
             ),
+            GrammarPattern(
+                parts: (GrammarLiteralDefinition.self),
+                gen: { grammarLiteral in
+                    StatementIr(ir: grammarLiteral)
+                }
+            ),
         ]
     }
 
