@@ -231,7 +231,7 @@ struct VariantValueIr: IR {
     let type: IdentifierIr
 
     func swift() -> SwiftCode {
-        SwiftCode("\(identifier.name)(\(type.name))")
+        SwiftCode("case \(identifier.name)(\(type.name))")
     }
 }
 
