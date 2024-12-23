@@ -86,7 +86,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Literal.OpenRoundBracket.self, SpaceWithPossibleLineSeparator.self)
+                parts: (Literal.OpenRoundBracket.self, SpaceWithPossibleLineSeparator.self)
             ),
         ]
     }
@@ -96,7 +96,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseRoundBracket.self, SpaceWithPossibleLineSeparator.self)
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseRoundBracket.self)
             ),
         ]
     }
@@ -106,7 +106,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Literal.OpenCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
+                parts: (Literal.OpenCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
             ),
         ]
     }
@@ -116,7 +116,7 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseCurlyBracket.self, SpaceWithPossibleLineSeparator.self)
+                parts: (SpaceWithPossibleLineSeparator.self, Literal.CloseCurlyBracket.self)
             ),
         ]
     }
@@ -909,8 +909,8 @@ enum Match {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (StructKeyword.self, SpaceOneOrMore.self, Identifier.self, SymbolOpenCurlyBracket.self, StructFields.self, SymbolCloseCurlyBracket.self),
-                gen: { _, _, identifier, _, fields, _ in
+                parts: (StructKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceWithPossibleLineSeparator.self, SymbolOpenCurlyBracket.self, StructFields.self, SymbolCloseCurlyBracket.self),
+                gen: { _, _, identifier, _, _, fields, _ in
                     StructIr(identifier: identifier, fields: fields)
                 }
             ),
