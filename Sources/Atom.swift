@@ -10,6 +10,10 @@ struct Atom: ParsableCommand {
 
 """)
 
+        convertToSwift()
+    }
+
+    private func convertToSwift() {
         let input = #"""
 let x = 3 + 3 * 3 + 3
 let y = (1 + 2)
