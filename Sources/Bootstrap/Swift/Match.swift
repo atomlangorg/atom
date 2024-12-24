@@ -572,6 +572,16 @@ enum Match {
         ]
     }
 
+    enum ImplKeyword: GrammarMatch {
+        typealias Output = NeverIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (Literal.LowercaseI.self, Literal.LowercaseM.self, Literal.LowercaseP.self, Literal.LowercaseL.self)
+            ),
+        ]
+    }
+
     enum Identifier: GrammarMatch {
         typealias Output = IdentifierIr
 
