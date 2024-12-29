@@ -1049,6 +1049,19 @@ enum Match {
         ]
     }
 
+    enum Impl: GrammarMatch {
+        typealias Output = ImplIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (ImplKeyword.self, SpaceOneOrMore.self, Identifier.self, SpaceWithPossibleLineSeparator.self, SymbolOpenCurlyBracket.self, ImplStatements.self, SymbolCloseCurlyBracket.self),
+                gen: { _, _, identifier, _, _, statements, _ in
+                    ImplIr(typeIdentifier: identifier, statements: statements)
+                }
+            ),
+        ]
+    }
+
     enum GrammarLiteralDefinition: GrammarMatch {
         typealias Output = SwiftIr
 
