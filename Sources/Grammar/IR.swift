@@ -264,6 +264,20 @@ struct VariantIr: IR, StatementIrProtocol {
     }
 }
 
+struct ImplIr: IR, StatementIrProtocol {
+    let typeIdentifier: IdentifierIr
+    let statements: [ImplStatementIr]
+
+    func swift() -> SwiftCode {
+        let code = statements
+            .map { statement in
+                statement.swift().raw.string
+            }
+            .joined(separator: "\n")
+        return SwiftCode("impl \(typeIdentifier.name) {\n\(code)}")
+    }
+}
+
 struct StatementIr: IR {
     let ir: any StatementIrProtocol
 
