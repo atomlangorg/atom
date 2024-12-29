@@ -264,6 +264,14 @@ struct StatementIr: IR {
     }
 }
 
+struct ImplStatementIr: IR {
+    let ir: any ImplStatementProtocol
+
+    func swift() -> SwiftCode {
+        ir.swift()
+    }
+}
+
 struct ProgramIr: IR {
     let statements: [StatementIr]
 
@@ -284,3 +292,5 @@ protocol BooleanExprIrProtocol: IR {}
 protocol ExpressionIrProtocol: IR {}
 
 protocol StatementIrProtocol: IR {}
+
+protocol ImplStatementProtocol: IR {}
