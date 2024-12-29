@@ -33,6 +33,10 @@ variant Kind {
     string(String)
 }
 
+impl Kind {
+    static let str = "string"
+}
+
 grammarliteral LineFeed = "\n"
 """#
         let program = Program(input)
