@@ -94,21 +94,24 @@ struct Stream {
     func isGreedierThan(stream: Stream, since commonAncestorStream: Stream) -> Bool {
         guard isAheadOf(stream: stream) else {
             // Current stream did not consume more characters than the greediest so far
-            if isEvenWith(stream: stream) {
-                if isLessEagerWithWildcardsThan(stream: stream, since: commonAncestorStream) {
-                    // Grammar was ambiguous, but with difference in wildcards
-                    return true
-                }
 
-                if stream.firstWildcardIndex(from: commonAncestorStream.index) == nil {
-                    // Current stream must have some wildcards, while the greediest has none left
-                    return false
-                }
-
-                // Grammar is simply ambiguous
-                fatalError("Ambiguous grammar")
+            guard isEvenWith(stream: stream) else {
+                // Current stream is behind greediest stream so far
+                return false
             }
-            return false
+
+            if isLessEagerWithWildcardsThan(stream: stream, since: commonAncestorStream) {
+                // Grammar was ambiguous, but with difference in wildcards
+                return true
+            }
+
+            if stream.firstWildcardIndex(from: commonAncestorStream.index) == nil {
+                // Current stream must have some wildcards, while the greediest has none left
+                return false
+            }
+
+            // Grammar is simply ambiguous
+            fatalError("Ambiguous grammar")
         }
 
         return isLessEagerWithWildcardsThan(stream: stream, since: commonAncestorStream)
