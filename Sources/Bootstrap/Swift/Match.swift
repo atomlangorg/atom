@@ -890,6 +890,19 @@ enum Match {
         ]
     }
 
+    enum StaticAssignment: GrammarMatch {
+        typealias Output = StaticAssignmentIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (StaticKeyword.self, SpaceOneOrMore.self, Assignment.self),
+                gen: { _, _, assignment in
+                    StaticAssignmentIr(assignment: assignment)
+                }
+            ),
+        ]
+    }
+
     enum StructField: GrammarMatch {
         typealias Output = StructFieldIr
 
