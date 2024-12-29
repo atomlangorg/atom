@@ -195,6 +195,14 @@ struct AssignmentIr: IR, StatementIrProtocol {
     }
 }
 
+struct StaticAssignmentIr: IR, ImplStatementProtocol {
+    let assignment: AssignmentIr
+
+    func swift() -> SwiftCode {
+        SwiftCode("static \(assignment.swift())")
+    }
+}
+
 struct StructFieldIr: IR {
     let identifier: IdentifierIr
     let type: IdentifierIr
