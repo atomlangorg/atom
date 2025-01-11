@@ -9,8 +9,6 @@ protocol Grammar {
     associatedtype Output: IR
 
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output>
-
-    static func initialChars() -> Set<Character>
 }
 
 protocol GrammarLiteral: Grammar where Output == RawStringIr {
@@ -20,10 +18,6 @@ protocol GrammarLiteral: Grammar where Output == RawStringIr {
 extension GrammarLiteral {
     static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
         stream.nextIf(char: literal)
-    }
-
-    static func initialChars() -> Set<Character> {
-        [literal]
     }
 }
 
@@ -91,35 +85,10 @@ extension GrammarMatch {
     }
 }
 
-fileprivate var cachedInitialChars: [ObjectIdentifier: Set<Character>] = [:]
-
-extension GrammarMatch {
-    static func initialChars() -> Set<Character> {
-        let selfId = ObjectIdentifier(self)
-
-        if let chars = cachedInitialChars[selfId] {
-            return chars
-        }
-
-        var chars = Set<Character>()
-
-        for pattern in patterns {
-            if let ty = pattern.initialType(), ty != Self.self {
-                chars.formUnion(ty.initialChars())
-            }
-        }
-
-        cachedInitialChars[selfId] = chars
-        return chars
-    }
-}
-
 protocol GrammarPatternProtocol<Output> {
     associatedtype Output: IR
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output>
-
-    func initialType() -> (any Grammar.Type)?
 }
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
@@ -209,13 +178,6 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
             try gen(repeat each irPackConcrete.irs)
         })
         return .doConsume(result)
-    }
-
-    func initialType() -> (any Grammar.Type)? {
-        for part in repeat each parts {
-            return part
-        }
-        return nil
     }
 }
 
