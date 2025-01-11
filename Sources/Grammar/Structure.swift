@@ -85,7 +85,7 @@ extension GrammarMatch {
     }
 }
 
-protocol GrammarPatternProtocol<Output> {
+protocol GrammarPatternProtocol<Output>: Sendable {
     associatedtype Output: IR
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output>
@@ -93,7 +93,7 @@ protocol GrammarPatternProtocol<Output> {
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     typealias Parts = (repeat (each Part).Type)
-    typealias Gen = (repeat (each Part).Output) throws(GrammarError) -> Output
+    typealias Gen = @Sendable (repeat (each Part).Output) throws(GrammarError) -> Output
 
     let parts: Parts
     let gen: Gen
