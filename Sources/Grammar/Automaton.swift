@@ -91,7 +91,7 @@ class State {
 
         // Return result
         guard irList.count == 1 else {
-            fatalError()
+            fatalError("IR list is wrong size with \(irList.count) elements")
         }
         return irList[0]
     }
