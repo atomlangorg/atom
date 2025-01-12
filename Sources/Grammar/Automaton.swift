@@ -108,6 +108,14 @@ struct Transition {
         run = .nothing
     }
 
+    init<each I1: IR, O1: IR>(input: Input, next: State, gen: @escaping Run.GenerateGeneric<repeat each I1, O1>) {
+        self.input = input
+        self.next = next
+
+        let current = Run.Generate(generator: gen)
+        run = .generate(current: current, previous: nil)
+    }
+
     init<each I1: IR, O1: IR, each I2: IR, O2: IR>(input: Input, next: State, gen: @escaping Run.GenerateGeneric<repeat each I1, O1>, genPrev: @escaping Run.GenerateGeneric<repeat each I2, O2>) {
         self.input = input
         self.next = next
@@ -115,14 +123,6 @@ struct Transition {
         let current = Run.Generate(generator: gen)
         let previous = Run.Generate(generator: genPrev)
         run = .generate(current: current, previous: previous)
-    }
-
-    init<each I1: IR, O1: IR>(input: Input, next: State, gen: @escaping Run.GenerateGeneric<repeat each I1, O1>) {
-        self.input = input
-        self.next = next
-
-        let current = Run.Generate(generator: gen)
-        run = .generate(current: current, previous: nil)
     }
 
     func consume(char: Character) -> ConsumeResult {
