@@ -247,7 +247,7 @@ func temp1() {
     let s3 = State()
 
     let t1 = Transition(input: .char("<"), next: s2, gen: { (lhs: RawStringIr, rhs: RawStringIr) in
-        RawStringIr(string: "<" + rhs.string)
+        RawStringIr(string: lhs.string + rhs.string)
     })
     s1.transitions.append(t1)
 
@@ -257,9 +257,9 @@ func temp1() {
     s2.transitions.append(t2)
 
     let t3 = Transition(input: .char("<"), next: s2, gen: { (lhs: RawStringIr, rhs: RawStringIr) in
-        RawStringIr(string: "<" + rhs.string)
+        RawStringIr(string: lhs.string + rhs.string)
     }, genPrev: { (lhs: RawStringIr, rhs: RawStringIr) in
-        RawStringIr(string: ">" + rhs.string)
+        RawStringIr(string: lhs.string + rhs.string)
     })
     s3.transitions.append(t3)
 
