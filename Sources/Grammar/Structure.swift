@@ -181,11 +181,11 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
     }
 }
 
-fileprivate protocol IrPackProtocol {
+protocol IrPackProtocol {
     func appending<T: IR>(ir: T) -> any IrPackProtocol
 }
 
-fileprivate struct IrPack<each I: IR>: IrPackProtocol {
+struct IrPack<each I: IR>: IrPackProtocol {
     let irs: (repeat each I)
 
     init(irs: (repeat each I)) {
