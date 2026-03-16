@@ -19,4 +19,5 @@ let package = Package(
         ),
         .testTarget(name: "AtomTests", dependencies: ["atom"]),
     ],
+    swiftLanguageModes: [.v6],
 )
