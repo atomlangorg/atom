@@ -1121,12 +1121,6 @@ enum \(identifier.swift()): GrammarLiteral {
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (SpaceWithPossibleLineSeparator.self, Program.self),
-                gen: { _, program in
-                    program
-                }
-            ),
-            GrammarPattern(
                 parts: (Statement.self, SpaceWithDefiniteLineSeparator.self, Program.self),
                 gen: { statement, _, program in
                     ProgramIr(statements: CollectionOfOne(statement) + program.statements)
@@ -1142,6 +1136,19 @@ enum \(identifier.swift()): GrammarLiteral {
                 parts: (),
                 gen: {
                     ProgramIr(statements: [])
+                }
+            ),
+        ]
+    }
+
+    enum Entrypoint: GrammarMatch {
+        typealias Output = ProgramIr
+
+        static let patterns: [any GrammarPatternProtocol<Output>] = [
+            GrammarPattern(
+                parts: (SpaceWithPossibleLineSeparator.self, Program.self),
+                gen: { _, program in
+                    program
                 }
             ),
         ]

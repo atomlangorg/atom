@@ -40,7 +40,7 @@ impl Kind {
 grammarliteral LineFeed = "\n"
 """#
         let program = Program(input)
-        let result = program.intoSwift(root: Match.Program.self)
+        let result = program.intoSwift(root: Match.Entrypoint.self)
 
         switch result {
         case let .program(code):
