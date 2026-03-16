@@ -281,7 +281,7 @@ struct ImplIr: IR, StatementIrProtocol {
     let statements: ImplStatementsIr
 
     func swift() -> SwiftCode {
-        SwiftCode("impl \(typeIdentifier.name) {\n\(statements.swift())}")
+        SwiftCode("protocol \(typeIdentifier.name) {\n\(statements.swift())}")
     }
 }
 
