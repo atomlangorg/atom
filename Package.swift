@@ -15,8 +15,8 @@ let package = Package(
             name: "atom",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]
+            ],
         ),
         .testTarget(name: "AtomTests", dependencies: ["atom"]),
-    ]
+    ],
 )
