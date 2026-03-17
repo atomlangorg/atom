@@ -41,6 +41,7 @@ extension GrammarMatch {
             case .dontConsume:
                 continue
             case let .doConsume(result):
+                context.maxWildcards = s.countWildcards(since: stream)
                 if let g = greediest {
                     guard s.isGreedierThan(stream: g.stream, since: stream) else {
                         continue
@@ -64,6 +65,7 @@ extension GrammarMatch {
             stream = greediest.stream
 
             // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
+            context.resetMaxWildcards()
             context.firstIr = ir
             switch consume(stream: &stream, context: context) {
             case .dontConsume:
@@ -139,6 +141,15 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
                 continue
             }
 
+            // Handle max wildcard count to prevent slow performance from them being too greedy
+            if part == Literal.Wildcard.self {
+                if context.maxWildcards == 0 {
+                    return .dontConsume
+                } else {
+                    context.maxWildcards -= 1
+                }
+            }
+
             context.setPartIndex(index)
 
             switch context.addingToHistory() {
@@ -202,6 +213,7 @@ struct GrammarContext {
     private var patternIndex: Int?
     private var partIndex: Int?
     private var minPrecedence: Precedence
+    fileprivate var maxWildcards: Int
     fileprivate var firstIr: (any IR)?
 
     init() {
@@ -210,6 +222,7 @@ struct GrammarContext {
         patternIndex = nil
         partIndex = nil
         minPrecedence = .default()
+        maxWildcards = .max
         firstIr = nil
     }
 
@@ -263,6 +276,10 @@ struct GrammarContext {
 
     fileprivate mutating func resetPrecedence() {
         minPrecedence = .default()
+    }
+
+    fileprivate mutating func resetMaxWildcards() {
+        maxWildcards = .max
     }
 
     private func snapshot() -> HistorySnapshot {
