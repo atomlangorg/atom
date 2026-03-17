@@ -31,7 +31,7 @@ struct RawStringIr: IR {
     }
 }
 
-struct IdentifierIr: IR {
+struct IdentifierIr: IR, ExpressionIrProtocol {
     let name: String
 
     func swift() -> SwiftCode {

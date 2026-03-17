@@ -754,6 +754,12 @@ enum Match {
                 }
             ),
             GrammarPattern(
+                parts: (Identifier.self),
+                gen: { identifier in
+                    ExpressionIr(expression: identifier)
+                }
+            ),
+            GrammarPattern(
                 parts: (Literal.Minus.self, Expression.self),
                 gen: { _, integer in
                     let expr = NegateExprIr(expr: integer)
