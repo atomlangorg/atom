@@ -64,7 +64,6 @@ extension GrammarMatch {
             stream = greediest.stream
 
             // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
-            var context = context
             context.firstIr = ir
             switch consume(stream: &stream, context: context) {
             case .dontConsume:
