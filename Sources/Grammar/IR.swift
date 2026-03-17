@@ -39,7 +39,7 @@ struct IdentifierIr: IR {
     }
 }
 
-struct IntegerIr: IR, IntegerExprIrProtocol {
+struct IntegerIr: IR, ExpressionIrProtocol {
     let value: Int
 
     func swift() -> SwiftCode {
@@ -47,52 +47,44 @@ struct IntegerIr: IR, IntegerExprIrProtocol {
     }
 }
 
-struct IntegerExprIr: IR, ExpressionIrProtocol {
-    let expression: any IntegerExprIrProtocol
-
-    func swift() -> SwiftCode {
-        expression.swift()
-    }
-}
-
-struct IntegerNegateExprIr: IR, IntegerExprIrProtocol {
-    let expr: IntegerExprIr
+struct NegateExprIr: IR, ExpressionIrProtocol {
+    let expr: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("-\(expr.swift())")
     }
 }
 
-struct IntegerAddExprIr: IR, IntegerExprIrProtocol {
-    let lhs: IntegerExprIr
-    let rhs: IntegerExprIr
+struct AddExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) + \(rhs.swift()))")
     }
 }
 
-struct IntegerSubtractExprIr: IR, IntegerExprIrProtocol {
-    let lhs: IntegerExprIr
-    let rhs: IntegerExprIr
+struct SubtractExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) - \(rhs.swift()))")
     }
 }
 
-struct IntegerMultiplyExprIr: IR, IntegerExprIrProtocol {
-    let lhs: IntegerExprIr
-    let rhs: IntegerExprIr
+struct MultiplyExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) * \(rhs.swift()))")
     }
 }
 
-struct IntegerDivideExprIr: IR, IntegerExprIrProtocol {
-    let lhs: IntegerExprIr
-    let rhs: IntegerExprIr
+struct DivideExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) / \(rhs.swift()))")
@@ -109,7 +101,7 @@ struct StringIr: IR, ExpressionIrProtocol {
     }
 }
 
-struct BooleanIr: IR, BooleanExprIrProtocol {
+struct BooleanIr: IR, ExpressionIrProtocol {
     let boolean: Bool
 
     func swift() -> SwiftCode {
@@ -117,61 +109,35 @@ struct BooleanIr: IR, BooleanExprIrProtocol {
     }
 }
 
-struct BooleanExprIr: IR, ExpressionIrProtocol {
-    let expression: any BooleanExprIrProtocol
-
-    func swift() -> SwiftCode {
-        expression.swift()
-    }
-}
-
-struct BooleanNotExprIr: IR, BooleanExprIrProtocol {
-    let expr: BooleanExprIr
+struct NotExprIr: IR, ExpressionIrProtocol {
+    let expr: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("!\(expr.swift())")
     }
 }
 
-struct BooleanAndExprIr: IR, BooleanExprIrProtocol {
-    let lhs: BooleanExprIr
-    let rhs: BooleanExprIr
+struct AndExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) && \(rhs.swift()))")
     }
 }
 
-struct BooleanOrExprIr: IR, BooleanExprIrProtocol {
-    let lhs: BooleanExprIr
-    let rhs: BooleanExprIr
+struct OrExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) || \(rhs.swift()))")
     }
 }
 
-struct BooleanIntegerEqualExprIr: IR, BooleanExprIrProtocol {
-    let lhs: IntegerExprIr
-    let rhs: IntegerExprIr
-
-    func swift() -> SwiftCode {
-        SwiftCode("(\(lhs.swift()) == \(rhs.swift()))")
-    }
-}
-
-struct BooleanStringEqualExprIr: IR, BooleanExprIrProtocol {
-    let lhs: StringIr
-    let rhs: StringIr
-
-    func swift() -> SwiftCode {
-        SwiftCode("(\(lhs.swift()) == \(rhs.swift()))")
-    }
-}
-
-struct BooleanBooleanEqualExprIr: IR, BooleanExprIrProtocol {
-    let lhs: BooleanExprIr
-    let rhs: BooleanExprIr
+struct EqualExprIr: IR, ExpressionIrProtocol {
+    let lhs: ExpressionIr
+    let rhs: ExpressionIr
 
     func swift() -> SwiftCode {
         SwiftCode("(\(lhs.swift()) == \(rhs.swift()))")
@@ -313,10 +279,6 @@ struct ProgramIr: IR {
         return SwiftCode(code)
     }
 }
-
-protocol IntegerExprIrProtocol: IR {}
-
-protocol BooleanExprIrProtocol: IR {}
 
 protocol ExpressionIrProtocol: IR {}
 

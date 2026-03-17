@@ -630,66 +630,6 @@ enum Match {
         ]
     }
 
-    enum IntegerExpr: GrammarMatch {
-        typealias Output = IntegerExprIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (Integer.self),
-                gen: { integer in
-                    IntegerExprIr(expression: integer)
-                }
-            ),
-            GrammarPattern(
-                parts: (SymbolOpenRoundBracket.self, IntegerExpr.self, SymbolCloseRoundBracket.self),
-                gen: { _, expr, _ in
-                    expr
-                },
-                options: [.resetPrecedence]
-            ),
-            GrammarPattern(
-                parts: (Literal.Minus.self, IntegerExpr.self),
-                gen: { _, integer in
-                    let expr = IntegerNegateExprIr(expr: integer)
-                    return IntegerExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .negate, associativity: .right)
-            ),
-            GrammarPattern(
-                parts: (IntegerExpr.self, OperatorAdd.self, IntegerExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = IntegerAddExprIr(lhs: lhs, rhs: rhs)
-                    return IntegerExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .add, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (IntegerExpr.self, OperatorSubtract.self, IntegerExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = IntegerSubtractExprIr(lhs: lhs, rhs: rhs)
-                    return IntegerExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .add, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (IntegerExpr.self, OperatorMultiply.self, IntegerExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = IntegerMultiplyExprIr(lhs: lhs, rhs: rhs)
-                    return IntegerExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .multiply, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (IntegerExpr.self, OperatorDivide.self, IntegerExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = IntegerDivideExprIr(lhs: lhs, rhs: rhs)
-                    return IntegerExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .multiply, associativity: .left)
-            ),
-        ]
-    }
-
     enum StringChar: GrammarMatch {
         typealias Output = RawStringIr
 
@@ -784,95 +724,106 @@ enum Match {
         ]
     }
 
-    enum BooleanExpr: GrammarMatch {
-        typealias Output = BooleanExprIr
+    enum Expression: GrammarMatch {
+        typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (Boolean.self),
-                gen: { bool in
-                    BooleanExprIr(expression: bool)
-                }
-            ),
-            GrammarPattern(
-                parts: (SymbolOpenRoundBracket.self, BooleanExpr.self, SymbolCloseRoundBracket.self),
+                parts: (SymbolOpenRoundBracket.self, Expression.self, SymbolCloseRoundBracket.self),
                 gen: { _, expr, _ in
                     expr
                 },
                 options: [.resetPrecedence]
             ),
             GrammarPattern(
-                parts: (Literal.ExclamationMark.self, BooleanExpr.self),
-                gen: { _, bool in
-                    let expr = BooleanNotExprIr(expr: bool)
-                    return BooleanExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .negate, associativity: .right)
-            ),
-            GrammarPattern(
-                parts: (BooleanExpr.self, OperatorAnd.self, BooleanExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = BooleanAndExprIr(lhs: lhs, rhs: rhs)
-                    return BooleanExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .logicalAnd, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (BooleanExpr.self, OperatorOr.self, BooleanExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = BooleanOrExprIr(lhs: lhs, rhs: rhs)
-                    return BooleanExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .logicalOr, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (IntegerExpr.self, OperatorEqual.self, IntegerExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = BooleanIntegerEqualExprIr(lhs: lhs, rhs: rhs)
-                    return BooleanExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .compare, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (String.self, OperatorEqual.self, String.self),
-                gen: { lhs, _, rhs in
-                    let expr = BooleanStringEqualExprIr(lhs: lhs, rhs: rhs)
-                    return BooleanExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .compare, associativity: .left)
-            ),
-            GrammarPattern(
-                parts: (BooleanExpr.self, OperatorEqual.self, BooleanExpr.self),
-                gen: { lhs, _, rhs in
-                    let expr = BooleanBooleanEqualExprIr(lhs: lhs, rhs: rhs)
-                    return BooleanExprIr(expression: expr)
-                },
-                precedence: Precedence(priority: .compare, associativity: .left)
-            ),
-        ]
-    }
-
-    enum Expression: GrammarMatch {
-        typealias Output = ExpressionIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (IntegerExpr.self),
-                gen: { expr in
-                    ExpressionIr(expression: expr)
+                parts: (Integer.self),
+                gen: { integer in
+                    ExpressionIr(expression: integer)
                 }
             ),
             GrammarPattern(
                 parts: (String.self),
-                gen: { expr in
-                    ExpressionIr(expression: expr)
+                gen: { string in
+                    ExpressionIr(expression: string)
                 }
             ),
             GrammarPattern(
-                parts: (BooleanExpr.self),
-                gen: { expr in
-                    ExpressionIr(expression: expr)
+                parts: (Boolean.self),
+                gen: { bool in
+                    ExpressionIr(expression: bool)
                 }
+            ),
+            GrammarPattern(
+                parts: (Literal.Minus.self, Expression.self),
+                gen: { _, integer in
+                    let expr = NegateExprIr(expr: integer)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .negate, associativity: .right)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorAdd.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = AddExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .add, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorSubtract.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = SubtractExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .add, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorMultiply.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = MultiplyExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .multiply, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorDivide.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = DivideExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .multiply, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (Literal.ExclamationMark.self, Expression.self),
+                gen: { _, bool in
+                    let expr = NotExprIr(expr: bool)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .negate, associativity: .right)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorAnd.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = AndExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .logicalAnd, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorOr.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = OrExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .logicalOr, associativity: .left)
+            ),
+            GrammarPattern(
+                parts: (Expression.self, OperatorEqual.self, Expression.self),
+                gen: { lhs, _, rhs in
+                    let expr = EqualExprIr(lhs: lhs, rhs: rhs)
+                    return ExpressionIr(expression: expr)
+                },
+                precedence: Precedence(priority: .compare, associativity: .left)
             ),
         ]
     }
