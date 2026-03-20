@@ -285,3 +285,58 @@ protocol ExpressionIrProtocol: IR {}
 protocol StatementIrProtocol: IR {}
 
 protocol ImplStatementProtocol: IR {}
+
+protocol IntermediateExprProtocol: IR {
+    associatedtype LHS: IR
+    associatedtype Full: ExpressionIrProtocol
+
+    func with(lhs: LHS) -> Full
+}
+
+struct IntermediateHalfAddExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> AddExprIr {
+        AddExprIr(lhs: lhs, rhs: rhs)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfSubtractExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> SubtractExprIr {
+        SubtractExprIr(lhs: lhs, rhs: rhs)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfMultiplyExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> MultiplyExprIr {
+        MultiplyExprIr(lhs: lhs, rhs: rhs)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfDivideExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> DivideExprIr {
+        DivideExprIr(lhs: lhs, rhs: rhs)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
