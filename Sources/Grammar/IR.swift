@@ -287,14 +287,15 @@ protocol StatementIrProtocol: IR {}
 protocol ImplStatementProtocol: IR {}
 
 protocol IntermediateExprProtocol: IR {
-    associatedtype LHS: IR
-    associatedtype Full: ExpressionIrProtocol
-
-    func with(lhs: LHS) -> Full
+    func with(lhs: ExpressionIr) -> ExpressionIr
 }
 
 struct IntermediateExprIR: IR {
     let expression: any IntermediateExprProtocol
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        expression.with(lhs: lhs)
+    }
 
     func swift() -> SwiftCode {
         expression.swift()
@@ -304,8 +305,9 @@ struct IntermediateExprIR: IR {
 struct IntermediateHalfAddExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
-    func with(lhs: ExpressionIr) -> AddExprIr {
-        AddExprIr(lhs: lhs, rhs: rhs)
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = AddExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
     }
 
     func swift() -> SwiftCode {
@@ -316,8 +318,9 @@ struct IntermediateHalfAddExprIr: IR, IntermediateExprProtocol {
 struct IntermediateHalfSubtractExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
-    func with(lhs: ExpressionIr) -> SubtractExprIr {
-        SubtractExprIr(lhs: lhs, rhs: rhs)
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = SubtractExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
     }
 
     func swift() -> SwiftCode {
@@ -328,8 +331,9 @@ struct IntermediateHalfSubtractExprIr: IR, IntermediateExprProtocol {
 struct IntermediateHalfMultiplyExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
-    func with(lhs: ExpressionIr) -> MultiplyExprIr {
-        MultiplyExprIr(lhs: lhs, rhs: rhs)
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = MultiplyExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
     }
 
     func swift() -> SwiftCode {
@@ -340,8 +344,9 @@ struct IntermediateHalfMultiplyExprIr: IR, IntermediateExprProtocol {
 struct IntermediateHalfDivideExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
-    func with(lhs: ExpressionIr) -> DivideExprIr {
-        DivideExprIr(lhs: lhs, rhs: rhs)
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = DivideExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
     }
 
     func swift() -> SwiftCode {
