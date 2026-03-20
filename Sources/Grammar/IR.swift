@@ -293,6 +293,14 @@ protocol IntermediateExprProtocol: IR {
     func with(lhs: LHS) -> Full
 }
 
+struct IntermediateExprIR: IR {
+    let expression: any IntermediateExprProtocol
+
+    func swift() -> SwiftCode {
+        expression.swift()
+    }
+}
+
 struct IntermediateHalfAddExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
