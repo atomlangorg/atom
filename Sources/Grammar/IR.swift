@@ -302,6 +302,45 @@ struct IntermediateExprIR: IR {
     }
 }
 
+struct IntermediateHalfOrExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = OrExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfAndExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = AndExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfEqualExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = EqualExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
 struct IntermediateHalfAddExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
