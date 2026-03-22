@@ -291,14 +291,14 @@ protocol IntermediateExprProtocol: IR {
 }
 
 struct IntermediateExprIR: IR {
-    let expression: any IntermediateExprProtocol
+    let rhs: any IntermediateExprProtocol
 
     func with(lhs: ExpressionIr) -> ExpressionIr {
-        expression.with(lhs: lhs)
+        rhs.with(lhs: lhs)
     }
 
     func swift() -> SwiftCode {
-        expression.swift()
+        rhs.swift()
     }
 }
 
