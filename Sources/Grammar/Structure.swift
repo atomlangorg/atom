@@ -115,17 +115,6 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         var index = 0
 
         for part in repeat each parts {
-            // Use up first IR if it exists, which can only be used iff the first part is recursive
-            if let firstIr = context.firstIr {
-                context.firstIr = nil
-                guard context.isGrammarType(part) else {
-                    return .dontConsume
-                }
-                irPack = irPack.appending(ir: firstIr)
-                index += 1
-                continue
-            }
-
             // Handle max wildcard count to prevent slow performance from them being too greedy
             if part == Literal.Wildcard.self {
                 if context.maxWildcards == 0 {
@@ -162,11 +151,6 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
             index += 1
         }
 
-        if context.firstIr != nil {
-            // No parts existed to consume but a first IR was given
-            return .dontConsume
-        }
-
         stream = s
         let irPackConcrete = irPack as! IrPack<repeat (each Part).Output>
         let result = Result(catching: { () throws(GrammarError) in
@@ -199,7 +183,6 @@ struct GrammarContext {
     private var partIndex: Int?
     private var minPrecedence: Precedence
     fileprivate var maxWildcards: Int
-    fileprivate var firstIr: (any IR)?
 
     init() {
         history = []
@@ -208,7 +191,6 @@ struct GrammarContext {
         partIndex = nil
         minPrecedence = .default()
         maxWildcards = .max
-        firstIr = nil
     }
 
     fileprivate func addingToHistory() -> HistoryResult {
