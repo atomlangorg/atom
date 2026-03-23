@@ -931,14 +931,14 @@ enum Match {
             GrammarPattern(
                 parts: (OperatorMultiply.self, ExpressionNegate.self),
                 gen: { _, rhs in
-                    let expr = IntermediateHalfAddExprIr(rhs: rhs)
+                    let expr = IntermediateHalfMultiplyExprIr(rhs: rhs)
                     return IntermediateExprIR(rhs: expr)
                 }
             ),
             GrammarPattern(
                 parts: (OperatorDivide.self, ExpressionNegate.self),
                 gen: { _, rhs in
-                    let expr = IntermediateHalfSubtractExprIr(rhs: rhs)
+                    let expr = IntermediateHalfDivideExprIr(rhs: rhs)
                     return IntermediateExprIR(rhs: expr)
                 }
             ),
@@ -946,7 +946,7 @@ enum Match {
                 parts: (OperatorMultiply.self, ExpressionNegate.self, ExpressionMultiply2.self),
                 gen: { _, rhs, next in
                     let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfAddExprIr(rhs: expr1)
+                    let expr2 = IntermediateHalfMultiplyExprIr(rhs: expr1)
                     return IntermediateExprIR(rhs: expr2)
                 }
             ),
@@ -954,7 +954,7 @@ enum Match {
                 parts: (OperatorDivide.self, ExpressionNegate.self, ExpressionMultiply2.self),
                 gen: { _, rhs, next in
                     let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfSubtractExprIr(rhs: expr1)
+                    let expr2 = IntermediateHalfDivideExprIr(rhs: expr1)
                     return IntermediateExprIR(rhs: expr2)
                 }
             ),
