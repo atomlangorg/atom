@@ -83,18 +83,15 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
 
     let parts: Parts
     let gen: Gen
-    let options: Set<Option>
 
-    init(parts: Parts, gen: @escaping Gen, options: Set<Option> = []) {
+    init(parts: Parts, gen: @escaping Gen) {
         self.parts = parts
         self.gen = gen
-        self.options = options
     }
 
-    init(parts: Parts, options: Set<Option> = []) where Output == NeverIr {
+    init(parts: Parts) where Output == NeverIr {
         self.parts = parts
         gen = { (_: repeat (each Part).Output) in NeverIr() }
-        self.options = options
     }
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output> {
