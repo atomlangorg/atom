@@ -285,3 +285,110 @@ protocol ExpressionIrProtocol: IR {}
 protocol StatementIrProtocol: IR {}
 
 protocol ImplStatementProtocol: IR {}
+
+protocol IntermediateExprProtocol: IR {
+    func with(lhs: ExpressionIr) -> ExpressionIr
+}
+
+struct IntermediateExprIR: IR {
+    let rhs: any IntermediateExprProtocol
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        rhs.with(lhs: lhs)
+    }
+
+    func swift() -> SwiftCode {
+        rhs.swift()
+    }
+}
+
+struct IntermediateHalfOrExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = OrExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfAndExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = AndExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfEqualExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = EqualExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfAddExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = AddExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfSubtractExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = SubtractExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfMultiplyExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = MultiplyExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
+struct IntermediateHalfDivideExprIr: IR, IntermediateExprProtocol {
+    let rhs: ExpressionIr
+
+    func with(lhs: ExpressionIr) -> ExpressionIr {
+        let expr = DivideExprIr(lhs: lhs, rhs: rhs)
+        return ExpressionIr(expression: expr)
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
