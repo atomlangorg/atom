@@ -102,14 +102,6 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output> {
         var context = context
-        guard context.acceptPrecedence(precedence) else {
-            return .dontConsume
-        }
-
-        if options.contains(.resetPrecedence) {
-            context.resetPrecedence()
-        }
-
         var s = stream
         var irPack: any IrPackProtocol = IrPack< >(irs: ())
         var index = 0
