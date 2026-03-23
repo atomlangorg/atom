@@ -63,21 +63,6 @@ extension GrammarMatch {
         switch greediest.result {
         case let .success(ir):
             stream = greediest.stream
-
-            // Reattempt to consume this grammar itself again. This allows for controlled left recursion.
-            context.resetMaxWildcards()
-            context.firstIr = ir
-            switch consume(stream: &stream, context: context) {
-            case .dontConsume:
-                break
-            case let .doConsume(newIr):
-                return .doConsume(newIr)
-            case .end:
-                break
-            case let .error(diagnostic):
-                return .error(diagnostic)
-            }
-
             return .doConsume(ir)
         case let .failure(error):
             let diagnostic = Diagnostic(start: stream.currentLocation(), end: greediest.stream.currentLocation(), error: error)
