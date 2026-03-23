@@ -173,7 +173,6 @@ struct GrammarContext {
     private var grammarType: (any Grammar.Type)?
     private var patternIndex: Int?
     private var partIndex: Int?
-    private var minPrecedence: Precedence
     fileprivate var maxWildcards: Int
 
     init() {
@@ -181,7 +180,6 @@ struct GrammarContext {
         grammarType = nil
         patternIndex = nil
         partIndex = nil
-        minPrecedence = .default()
         maxWildcards = .max
     }
 
@@ -217,24 +215,6 @@ struct GrammarContext {
 
     fileprivate mutating func setPartIndex(_ value: Int) {
         partIndex = value
-    }
-
-    fileprivate mutating func acceptPrecedence(_ value: Precedence?) -> Bool {
-        guard let value else {
-            // No priority so just accept
-            return true
-        }
-
-        // Accept and update if new is higher than current or the priority is the same but now with right associativity
-        let isAccepted = value.priority > minPrecedence.priority || (value.priority == minPrecedence.priority && value.associativity == .right)
-        if isAccepted {
-            minPrecedence = value
-        }
-        return isAccepted
-    }
-
-    fileprivate mutating func resetPrecedence() {
-        minPrecedence = .default()
     }
 
     fileprivate mutating func resetMaxWildcards() {
