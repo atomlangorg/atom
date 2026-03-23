@@ -724,18 +724,7 @@ enum Match {
         ]
     }
 
-    enum Expression: GrammarMatch {
-        typealias Output = ExpressionIr
-
-        static let patterns: [any GrammarPatternProtocol<Output>] = [
-            GrammarPattern(
-                parts: (ExpressionOr1.self),
-                gen: { expr in
-                    expr
-                }
-            ),
-        ]
-    }
+    typealias Expression = ExpressionOr1
 
     enum ExpressionOr1: GrammarMatch {
         typealias Output = ExpressionIr
