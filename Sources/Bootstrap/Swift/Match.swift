@@ -732,36 +732,33 @@ enum Match {
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (ExpressionAnd1.self, ExpressionOr2.self),
-                gen: { lhs, half in
-                    half.with(lhs: lhs)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionAnd1.self),
-                gen: { expr in
-                    expr
+                gen: { lhs, exprs in
+                    var current = lhs
+                    for expr in exprs.expressions {
+                        current = expr.with(lhs: current)
+                    }
+                    return current
                 }
             ),
         ]
     }
 
     enum ExpressionOr2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorOr.self, ExpressionAnd1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfOrExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
                 parts: (OperatorOr.self, ExpressionAnd1.self, ExpressionOr2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfOrExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfOrExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
