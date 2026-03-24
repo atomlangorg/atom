@@ -911,51 +911,41 @@ enum Match {
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (ExpressionNegate.self, ExpressionMultiply2.self),
-                gen: { term, half in
-                    half.with(lhs: term)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionNegate.self),
-                gen: { expr in
-                    expr
+                gen: { lhs, exprs in
+                    var current = lhs
+                    for expr in exprs.expressions {
+                        current = expr.with(lhs: current)
+                    }
+                    return current
                 }
             ),
         ]
     }
 
     enum ExpressionMultiply2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorMultiply.self, ExpressionNegate.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfMultiplyExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
-                }
-            ),
-            GrammarPattern(
-                parts: (OperatorDivide.self, ExpressionNegate.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfDivideExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
                 parts: (OperatorMultiply.self, ExpressionNegate.self, ExpressionMultiply2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfMultiplyExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfMultiplyExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
             GrammarPattern(
                 parts: (OperatorDivide.self, ExpressionNegate.self, ExpressionMultiply2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfDivideExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfDivideExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
