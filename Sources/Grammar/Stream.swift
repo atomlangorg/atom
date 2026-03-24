@@ -83,8 +83,10 @@ struct Stream {
                     return false
                 }
             } else {
-                // Current stream had a wildcard but the greediest so far does not
-                return false
+                // Current stream had a wildcard but the greediest so far does
+                // not, but if the first wildcard is still after the greediest,
+                // accept it.
+                return ci > stream.index
             }
         }
 
