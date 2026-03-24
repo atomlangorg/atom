@@ -302,6 +302,15 @@ struct IntermediateExprIR: IR {
     }
 }
 
+
+struct IntermediateExprIRs: IR {
+    let expressions: [IntermediateExprIR]
+
+    func swift() -> SwiftCode {
+        fatalError()
+    }
+}
+
 struct IntermediateHalfOrExprIr: IR, IntermediateExprProtocol {
     let rhs: ExpressionIr
 
