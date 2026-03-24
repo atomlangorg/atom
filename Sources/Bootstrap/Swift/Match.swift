@@ -814,36 +814,33 @@ enum Match {
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
                 parts: (ExpressionAdd1.self, ExpressionCompare2.self),
-                gen: { lhs, half in
-                    half.with(lhs: lhs)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionAdd1.self),
-                gen: { expr in
-                    expr
+                gen: { lhs, exprs in
+                    var current = lhs
+                    for expr in exprs.expressions {
+                        current = expr.with(lhs: current)
+                    }
+                    return current
                 }
             ),
         ]
     }
 
     enum ExpressionCompare2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorEqual.self, ExpressionAdd1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfEqualExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
                 parts: (OperatorEqual.self, ExpressionAdd1.self, ExpressionCompare2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfEqualExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfEqualExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
