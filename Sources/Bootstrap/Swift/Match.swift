@@ -923,6 +923,13 @@ enum Match {
                 }
             ),
             GrammarPattern(
+                parts: (Literal.ExclamationMark.self, ExpressionPrefixPrecedence.self),
+                gen: { _, expr in
+                    let expr = NotExprIr(expr: expr)
+                    return ExpressionIr(expression: expr)
+                }
+            ),
+            GrammarPattern(
                 parts: (Literal.Minus.self, ExpressionPrefixPrecedence.self),
                 gen: { _, expr in
                     let expr = NegateExprIr(expr: expr)
