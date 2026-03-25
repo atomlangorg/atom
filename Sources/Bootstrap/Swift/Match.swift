@@ -733,11 +733,7 @@ enum Match {
             GrammarPattern(
                 parts: (ExpressionLogicalConjunctionPrecedence1.self, ExpressionLogicalDisjunctionPrecedence2.self),
                 gen: { lhs, exprs in
-                    var current = lhs
-                    for expr in exprs.expressions {
-                        current = expr.with(lhs: current)
-                    }
-                    return current
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
@@ -771,11 +767,7 @@ enum Match {
             GrammarPattern(
                 parts: (ExpressionComparisonPrecedence1.self, ExpressionLogicalConjunctionPrecedence2.self),
                 gen: { lhs, exprs in
-                    var current = lhs
-                    for expr in exprs.expressions {
-                        current = expr.with(lhs: current)
-                    }
-                    return current
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
@@ -809,11 +801,7 @@ enum Match {
             GrammarPattern(
                 parts: (ExpressionAdditionPrecedence1.self, ExpressionComparisonPrecedence2.self),
                 gen: { lhs, exprs in
-                    var current = lhs
-                    for expr in exprs.expressions {
-                        current = expr.with(lhs: current)
-                    }
-                    return current
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
@@ -847,11 +835,7 @@ enum Match {
             GrammarPattern(
                 parts: (ExpressionMultiplicationPrecedence1.self, ExpressionAdditionPrecedence2.self),
                 gen: { lhs, exprs in
-                    var current = lhs
-                    for expr in exprs.expressions {
-                        current = expr.with(lhs: current)
-                    }
-                    return current
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
@@ -893,11 +877,7 @@ enum Match {
             GrammarPattern(
                 parts: (ExpressionPrefixPrecedence.self, ExpressionMultiplicationPrecedence2.self),
                 gen: { lhs, exprs in
-                    var current = lhs
-                    for expr in exprs.expressions {
-                        current = expr.with(lhs: current)
-                    }
-                    return current
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
