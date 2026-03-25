@@ -306,6 +306,14 @@ struct IntermediateExprIR: IR {
 struct IntermediateExprIRs: IR {
     let expressions: [IntermediateExprIR]
 
+    func collapse(lhs: ExpressionIr) -> ExpressionIr {
+        var current = lhs
+        for expr in expressions {
+            current = expr.with(lhs: current)
+        }
+        return current
+    }
+
     func swift() -> SwiftCode {
         fatalError()
     }
