@@ -51,7 +51,7 @@ struct NegateExprIr: IR, ExpressionIrProtocol {
     let expr: ExpressionIr
 
     func swift() -> SwiftCode {
-        SwiftCode("-\(expr.swift())")
+        SwiftCode("(-\(expr.swift()))")
     }
 }
 
@@ -113,7 +113,7 @@ struct NotExprIr: IR, ExpressionIrProtocol {
     let expr: ExpressionIr
 
     func swift() -> SwiftCode {
-        SwiftCode("!\(expr.swift())")
+        SwiftCode("(!\(expr.swift()))")
     }
 }
 
@@ -299,6 +299,23 @@ struct IntermediateExprIR: IR {
 
     func swift() -> SwiftCode {
         rhs.swift()
+    }
+}
+
+
+struct IntermediateExprIRs: IR {
+    let expressions: [IntermediateExprIR]
+
+    func collapse(lhs: ExpressionIr) -> ExpressionIr {
+        var current = lhs
+        for expr in expressions {
+            current = expr.with(lhs: current)
+        }
+        return current
+    }
+
+    func swift() -> SwiftCode {
+        fatalError()
     }
 }
 

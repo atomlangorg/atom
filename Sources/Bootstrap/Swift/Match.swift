@@ -724,255 +724,213 @@ enum Match {
         ]
     }
 
-    typealias Expression = ExpressionOr1
+    typealias Expression = ExpressionLogicalDisjunctionPrecedence1
 
-    enum ExpressionOr1: GrammarMatch {
+    enum ExpressionLogicalDisjunctionPrecedence1: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (ExpressionAnd1.self, ExpressionOr2.self),
-                gen: { lhs, half in
-                    half.with(lhs: lhs)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionAnd1.self),
-                gen: { expr in
-                    expr
+                parts: (ExpressionLogicalConjunctionPrecedence1.self, ExpressionLogicalDisjunctionPrecedence2.self),
+                gen: { lhs, exprs in
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
     }
 
-    enum ExpressionOr2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+    enum ExpressionLogicalDisjunctionPrecedence2: GrammarMatch {
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorOr.self, ExpressionAnd1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfOrExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
-                parts: (OperatorOr.self, ExpressionAnd1.self, ExpressionOr2.self),
+                parts: (OperatorOr.self, ExpressionLogicalConjunctionPrecedence1.self, ExpressionLogicalDisjunctionPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfOrExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfOrExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
     }
 
-    enum ExpressionAnd1: GrammarMatch {
+    enum ExpressionLogicalConjunctionPrecedence1: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (ExpressionCompare1.self, ExpressionAnd2.self),
-                gen: { lhs, half in
-                    half.with(lhs: lhs)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionCompare1.self),
-                gen: { expr in
-                    expr
+                parts: (ExpressionComparisonPrecedence1.self, ExpressionLogicalConjunctionPrecedence2.self),
+                gen: { lhs, exprs in
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
     }
 
-    enum ExpressionAnd2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+    enum ExpressionLogicalConjunctionPrecedence2: GrammarMatch {
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorAnd.self, ExpressionCompare1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfAndExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
-                parts: (OperatorAnd.self, ExpressionCompare1.self, ExpressionAnd2.self),
+                parts: (OperatorAnd.self, ExpressionComparisonPrecedence1.self, ExpressionLogicalConjunctionPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfAndExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfAndExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
     }
 
-    enum ExpressionCompare1: GrammarMatch {
+    enum ExpressionComparisonPrecedence1: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (ExpressionAdd1.self, ExpressionCompare2.self),
-                gen: { lhs, half in
-                    half.with(lhs: lhs)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionAdd1.self),
-                gen: { expr in
-                    expr
+                parts: (ExpressionAdditionPrecedence1.self, ExpressionComparisonPrecedence2.self),
+                gen: { lhs, exprs in
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
     }
 
-    enum ExpressionCompare2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+    enum ExpressionComparisonPrecedence2: GrammarMatch {
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorEqual.self, ExpressionAdd1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfEqualExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
-                parts: (OperatorEqual.self, ExpressionAdd1.self, ExpressionCompare2.self),
+                parts: (OperatorEqual.self, ExpressionAdditionPrecedence1.self, ExpressionComparisonPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfEqualExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfEqualExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
     }
 
-    enum ExpressionAdd1: GrammarMatch {
+    enum ExpressionAdditionPrecedence1: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (ExpressionMultiply1.self, ExpressionAdd2.self),
-                gen: { lhs, half in
-                    half.with(lhs: lhs)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionMultiply1.self),
-                gen: { expr in
-                    expr
+                parts: (ExpressionMultiplicationPrecedence1.self, ExpressionAdditionPrecedence2.self),
+                gen: { lhs, exprs in
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
     }
 
-    enum ExpressionAdd2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+    enum ExpressionAdditionPrecedence2: GrammarMatch {
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorAdd.self, ExpressionMultiply1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfAddExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
-                parts: (OperatorSubtract.self, ExpressionMultiply1.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfSubtractExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
-                }
-            ),
-            GrammarPattern(
-                parts: (OperatorAdd.self, ExpressionMultiply1.self, ExpressionAdd2.self),
+                parts: (OperatorAdd.self, ExpressionMultiplicationPrecedence1.self, ExpressionAdditionPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfAddExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfAddExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
             GrammarPattern(
-                parts: (OperatorSubtract.self, ExpressionMultiply1.self, ExpressionAdd2.self),
+                parts: (OperatorSubtract.self, ExpressionMultiplicationPrecedence1.self, ExpressionAdditionPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfSubtractExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfSubtractExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
     }
 
-    enum ExpressionMultiply1: GrammarMatch {
+    enum ExpressionMultiplicationPrecedence1: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (ExpressionNegate.self, ExpressionMultiply2.self),
-                gen: { term, half in
-                    half.with(lhs: term)
-                }
-            ),
-            GrammarPattern(
-                parts: (ExpressionNegate.self),
-                gen: { expr in
-                    expr
+                parts: (ExpressionPrefixPrecedence.self, ExpressionMultiplicationPrecedence2.self),
+                gen: { lhs, exprs in
+                    exprs.collapse(lhs: lhs)
                 }
             ),
         ]
     }
 
-    enum ExpressionMultiply2: GrammarMatch {
-        typealias Output = IntermediateExprIR
+    enum ExpressionMultiplicationPrecedence2: GrammarMatch {
+        typealias Output = IntermediateExprIRs
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (OperatorMultiply.self, ExpressionNegate.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfMultiplyExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
+                parts: (),
+                gen: {
+                    IntermediateExprIRs(expressions: [])
                 }
             ),
             GrammarPattern(
-                parts: (OperatorDivide.self, ExpressionNegate.self),
-                gen: { _, rhs in
-                    let expr = IntermediateHalfDivideExprIr(rhs: rhs)
-                    return IntermediateExprIR(rhs: expr)
-                }
-            ),
-            GrammarPattern(
-                parts: (OperatorMultiply.self, ExpressionNegate.self, ExpressionMultiply2.self),
+                parts: (OperatorMultiply.self, ExpressionPrefixPrecedence.self, ExpressionMultiplicationPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfMultiplyExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfMultiplyExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
             GrammarPattern(
-                parts: (OperatorDivide.self, ExpressionNegate.self, ExpressionMultiply2.self),
+                parts: (OperatorDivide.self, ExpressionPrefixPrecedence.self, ExpressionMultiplicationPrecedence2.self),
                 gen: { _, rhs, next in
-                    let expr1 = next.with(lhs: rhs)
-                    let expr2 = IntermediateHalfDivideExprIr(rhs: expr1)
-                    return IntermediateExprIR(rhs: expr2)
+                    let half = IntermediateHalfDivideExprIr(rhs: rhs)
+                    let expr = IntermediateExprIR(rhs: half)
+                    return IntermediateExprIRs(expressions: [expr] + next.expressions)
                 }
             ),
         ]
     }
 
-    enum ExpressionNegate: GrammarMatch {
+    enum ExpressionPrefixPrecedence: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
             GrammarPattern(
-                parts: (ExpressionGroup.self),
+                parts: (ExpressionGroupPrecedence.self),
                 gen: { expr in
                     expr
                 }
             ),
             GrammarPattern(
-                parts: (Literal.Minus.self, ExpressionNegate.self),
+                parts: (Literal.ExclamationMark.self, ExpressionPrefixPrecedence.self),
+                gen: { _, expr in
+                    let expr = NotExprIr(expr: expr)
+                    return ExpressionIr(expression: expr)
+                }
+            ),
+            GrammarPattern(
+                parts: (Literal.Minus.self, ExpressionPrefixPrecedence.self),
                 gen: { _, expr in
                     let expr = NegateExprIr(expr: expr)
                     return ExpressionIr(expression: expr)
@@ -981,7 +939,7 @@ enum Match {
         ]
     }
 
-    enum ExpressionGroup: GrammarMatch {
+    enum ExpressionGroupPrecedence: GrammarMatch {
         typealias Output = ExpressionIr
 
         static let patterns: [any GrammarPatternProtocol<Output>] = [
