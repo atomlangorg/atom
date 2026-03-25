@@ -119,17 +119,6 @@ struct Stream {
         return isLessEagerWithWildcardsThan(stream: stream, since: commonAncestorStream)
     }
 
-    func countWildcards(since commonAncestorStream: Stream) -> Int {
-        countWildcards(from: commonAncestorStream.index)
-    }
-
-    private func countWildcards(from index: RawCode.Index) -> Int {
-        guard let i = wildcardIndexes.firstIndex(where: { $0 >= index }) else {
-            return 0
-        }
-        return wildcardIndexes.endIndex - i
-    }
-
     private func firstWildcardIndex(from index: RawCode.Index) -> RawCode.Index? {
         // TODO: implement as binary search to make faster
         wildcardIndexes.first(where: { $0 >= index })
