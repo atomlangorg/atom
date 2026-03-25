@@ -51,7 +51,7 @@ struct NegateExprIr: IR, ExpressionIrProtocol {
     let expr: ExpressionIr
 
     func swift() -> SwiftCode {
-        SwiftCode("-\(expr.swift())")
+        SwiftCode("(-\(expr.swift()))")
     }
 }
 
