@@ -41,7 +41,6 @@ extension GrammarMatch {
             case .dontConsume:
                 continue
             case let .doConsume(result):
-                context.maxWildcards = s.countWildcards(since: stream)
                 if let g = greediest {
                     guard s.isGreedierThan(stream: g.stream, since: stream) else {
                         continue
@@ -101,15 +100,6 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         var index = 0
 
         for part in repeat each parts {
-            // Handle max wildcard count to prevent slow performance from them being too greedy
-            if part == Literal.Wildcard.self {
-                if context.maxWildcards == 0 {
-                    return .dontConsume
-                } else {
-                    context.maxWildcards -= 1
-                }
-            }
-
             context.setPartIndex(index)
 
             switch context.addingToHistory() {
@@ -167,14 +157,12 @@ struct GrammarContext {
     private var grammarType: (any Grammar.Type)?
     private var patternIndex: Int?
     private var partIndex: Int?
-    fileprivate var maxWildcards: Int
 
     init() {
         history = []
         grammarType = nil
         patternIndex = nil
         partIndex = nil
-        maxWildcards = .max
     }
 
     fileprivate func addingToHistory() -> HistoryResult {
@@ -209,10 +197,6 @@ struct GrammarContext {
 
     fileprivate mutating func setPartIndex(_ value: Int) {
         partIndex = value
-    }
-
-    fileprivate mutating func resetMaxWildcards() {
-        maxWildcards = .max
     }
 
     private func snapshot() -> HistorySnapshot {
