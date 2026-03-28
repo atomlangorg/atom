@@ -7,6 +7,7 @@
 
 struct GrammarPipelineSource {
     var heads: [GrammarPipelineLiteral: GrammarPipelineHead]
+    var empty: GrammarPipelineHead
 
     init(match: any GrammarMatch.Type) {
         self.init(match: match, rest: [])
@@ -14,12 +15,14 @@ struct GrammarPipelineSource {
 
     private init() {
         heads = [:]
+        empty = GrammarPipelineHead(bodies: [])
     }
 
     private init(literal: any GrammarLiteral.Type, rest: [any Grammar.Type].SubSequence) {
         let literal = GrammarPipelineLiteral(value: literal)
         let head = GrammarPipelineHead(bodies: [GrammarPipelineBody(rest: rest)])
         heads = [literal: head]
+        empty = GrammarPipelineHead(bodies: [])
     }
 
     private init(match: any GrammarMatch.Type, rest: [any Grammar.Type].SubSequence) {
@@ -32,16 +35,19 @@ struct GrammarPipelineSource {
     private init(patterns: [[any Grammar.Type]], rest: [any Grammar.Type].SubSequence) {
         var source = GrammarPipelineSource()
         for parts in patterns {
-            let pipelines = GrammarPipelineSource(parts: parts)
+            guard let pipelines = GrammarPipelineSource(parts: parts) else {
+                let body = GrammarPipelineBody(rest: .SubSequence(parts))
+                source.empty.bodies.append(body)
+                continue
+            }
             source.merge(with: pipelines, rest: rest)
         }
         self = source
     }
 
-    private init(parts: [any Grammar.Type]) {
+    private init?(parts: [any Grammar.Type]) {
         guard let first = parts.first else {
-            self = GrammarPipelineSource()
-            return
+            return nil
         }
         let rest = parts.dropFirst()
 
