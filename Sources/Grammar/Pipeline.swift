@@ -5,7 +5,7 @@
 //  Created by George Elsham on 26/03/2026.
 //
 
-struct GrammarPipelineHeads {
+struct GrammarPipelineSource {
     var heads: [GrammarPipelineLiteral: GrammarPipelineHead]
 
     init(match: any GrammarMatch.Type) {
@@ -26,29 +26,29 @@ struct GrammarPipelineHeads {
         let patterns = match.patterns.map { pattern in
             pattern.anyParts()
         }
-        self = GrammarPipelineHeads(patterns: patterns, rest: rest)
+        self = GrammarPipelineSource(patterns: patterns, rest: rest)
     }
 
     private init(patterns: [[any Grammar.Type]], rest: [any Grammar.Type].SubSequence) {
-        var heads = GrammarPipelineHeads()
+        var source = GrammarPipelineSource()
         for parts in patterns {
-            let pipelines = GrammarPipelineHeads(parts: parts)
-            heads.merge(with: pipelines, rest: rest)
+            let pipelines = GrammarPipelineSource(parts: parts)
+            source.merge(with: pipelines, rest: rest)
         }
-        self = heads
+        self = source
     }
 
     private init(parts: [any Grammar.Type]) {
         guard let first = parts.first else {
-            self = GrammarPipelineHeads()
+            self = GrammarPipelineSource()
             return
         }
         let rest = parts.dropFirst()
 
         if let literal = first as? any GrammarLiteral.Type {
-            self = GrammarPipelineHeads(literal: literal, rest: rest)
+            self = GrammarPipelineSource(literal: literal, rest: rest)
         } else if let match = first as? any GrammarMatch.Type {
-            self = GrammarPipelineHeads(match: match, rest: rest)
+            self = GrammarPipelineSource(match: match, rest: rest)
         } else {
             fatalError("Unreachable")
         }
@@ -62,7 +62,7 @@ struct GrammarPipelineHeads {
         }
     }
 
-    mutating func merge(with other: GrammarPipelineHeads, rest: [any Grammar.Type].SubSequence) {
+    mutating func merge(with other: GrammarPipelineSource, rest: [any Grammar.Type].SubSequence) {
         for (literal, var head) in other.heads {
             for index in head.bodies.indices {
                 head.bodies[index].rest.append(contentsOf: rest)
