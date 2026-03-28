@@ -54,7 +54,7 @@ struct GrammarPipelineSource {
         }
     }
 
-    mutating func combine(with other: GrammarPipelineHead, literal: GrammarPipelineLiteral) {
+    private mutating func combine(with other: GrammarPipelineHead, literal: GrammarPipelineLiteral) {
         if heads[literal] == nil {
             heads[literal] = other
         } else {
@@ -62,7 +62,7 @@ struct GrammarPipelineSource {
         }
     }
 
-    mutating func merge(with other: GrammarPipelineSource, rest: [any Grammar.Type].SubSequence) {
+    private mutating func merge(with other: GrammarPipelineSource, rest: [any Grammar.Type].SubSequence) {
         for (literal, var head) in other.heads {
             for index in head.bodies.indices {
                 head.bodies[index].rest.append(contentsOf: rest)
