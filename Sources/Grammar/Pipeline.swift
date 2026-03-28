@@ -6,15 +6,16 @@
 //
 
 struct GrammarPipelineHeads {
-    var heads: [GrammarPipelineHead]
+    var heads: [GrammarPipelineLiteral: GrammarPipelineHead]
 
     init() {
-        heads = []
+        heads = [:]
     }
 
     init(literal: any GrammarLiteral.Type, upcoming: [any Grammar.Type].SubSequence) {
-        let head = GrammarPipelineHead(literal: literal, bodies: [GrammarPipelineBody(upcoming: upcoming)])
-        heads = [head]
+        let literal = GrammarPipelineLiteral(value: literal)
+        let head = GrammarPipelineHead(bodies: [GrammarPipelineBody(upcoming: upcoming)])
+        heads = [literal: head]
     }
 
     init(allParts: [[any Grammar.Type]], upcoming: [any Grammar.Type].SubSequence) {
@@ -25,29 +26,25 @@ struct GrammarPipelineHeads {
         self = heads
     }
 
-    mutating func combine(with other: GrammarPipelineHead) {
-        for (index, head) in heads.enumerated() {
-            guard head.literal == other.literal else {
-                continue
-            }
-            heads[index].bodies.append(contentsOf: other.bodies)
-            return
+    mutating func combine(with other: GrammarPipelineHead, literal: GrammarPipelineLiteral) {
+        if heads[literal] == nil {
+            heads[literal] = other
+        } else {
+            heads[literal]!.bodies.append(contentsOf: other.bodies)
         }
-        heads.append(other)
     }
 
     mutating func split(parts: [any Grammar.Type].SubSequence, upcoming: [any Grammar.Type].SubSequence) {
-        for var head in splitIntoHeads(parts: parts).heads {
+        for (literal, var head) in splitIntoHeads(parts: parts).heads {
             for index in head.bodies.indices {
                 head.bodies[index].upcoming.append(contentsOf: upcoming)
             }
-            combine(with: head)
+            combine(with: head, literal: literal)
         }
     }
 }
 
 struct GrammarPipelineHead {
-    let literal: any GrammarLiteral.Type
     var bodies: [GrammarPipelineBody]
 
     func next() -> GrammarPipelineHeads {
