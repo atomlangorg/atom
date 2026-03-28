@@ -8,22 +8,50 @@
 struct GrammarPipelineHeads {
     var heads: [GrammarPipelineLiteral: GrammarPipelineHead]
 
-    init() {
+    init(match: any GrammarMatch.Type) {
+        self.init(match: match, rest: [])
+    }
+
+    private init() {
         heads = [:]
     }
 
-    init(literal: any GrammarLiteral.Type, upcoming: [any Grammar.Type].SubSequence) {
+    private init(literal: any GrammarLiteral.Type, rest: [any Grammar.Type].SubSequence) {
         let literal = GrammarPipelineLiteral(value: literal)
-        let head = GrammarPipelineHead(bodies: [GrammarPipelineBody(upcoming: upcoming)])
+        let head = GrammarPipelineHead(bodies: [GrammarPipelineBody(rest: rest)])
         heads = [literal: head]
     }
 
-    init(allParts: [[any Grammar.Type]], upcoming: [any Grammar.Type].SubSequence) {
+    private init(match: any GrammarMatch.Type, rest: [any Grammar.Type].SubSequence) {
+        let patterns = match.patterns.map { pattern in
+            pattern.anyParts()
+        }
+        self = GrammarPipelineHeads(patterns: patterns, rest: rest)
+    }
+
+    private init(patterns: [[any Grammar.Type]], rest: [any Grammar.Type].SubSequence) {
         var heads = GrammarPipelineHeads()
-        for parts in allParts {
-            heads.split(parts: .SubSequence(parts), upcoming: .SubSequence(upcoming))
+        for parts in patterns {
+            let pipelines = GrammarPipelineHeads(parts: parts)
+            heads.merge(with: pipelines, rest: rest)
         }
         self = heads
+    }
+
+    private init(parts: [any Grammar.Type]) {
+        guard let first = parts.first else {
+            self = GrammarPipelineHeads()
+            return
+        }
+        let rest = parts.dropFirst()
+
+        if let literal = first as? any GrammarLiteral.Type {
+            self = GrammarPipelineHeads(literal: literal, rest: rest)
+        } else if let match = first as? any GrammarMatch.Type {
+            self = GrammarPipelineHeads(match: match, rest: rest)
+        } else {
+            fatalError("Unreachable")
+        }
     }
 
     mutating func combine(with other: GrammarPipelineHead, literal: GrammarPipelineLiteral) {
@@ -34,10 +62,10 @@ struct GrammarPipelineHeads {
         }
     }
 
-    mutating func split(parts: [any Grammar.Type].SubSequence, upcoming: [any Grammar.Type].SubSequence) {
-        for (literal, var head) in splitIntoHeads(parts: parts).heads {
+    mutating func merge(with other: GrammarPipelineHeads, rest: [any Grammar.Type].SubSequence) {
+        for (literal, var head) in other.heads {
             for index in head.bodies.indices {
-                head.bodies[index].upcoming.append(contentsOf: upcoming)
+                head.bodies[index].rest.append(contentsOf: rest)
             }
             combine(with: head, literal: literal)
         }
@@ -46,18 +74,10 @@ struct GrammarPipelineHeads {
 
 struct GrammarPipelineHead {
     var bodies: [GrammarPipelineBody]
-
-    func next() -> GrammarPipelineHeads {
-        var heads = GrammarPipelineHeads()
-        for body in bodies {
-            heads.split(parts: body.upcoming, upcoming: [])
-        }
-        return heads
-    }
 }
 
 struct GrammarPipelineBody {
-    var upcoming: [any Grammar.Type].SubSequence
+    var rest: [any Grammar.Type].SubSequence
 }
 
 struct GrammarPipelineLiteral: Hashable {
@@ -69,21 +89,5 @@ struct GrammarPipelineLiteral: Hashable {
 
     static func == (lhs: GrammarPipelineLiteral, rhs: GrammarPipelineLiteral) -> Bool {
         lhs.value == rhs.value
-    }
-}
-
-func splitIntoHeads(parts: [any Grammar.Type].SubSequence) -> GrammarPipelineHeads {
-    guard let first = parts.first else {
-        return GrammarPipelineHeads()
-    }
-    let upcoming = parts.dropFirst()
-
-    if let literal = first as? any GrammarLiteral.Type {
-        return GrammarPipelineHeads(literal: literal, upcoming: upcoming)
-    } else if let match = first as? any GrammarMatch.Type {
-        let allParts = match.patterns.map { $0.anyParts() }
-        return GrammarPipelineHeads(allParts: allParts, upcoming: upcoming)
-    } else {
-        fatalError("Unreachable")
     }
 }
