@@ -63,6 +63,18 @@ struct GrammarPipelineBody {
     var upcoming: [any Grammar.Type].SubSequence
 }
 
+struct GrammarPipelineLiteral: Hashable {
+    let value: any GrammarLiteral.Type
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(value))
+    }
+
+    static func == (lhs: GrammarPipelineLiteral, rhs: GrammarPipelineLiteral) -> Bool {
+        lhs.value == rhs.value
+    }
+}
+
 func splitIntoHeads(parts: [any Grammar.Type].SubSequence) -> GrammarPipelineHeads {
     guard let first = parts.first else {
         return GrammarPipelineHeads()
