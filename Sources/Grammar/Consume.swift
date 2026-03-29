@@ -12,35 +12,36 @@ enum Consume {
     }
 
     static func consumeSource(source: GrammarPipelineSource, stream: inout Stream, context: GrammarContext) -> StreamResult {
-        if !stream.isEnd() {
-            for (literal, head) in source.heads {
-                var s = stream
-                switch consumeLiteral(literal: literal.value, stream: &s, context: context) {
-                case .dontConsume:
-                    continue
-                case .doConsume:
-                    stream = s
-                    return consumeHead(head: head, stream: &stream, context: context)
-                case .end:
-                    return .end
-                case let .error(diagnostic):
-                    return .error(diagnostic)
-                }
-            }
+        guard !stream.isEnd() else {
+            return source.canAcceptNothing() ? .doConsume : .dontConsume
+        }
 
-            if !source.wildcard.bodies.isEmpty {
-                var s = stream
-                switch consumeWildcard(stream: &s) {
-                case .dontConsume:
-                    break
-                case .doConsume:
-                    stream = s
-                    return consumeHead(head: source.wildcard, stream: &stream, context: context)
-                case .end:
-                    return .end
-                case let .error(diagnostic):
-                    return .error(diagnostic)
-                }
+        for (literal, head) in source.heads {
+            var s = stream
+            switch consumeLiteral(literal: literal.value, stream: &s, context: context) {
+            case .dontConsume:
+                continue
+            case .doConsume:
+                stream = s
+                return consumeHead(head: head, stream: &stream, context: context)
+            case .end:
+                return .end
+            case let .error(diagnostic):
+                return .error(diagnostic)
+            }
+        }
+        if !source.wildcard.bodies.isEmpty {
+            var s = stream
+            switch consumeWildcard(stream: &s) {
+            case .dontConsume:
+                break
+            case .doConsume:
+                stream = s
+                return consumeHead(head: source.wildcard, stream: &stream, context: context)
+            case .end:
+                return .end
+            case let .error(diagnostic):
+                return .error(diagnostic)
             }
         }
         return consumeHead(head: source.empty, stream: &stream, context: context)
