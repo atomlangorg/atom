@@ -36,7 +36,7 @@ struct GrammarPipelineSource {
         var source = GrammarPipelineSource()
         for parts in patterns {
             guard let pipelines = GrammarPipelineSource(parts: parts) else {
-                let body = GrammarPipelineBody(rest: .SubSequence(parts))
+                let body = GrammarPipelineBody(rest: rest)
                 source.empty.bodies.append(body)
                 continue
             }
