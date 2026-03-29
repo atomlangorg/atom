@@ -79,6 +79,7 @@ struct GrammarPipelineSource {
             }
             combine(with: head, literal: literal)
         }
+        empty.bodies.append(contentsOf: other.empty.bodies)
     }
 }
 
