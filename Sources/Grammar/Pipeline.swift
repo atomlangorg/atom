@@ -54,7 +54,11 @@ struct GrammarPipelineSource {
         if let literal = first as? any GrammarLiteral.Type {
             self = GrammarPipelineSource(literal: literal, rest: rest)
         } else if let match = first as? any GrammarMatch.Type {
-            self = GrammarPipelineSource(match: match, rest: rest)
+            var source = GrammarPipelineSource(match: match, rest: rest)
+            if !source.empty.bodies.isEmpty, let new = Self(parts: Array(rest)) {
+                source.merge(with: new, rest: [])
+            }
+            self = source
         } else {
             fatalError("Unreachable")
         }
