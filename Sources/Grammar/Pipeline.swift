@@ -71,7 +71,7 @@ struct GrammarPipelineSource {
             }
         } else if let match = first as? any GrammarMatch.Type {
             var source = GrammarPipelineSource(match: match, rest: rest)
-            if !source.empty.bodies.isEmpty, let new = Self(parts: Array(rest)) {
+            if source.empty.bodies.contains(where: \.rest.isEmpty), let new = Self(parts: Array(rest)) {
                 source.merge(with: new, rest: [])
             }
             self = source
