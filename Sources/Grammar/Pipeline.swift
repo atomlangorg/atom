@@ -14,6 +14,23 @@ struct GrammarPipelineSource {
         self.init(match: match, rest: [])
     }
 
+    init?(parts: [any Grammar.Type]) {
+        let id = parts.map { ObjectIdentifier($0) }
+        if let source = partsCache[id] {
+            guard let source else {
+                return nil
+            }
+            self = source
+        } else {
+            let source = GrammarPipelineSource(uncachedParts: parts)
+            partsCache.updateValue(source, forKey: id)
+            guard let source else {
+                return nil
+            }
+            self = source
+        }
+    }
+
     private init() {
         heads = [:]
         wildcard = GrammarPipelineHead(bodies: [])
@@ -57,7 +74,7 @@ struct GrammarPipelineSource {
         self = source
     }
 
-    init?(parts: [any Grammar.Type]) {
+    private init?(uncachedParts parts: [any Grammar.Type]) {
         guard let first = parts.first else {
             return nil
         }
@@ -119,3 +136,5 @@ struct GrammarPipelineLiteral: Hashable {
         lhs.value == rhs.value
     }
 }
+
+nonisolated(unsafe) private var partsCache: [[ObjectIdentifier]: GrammarPipelineSource?] = [:]
