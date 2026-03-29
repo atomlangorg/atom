@@ -27,6 +27,21 @@ enum Consume {
                     return .error(diagnostic)
                 }
             }
+
+            if !source.wildcard.bodies.isEmpty {
+                var s = stream
+                switch consumeWildcard(stream: &s) {
+                case .dontConsume:
+                    break
+                case .doConsume:
+                    stream = s
+                    return consumeHead(head: source.wildcard, stream: &stream, context: context)
+                case .end:
+                    return .end
+                case let .error(diagnostic):
+                    return .error(diagnostic)
+                }
+            }
         }
         return consumeHead(head: source.empty, stream: &stream, context: context)
     }
@@ -59,12 +74,25 @@ enum Consume {
     }
 
     static func consumeLiteral(literal: any GrammarLiteral.Type, stream: inout Stream, context: GrammarContext) -> StreamResult {
-        #warning("TODO: Consume wildcard last.")
         switch literal.consume(stream: &stream, context: context) {
         case .dontConsume:
             return .dontConsume
         case let .doConsume(ir):
             print("consume ir = \(ir)")
+            return .doConsume
+        case .end:
+            return .end
+        case let .error(diagnostic):
+            return .error(diagnostic)
+        }
+    }
+
+    static func consumeWildcard(stream: inout Stream) -> StreamResult {
+        switch stream.next() {
+        case .dontConsume:
+            return .dontConsume
+        case let .doConsume(ir):
+            print("consume wildcard ir = \(ir)")
             return .doConsume
         case .end:
             return .end
