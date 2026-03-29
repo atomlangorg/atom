@@ -7,6 +7,7 @@
 
 struct GrammarPipelineSource {
     var heads: [GrammarPipelineLiteral: GrammarPipelineHead]
+    var wildcard: GrammarPipelineHead
     var empty: GrammarPipelineHead
 
     init(match: any GrammarMatch.Type) {
@@ -15,6 +16,7 @@ struct GrammarPipelineSource {
 
     private init() {
         heads = [:]
+        wildcard = GrammarPipelineHead(bodies: [])
         empty = GrammarPipelineHead(bodies: [])
     }
 
@@ -22,6 +24,13 @@ struct GrammarPipelineSource {
         let literal = GrammarPipelineLiteral(value: literal)
         let head = GrammarPipelineHead(bodies: [GrammarPipelineBody(rest: rest)])
         heads = [literal: head]
+        wildcard = GrammarPipelineHead(bodies: [])
+        empty = GrammarPipelineHead(bodies: [])
+    }
+
+    private init(wildcardWithRest rest: [any Grammar.Type].SubSequence) {
+        heads = [:]
+        wildcard = GrammarPipelineHead(bodies: [GrammarPipelineBody(rest: rest)])
         empty = GrammarPipelineHead(bodies: [])
     }
 
@@ -42,6 +51,9 @@ struct GrammarPipelineSource {
             }
             source.merge(with: pipelines, rest: rest)
         }
+        for index in source.wildcard.bodies.indices {
+            source.wildcard.bodies[index].rest.append(contentsOf: rest)
+        }
         self = source
     }
 
@@ -52,7 +64,11 @@ struct GrammarPipelineSource {
         let rest = parts.dropFirst()
 
         if let literal = first as? any GrammarLiteral.Type {
-            self = GrammarPipelineSource(literal: literal, rest: rest)
+            if literal == Literal.Wildcard.self {
+                self = GrammarPipelineSource(wildcardWithRest: rest)
+            } else {
+                self = GrammarPipelineSource(literal: literal, rest: rest)
+            }
         } else if let match = first as? any GrammarMatch.Type {
             var source = GrammarPipelineSource(match: match, rest: rest)
             if !source.empty.bodies.isEmpty, let new = Self(parts: Array(rest)) {
@@ -79,6 +95,7 @@ struct GrammarPipelineSource {
             }
             combine(with: head, literal: literal)
         }
+        wildcard.bodies.append(contentsOf: other.wildcard.bodies)
         empty.bodies.append(contentsOf: other.empty.bodies)
     }
 }
