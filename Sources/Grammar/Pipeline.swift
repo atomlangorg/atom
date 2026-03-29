@@ -45,7 +45,7 @@ struct GrammarPipelineSource {
         self = source
     }
 
-    private init?(parts: [any Grammar.Type]) {
+    init?(parts: [any Grammar.Type]) {
         guard let first = parts.first else {
             return nil
         }
