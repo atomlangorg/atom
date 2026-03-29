@@ -88,7 +88,7 @@ struct GrammarPipelineSource {
             }
         } else if let match = first as? any GrammarMatch.Type {
             var source = GrammarPipelineSource(match: match, rest: rest)
-            if source.empty.bodies.contains(where: \.rest.isEmpty), let new = Self(parts: Array(rest)) {
+            if source.canAcceptNothing(), let new = Self(parts: Array(rest)) {
                 source.merge(with: new, rest: [])
             }
             self = source
@@ -115,6 +115,12 @@ struct GrammarPipelineSource {
         wildcard.bodies.append(contentsOf: other.wildcard.bodies)
         empty.bodies.append(contentsOf: other.empty.bodies)
     }
+
+    func canAcceptNothing() -> Bool {
+        empty.bodies.contains { body in
+            body.rest.allSatisfy(isEmpty(grammar:))
+        }
+    }
 }
 
 struct GrammarPipelineHead {
@@ -138,3 +144,21 @@ struct GrammarPipelineLiteral: Hashable {
 }
 
 nonisolated(unsafe) private var partsCache: [[ObjectIdentifier]: GrammarPipelineSource?] = [:]
+
+private func isEmpty(grammar: any Grammar.Type) -> Bool {
+    if grammar is any GrammarLiteral.Type {
+        return false
+    } else if let match = grammar as? any GrammarMatch.Type {
+        patternLoop: for pattern in match.patterns {
+            for part in pattern.anyParts() {
+                if !isEmpty(grammar: part) {
+                    continue patternLoop
+                }
+            }
+            return true
+        }
+        return false
+    } else {
+        fatalError("Unreachable")
+    }
+}
