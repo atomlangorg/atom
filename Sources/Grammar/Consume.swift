@@ -49,6 +49,7 @@ enum Consume {
 
     static func consumeHead(head: GrammarPipelineHead, stream: inout Stream, context: GrammarContext) -> StreamResult {
         var hasSeenEmpty = false
+        var greediest: (stream: Stream, result: StreamResult)?
         for body in head.bodies {
             guard let source = GrammarPipelineSource(parts: Array(body.rest)) else {
                 if stream.isEnd() {
@@ -58,19 +59,27 @@ enum Consume {
                 hasSeenEmpty = true
                 continue
             }
+
             var s = stream
-            switch consumeSource(source: source, stream: &s, context: context) {
+            let res = consumeSource(source: source, stream: &s, context: context)
+            switch res {
             case .dontConsume:
                 continue
-            case .doConsume:
-                stream = s
-                return .doConsume
-            case .end:
-                return .end
-            case let .error(diagnostic):
-                return .error(diagnostic)
+            case .doConsume, .end, .error:
+                if let g = greediest {
+                    if s.isAheadOf(stream: g.stream) {
+                        greediest = (stream: s, result: res)
+                    }
+                } else {
+                    greediest = (stream: s, result: res)
+                }
             }
         }
+        if let greediest {
+            stream = greediest.stream
+            return greediest.result
+        }
+
         return hasSeenEmpty ? .doConsume : .dontConsume
     }
 
