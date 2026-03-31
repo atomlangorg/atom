@@ -20,7 +20,7 @@ extension Program {
 
     private func intoLanguage<Root: GrammarMatch, C: Code & CodeFromIr>(root: Root.Type) -> ConversionResult<C> {
         var stream = Stream(raw: source.raw)
-        let result = root.consume(stream: &stream, context: GrammarContext())
+        let result = Consume.consumeMatch(match: root, stream: &stream, context: GrammarContext())
 
         func earlyEndResult() -> ConversionResult<C> {
             let location = stream.farthestLocation()
@@ -41,8 +41,6 @@ extension Program {
                 return earlyEndResult()
             }
             return .program(C.fromIr(ir))
-        case .end:
-            fatalError("Unreachable")
         case let .error(diagnostic):
             return .error(diagnostic)
         }
