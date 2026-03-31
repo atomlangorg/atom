@@ -68,9 +68,6 @@ struct GrammarPipelineSource {
             }
             source.merge(with: pipelines, rest: rest)
         }
-        for index in source.wildcard.bodies.indices {
-            source.wildcard.bodies[index].rest.append(contentsOf: rest)
-        }
         self = source
     }
 
@@ -112,7 +109,17 @@ struct GrammarPipelineSource {
             }
             combine(with: head, literal: literal)
         }
+
+        var other = other
+
+        for index in other.wildcard.bodies.indices {
+            other.wildcard.bodies[index].rest.append(contentsOf: rest)
+        }
         wildcard.bodies.append(contentsOf: other.wildcard.bodies)
+
+        for index in other.empty.bodies.indices {
+            other.empty.bodies[index].rest.append(contentsOf: rest)
+        }
         empty.bodies.append(contentsOf: other.empty.bodies)
     }
 
