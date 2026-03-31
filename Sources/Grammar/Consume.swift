@@ -13,7 +13,7 @@ enum Consume {
 
     static func consumeSource(source: GrammarPipelineSource, stream: inout Stream, context: GrammarContext) -> StreamResult {
         guard !stream.isEnd() else {
-            return source.canAcceptNothing() ? .doConsume : .dontConsume
+            return source.canAcceptNothing() ? .doConsume(RawStringIr(string: "")) : .dontConsume
         }
 
         for (literal, head) in source.heads {
@@ -24,8 +24,6 @@ enum Consume {
             case .doConsume:
                 stream = s
                 return consumeHead(head: head, stream: &stream, context: context)
-            case .end:
-                return .end
             case let .error(diagnostic):
                 return .error(diagnostic)
             }
@@ -38,8 +36,6 @@ enum Consume {
             case .doConsume:
                 stream = s
                 return consumeHead(head: source.wildcard, stream: &stream, context: context)
-            case .end:
-                return .end
             case let .error(diagnostic):
                 return .error(diagnostic)
             }
@@ -54,7 +50,7 @@ enum Consume {
             guard let source = GrammarPipelineSource(parts: Array(body.rest)) else {
                 if stream.isEnd() {
                     // Shortcut because nothing else can be consumed anyways
-                    return .doConsume
+                    return .doConsume(RawStringIr(string: ""))
                 }
                 hasSeenEmpty = true
                 continue
@@ -65,7 +61,7 @@ enum Consume {
             switch res {
             case .dontConsume:
                 continue
-            case .doConsume, .end, .error:
+            case .doConsume, .error:
                 if let g = greediest {
                     if s.isAheadOf(stream: g.stream) {
                         greediest = (stream: s, result: res)
@@ -80,7 +76,7 @@ enum Consume {
             return greediest.result
         }
 
-        return hasSeenEmpty ? .doConsume : .dontConsume
+        return hasSeenEmpty ? .doConsume(RawStringIr(string: "")) : .dontConsume
     }
 
     static func consumeLiteral(literal: any GrammarLiteral.Type, stream: inout Stream, context: GrammarContext) -> StreamResult {
@@ -89,9 +85,9 @@ enum Consume {
             return .dontConsume
         case let .doConsume(ir):
             print("consume ir = \(ir)")
-            return .doConsume
+            return .doConsume(ir)
         case .end:
-            return .end
+            fatalError("Unreachable")
         case let .error(diagnostic):
             return .error(diagnostic)
         }
@@ -103,9 +99,9 @@ enum Consume {
             return .dontConsume
         case let .doConsume(ir):
             print("consume wildcard ir = \(ir)")
-            return .doConsume
+            return .doConsume(ir)
         case .end:
-            return .end
+            fatalError("Unreachable")
         case let .error(diagnostic):
             return .error(diagnostic)
         }
@@ -114,7 +110,6 @@ enum Consume {
 
 enum StreamResult {
     case dontConsume
-    case doConsume
-    case end
+    case doConsume(RawStringIr)
     case error(Diagnostic)
 }
