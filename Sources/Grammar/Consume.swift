@@ -80,7 +80,7 @@ enum Consume {
     }
 
     static func consumeLiteral(literal: any GrammarLiteral.Type, stream: inout Stream, context: GrammarContext) -> StreamResult {
-        switch literal.consume(stream: &stream, context: context) {
+        switch stream.nextIf(char: literal.literal) {
         case .dontConsume:
             return .dontConsume
         case let .doConsume(ir):
