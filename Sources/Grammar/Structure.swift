@@ -7,73 +7,20 @@
 
 protocol Grammar: Sendable {
     associatedtype Output: IR
-
-    static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output>
 }
 
 protocol GrammarLiteral: Grammar where Output == RawStringIr {
     static var literal: Character { get }
 }
 
-extension GrammarLiteral {
-    static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
-        stream.nextIf(char: literal)
-    }
-}
-
 protocol GrammarMatch: Grammar {
     static var patterns: [any GrammarPatternProtocol<Output>] { get }
-}
-
-extension GrammarMatch {
-    static func consume(stream: inout Stream, context: GrammarContext) -> StreamStateMatch<Output> {
-        var greediest: (stream: Stream, result: Result<Output, GrammarError>)? = nil
-        var context = context
-        context.setGrammarType(Self.self)
-
-        for (index, pattern) in patterns.enumerated() {
-            var s = stream
-            context.setPatternIndex(index)
-
-            let state = pattern.consume(stream: &s, context: context)
-            stream.updateFarthest(relativeTo: s)
-            switch state {
-            case .dontConsume:
-                continue
-            case let .doConsume(result):
-                if let g = greediest {
-                    guard s.isGreedierThan(stream: g.stream, since: stream) else {
-                        continue
-                    }
-                }
-                greediest = (stream: s, result: result)
-            case .end:
-                continue
-            case let .error(diagnostic):
-                return .error(diagnostic)
-            }
-        }
-
-        guard let greediest else {
-            // Nothing was able to be consumed
-            return .dontConsume
-        }
-
-        switch greediest.result {
-        case let .success(ir):
-            stream = greediest.stream
-            return .doConsume(ir)
-        case let .failure(error):
-            let diagnostic = Diagnostic(start: stream.currentLocation(), end: greediest.stream.currentLocation(), error: error)
-            return .error(diagnostic)
-        }
-    }
 }
 
 protocol GrammarPatternProtocol<Output>: Sendable {
     associatedtype Output: IR
 
-    func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output>
+    func anyParts() -> [any Grammar.Type]
 }
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
@@ -93,142 +40,11 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
         gen = { (_: repeat (each Part).Output) in NeverIr() }
     }
 
-    func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output> {
-        var context = context
-        var s = stream
-        var irPack: any IrPackProtocol = IrPack< >(irs: ())
-        var index = 0
-
+    func anyParts() -> [any Grammar.Type] {
+        var anyParts = [any Grammar.Type]()
         for part in repeat each parts {
-            context.setPartIndex(index)
-
-            switch context.addingToHistory() {
-            case .cycle:
-                return .dontConsume
-            case let .changed(newContext):
-                let saved = s
-                let state = part.consume(stream: &s, context: newContext)
-                stream.updateFarthest(relativeTo: s)
-                switch state {
-                case .dontConsume:
-                    return .dontConsume
-                case let .doConsume(ir):
-                    if s.isAheadOf(stream: saved) {
-                        context.resetHistory()
-                    }
-                    irPack = irPack.appending(ir: ir)
-                case .end:
-                    return .end
-                case let .error(diagnostic):
-                    return .error(diagnostic)
-                }
-            }
-
-            index += 1
+            anyParts.append(part)
         }
-
-        stream = s
-        let irPackConcrete = irPack as! IrPack<repeat (each Part).Output>
-        let result = Result(catching: { () throws(GrammarError) in
-            try gen(repeat each irPackConcrete.irs)
-        })
-        return .doConsume(result)
+        return anyParts
     }
-}
-
-fileprivate protocol IrPackProtocol {
-    func appending<T: IR>(ir: T) -> any IrPackProtocol
-}
-
-fileprivate struct IrPack<each I: IR>: IrPackProtocol {
-    let irs: (repeat each I)
-
-    init(irs: (repeat each I)) {
-        self.irs = irs
-    }
-
-    func appending<T: IR>(ir: T) -> any IrPackProtocol {
-        IrPack<repeat each I, T>(irs: (repeat each irs, ir))
-    }
-}
-
-struct GrammarContext {
-    private var history: [HistorySnapshot]
-    private var grammarType: (any Grammar.Type)?
-    private var patternIndex: Int?
-    private var partIndex: Int?
-
-    init() {
-        history = []
-        grammarType = nil
-        patternIndex = nil
-        partIndex = nil
-    }
-
-    fileprivate func addingToHistory() -> HistoryResult {
-        let snapshot = snapshot()
-
-        for historySnapshot in history.reversed() {
-            if historySnapshot == snapshot {
-                return .cycle
-            }
-        }
-
-        var new = self
-        new.history.append(snapshot)
-        return .changed(new)
-    }
-
-    fileprivate mutating func resetHistory() {
-        history.removeAll()
-    }
-
-    fileprivate mutating func setGrammarType(_ value: any Grammar.Type) {
-        grammarType = value
-    }
-
-    fileprivate func isGrammarType(_ type: any Grammar.Type) -> Bool {
-        grammarType == type
-    }
-
-    fileprivate mutating func setPatternIndex(_ value: Int) {
-        patternIndex = value
-    }
-
-    fileprivate mutating func setPartIndex(_ value: Int) {
-        partIndex = value
-    }
-
-    private func snapshot() -> HistorySnapshot {
-        HistorySnapshot(grammarType: grammarType!, patternIndex: patternIndex!, partIndex: partIndex!)
-    }
-}
-
-fileprivate struct HistorySnapshot: Equatable {
-    private let grammarType: any Grammar.Type
-    private let patternIndex: Int
-    private let partIndex: Int
-
-    init(grammarType: any Grammar.Type, patternIndex: Int, partIndex: Int) {
-        self.grammarType = grammarType
-        self.patternIndex = patternIndex
-        self.partIndex = partIndex
-    }
-
-    static func == (lhs: HistorySnapshot, rhs: HistorySnapshot) -> Bool {
-        lhs.grammarType == rhs.grammarType &&
-        lhs.patternIndex == rhs.patternIndex &&
-        lhs.partIndex == rhs.partIndex
-    }
-}
-
-extension HistorySnapshot: CustomDebugStringConvertible {
-    var debugDescription: String {
-        "\(String(describing: grammarType))[\(patternIndex), \(partIndex)]"
-    }
-}
-
-fileprivate enum HistoryResult {
-    case cycle // Detected infinite cycle
-    case changed(GrammarContext) // Continue, with new context
 }
