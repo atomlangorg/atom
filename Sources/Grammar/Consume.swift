@@ -105,7 +105,7 @@ enum Consume {
         case .dontConsume:
             return .dontConsume
         case let .doConsume(ir):
-            print("consume ir = \(ir)")
+//            print("consume ir = \(ir)")
             return .doConsume(ir)
         case .end:
             fatalError("Unreachable")
@@ -119,7 +119,7 @@ enum Consume {
         case .dontConsume:
             return .dontConsume
         case let .doConsume(ir):
-            print("consume wildcard ir = \(ir)")
+//            print("consume wildcard ir = \(ir)")
             return .doConsume(ir)
         case .end:
             fatalError("Unreachable")
