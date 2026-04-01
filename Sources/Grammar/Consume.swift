@@ -40,8 +40,14 @@ enum Consume {
             case .dontConsume:
                 break
             case .doConsume:
-                stream = s
-                return consumeHead(head: source.wildcard, stream: &stream, context: context)
+                let res = consumeHead(head: source.wildcard, stream: &s, context: context)
+                switch res {
+                case .dontConsume:
+                    break
+                case .doConsume, .error:
+                    stream = s
+                    return res
+                }
             case let .error(diagnostic):
                 return .error(diagnostic)
             }
