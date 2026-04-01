@@ -16,14 +16,20 @@ enum Consume {
             return source.canAcceptNothing() ? .doConsume(RawStringIr(string: "")) : .dontConsume
         }
 
-        for (literal, head) in source.heads {
+        headsLoop: for (literal, head) in source.heads {
             var s = stream
             switch consumeLiteral(literal: literal.value, stream: &s) {
             case .dontConsume:
                 continue
             case .doConsume:
-                stream = s
-                return consumeHead(head: head, stream: &stream, context: context)
+                let res = consumeHead(head: head, stream: &s, context: context)
+                switch res {
+                case .dontConsume:
+                    break headsLoop
+                case .doConsume, .error:
+                    stream = s
+                    return res
+                }
             case let .error(diagnostic):
                 return .error(diagnostic)
             }
