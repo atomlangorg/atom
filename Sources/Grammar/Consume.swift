@@ -18,7 +18,7 @@ enum Consume {
 
         for (literal, head) in source.heads {
             var s = stream
-            switch consumeLiteral(literal: literal.value, stream: &s, context: context) {
+            switch consumeLiteral(literal: literal.value, stream: &s) {
             case .dontConsume:
                 continue
             case .doConsume:
@@ -79,7 +79,7 @@ enum Consume {
         return hasSeenEmpty ? .doConsume(RawStringIr(string: "")) : .dontConsume
     }
 
-    static func consumeLiteral(literal: any GrammarLiteral.Type, stream: inout Stream, context: GrammarContext) -> StreamResult {
+    static func consumeLiteral(literal: any GrammarLiteral.Type, stream: inout Stream) -> StreamResult {
         switch stream.nextIf(char: literal.literal) {
         case .dontConsume:
             return .dontConsume
