@@ -14,7 +14,7 @@ struct GrammarPipelineSource {
         self.init(match: match, rest: [])
     }
 
-    init?(parts: [any Grammar.Type]) {
+    init?(parts: [any Grammar.Type].SubSequence) {
         let id = parts.map { ObjectIdentifier($0) }
         if let source = partsCache[id] {
             guard let source else {
@@ -61,7 +61,7 @@ struct GrammarPipelineSource {
     private init(patterns: [[any Grammar.Type]], rest: [any Grammar.Type].SubSequence) {
         var source = GrammarPipelineSource()
         for parts in patterns {
-            guard let pipelines = GrammarPipelineSource(parts: parts) else {
+            guard let pipelines = GrammarPipelineSource(parts: .SubSequence(parts)) else {
                 let body = GrammarPipelineBody(rest: rest)
                 source.empty.bodies.append(body)
                 continue
@@ -71,7 +71,7 @@ struct GrammarPipelineSource {
         self = source
     }
 
-    private init?(uncachedParts parts: [any Grammar.Type]) {
+    private init?(uncachedParts parts: [any Grammar.Type].SubSequence) {
         guard let first = parts.first else {
             return nil
         }
@@ -85,7 +85,7 @@ struct GrammarPipelineSource {
             }
         } else if let match = first as? any GrammarMatch.Type {
             var source = GrammarPipelineSource(match: match, rest: rest)
-            if source.canAcceptNothing(), let new = Self(parts: Array(rest)) {
+            if source.canAcceptNothing(), let new = Self(parts: rest) {
                 source.merge(with: new, rest: [])
             }
             self = source

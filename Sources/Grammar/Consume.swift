@@ -53,7 +53,7 @@ enum Consume {
         var hasSeenEmpty = false
         var greediest: (stream: Stream, result: StreamResult)?
         for body in head.bodies {
-            guard let source = GrammarPipelineSource(parts: Array(body.rest)) else {
+            guard let source = GrammarPipelineSource(parts: body.rest) else {
                 if stream.isEnd() {
                     // Shortcut because nothing else can be consumed anyways
                     return .doConsume(RawStringIr(string: ""))
