@@ -30,8 +30,16 @@ extension GrammarMatch {
         var greediest: (stream: Stream, result: Result<Output, GrammarError>)? = nil
         var context = context
         context.setGrammarType(Self.self)
+        var successfuls = [[any Grammar.Type]]()
 
-        for (index, pattern) in patterns.enumerated() {
+        patternLoop: for (index, pattern) in patterns.enumerated() {
+            let patternParts = pattern.anyParts()
+            for successful in successfuls {
+                if successful.starts(with: patternParts, by: { $0 == $1 }) {
+                    continue patternLoop
+                }
+            }
+
             var s = stream
             context.setPatternIndex(index)
 
@@ -41,6 +49,7 @@ extension GrammarMatch {
             case .dontConsume:
                 continue
             case let .doConsume(result):
+                successfuls.append(patternParts)
                 if let g = greediest {
                     guard s.isGreedierThan(stream: g.stream, since: stream) else {
                         continue
@@ -74,6 +83,8 @@ protocol GrammarPatternProtocol<Output>: Sendable {
     associatedtype Output: IR
 
     func consume(stream: inout Stream, context: GrammarContext) -> StreamStatePattern<Output>
+
+    func anyParts() -> [any Grammar.Type]
 }
 
 struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
@@ -133,6 +144,14 @@ struct GrammarPattern<each Part: Grammar, Output: IR>: GrammarPatternProtocol {
             try gen(repeat each irPackConcrete.irs)
         })
         return .doConsume(result)
+    }
+
+    func anyParts() -> [any Grammar.Type] {
+        var anyParts = [any Grammar.Type]()
+        for part in repeat each parts {
+            anyParts.append(part)
+        }
+        return anyParts
     }
 }
 
