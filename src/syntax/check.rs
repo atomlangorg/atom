@@ -30,8 +30,8 @@ pub enum Type {
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Int => write!(f, "int"),
-            Self::Bool => write!(f, "bool"),
+            Self::Int => write!(f, "Int"),
+            Self::Bool => write!(f, "Bool"),
         }
     }
 }
@@ -173,7 +173,7 @@ impl<'a> Checker<'a> {
                     None
                 }
             },
-            // Arithmetic always produces an `int`, even if an operand is
+            // Arithmetic always produces an `Int`, even if an operand is
             // invalid, so one bad operand doesn't cause further errors.
             Expr::Unary(op, operand) => {
                 self.operand(op.symbol(), operand, Type::Int);
@@ -325,6 +325,26 @@ mod tests {
         assert_eq!(
             check_src("let x = -true\nlet y = x + 1"),
             Err(vec![invalid_operand("-")])
+        );
+    }
+
+    #[test]
+    fn type_errors_use_type_names() {
+        let messages = |src| {
+            check_src(src)
+                .unwrap_err()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            messages("let x = true + 1"),
+            ["operator `+` expects `Int`, found `Bool`"]
+        );
+        assert_eq!(
+            messages("var b = false\nb = 1"),
+            ["cannot assign `Int` to `b`, which has type `Bool`"]
         );
     }
 
