@@ -17,7 +17,11 @@
 mod syntax;
 
 fn main() {
-    let src = "let x = -1 + 2 * 3\nvar y = x / (3 - -4)\ny = y * 2\n";
+    let src = "
+        let x = -1 + 2 * 3
+        var y = x / (3 - -4)
+        y = y * 2
+    ";
 
     let program = match syntax::parse(src) {
         Ok(program) => program,
