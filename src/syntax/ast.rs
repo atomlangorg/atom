@@ -20,6 +20,8 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    And,
+    Or,
 }
 
 impl BinOp {
@@ -29,6 +31,8 @@ impl BinOp {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Div => "/",
+            Self::And => "&",
+            Self::Or => "|",
         }
     }
 }
@@ -36,12 +40,14 @@ impl BinOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
+    Not,
 }
 
 impl UnOp {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Neg => "-",
+            Self::Not => "!",
         }
     }
 }

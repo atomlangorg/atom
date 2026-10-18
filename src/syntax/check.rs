@@ -19,7 +19,7 @@
 
 use std::{collections::HashMap, fmt};
 
-use super::ast::{Expr, Mutability, Program, Stmt};
+use super::ast::{BinOp, Expr, Mutability, Program, Stmt, UnOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
@@ -173,16 +173,18 @@ impl<'a> Checker<'a> {
                     None
                 }
             },
-            // Arithmetic always produces an `Int`, even if an operand is
-            // invalid, so one bad operand doesn't cause further errors.
+            // Operators always produce their result type, even if an operand
+            // is invalid, so one bad operand doesn't cause further errors.
             Expr::Unary(op, operand) => {
-                self.operand(op.symbol(), operand, Type::Int);
-                Some(Type::Int)
+                let ty = unary_type(op);
+                self.operand(op.symbol(), operand, ty);
+                Some(ty)
             }
             Expr::Binary(lhs, op, rhs) => {
-                self.operand(op.symbol(), lhs, Type::Int);
-                self.operand(op.symbol(), rhs, Type::Int);
-                Some(Type::Int)
+                let ty = binary_type(op);
+                self.operand(op.symbol(), lhs, ty);
+                self.operand(op.symbol(), rhs, ty);
+                Some(ty)
             }
         }
     }
@@ -197,6 +199,22 @@ impl<'a> Checker<'a> {
                 found,
             });
         }
+    }
+}
+
+/// The type of a unary operator's operand, which is also its result type.
+fn unary_type(op: &UnOp) -> Type {
+    match op {
+        UnOp::Neg => Type::Int,
+        UnOp::Not => Type::Bool,
+    }
+}
+
+/// The type of a binary operator's operands, which is also its result type.
+fn binary_type(op: &BinOp) -> Type {
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => Type::Int,
+        BinOp::And | BinOp::Or => Type::Bool,
     }
 }
 
@@ -225,6 +243,53 @@ mod tests {
     #[test]
     fn accepts_booleans() {
         assert_eq!(check_src("let t = true\nvar b = t\nb = false"), Ok(()));
+    }
+
+    #[test]
+    fn accepts_boolean_operators() {
+        assert_eq!(
+            check_src("let t = true\nvar b = !t & (false | t)\nb = !!b | b"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_boolean_operators_on_integers() {
+        let invalid = |op| CheckError::InvalidOperand {
+            op,
+            expected: Type::Bool,
+            found: Type::Int,
+        };
+
+        assert_eq!(check_src("let x = !1"), Err(vec![invalid("!")]));
+        assert_eq!(check_src("let x = true & 1"), Err(vec![invalid("&")]));
+        assert_eq!(
+            check_src("let x = 1 | 2"),
+            Err(vec![invalid("|"), invalid("|")])
+        );
+    }
+
+    #[test]
+    fn boolean_operators_produce_booleans() {
+        assert_eq!(
+            check_src("let x = (true | false) + 1"),
+            Err(vec![invalid_operand("+")])
+        );
+        assert_eq!(
+            check_src("var n = 0\nn = !false"),
+            Err(vec![CheckError::AssignTypeMismatch {
+                name: "n".to_string(),
+                expected: Type::Int,
+                found: Type::Bool,
+            }])
+        );
+    }
+
+    #[test]
+    fn rejects_mixing_negations() {
+        // `-` needs an `Int` and `!` needs a `Bool`, so `-!x` and `!-x` can
+        // never be valid.
+        assert_eq!(check_src("let x = -!true"), Err(vec![invalid_operand("-")]));
     }
 
     #[test]

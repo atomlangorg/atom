@@ -56,12 +56,16 @@ where
             .or(expr.delimited_by(just(Token::LParen), just(Token::RParen)))
             .labelled("expression");
 
-        let unary = just(Token::Minus)
-            .to(UnOp::Neg)
+        let unary_op = select! {
+            Token::Minus => UnOp::Neg,
+            Token::Bang => UnOp::Not,
+        };
+        let unary = unary_op
             .repeated()
             .foldr(atom, |op, rhs| Expr::Unary(op, Box::new(rhs)));
 
         // Binary operators are left-associative: `a - b + c` is `(a - b) + c`.
+        // Each level below binds less tightly than the one before it.
         let fold_binary = |lhs, (op, rhs)| Expr::Binary(Box::new(lhs), op, Box::new(rhs));
 
         let product_op = select! {
@@ -76,9 +80,15 @@ where
             Token::Plus => BinOp::Add,
             Token::Minus => BinOp::Sub,
         };
-        product
+        let sum = product
             .clone()
-            .foldl(sum_op.then(product).repeated(), fold_binary)
+            .foldl(sum_op.then(product).repeated(), fold_binary);
+
+        let and_op = just(Token::Amp).to(BinOp::And);
+        let and = sum.clone().foldl(and_op.then(sum).repeated(), fold_binary);
+
+        let or_op = just(Token::Pipe).to(BinOp::Or);
+        and.clone().foldl(or_op.then(and).repeated(), fold_binary)
     });
 
     let binding = ident.then_ignore(just(Token::Eq)).then(expr);
@@ -327,6 +337,83 @@ mod tests {
     fn rejects_declaration_without_value() {
         assert!(parse("let x").is_err());
         assert!(parse("var x").is_err());
+    }
+
+    fn bin(lhs: Box<Expr>, op: BinOp, rhs: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Binary(lhs, op, rhs))
+    }
+
+    fn not(expr: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Unary(UnOp::Not, expr))
+    }
+
+    fn parse_expr(src: &str) -> Expr {
+        match parse(&format!("x = {src}")).unwrap().remove(0) {
+            Stmt::Assign { value, .. } => value,
+            stmt => panic!("expected assignment, got {stmt:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_not() {
+        assert_eq!(parse_expr("!a"), *not(var("a")));
+        assert_eq!(parse_expr("!!a"), *not(not(var("a"))));
+        assert_eq!(parse_expr("!-a"), *not(neg(var("a"))));
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        assert_eq!(
+            parse_expr("a | b & c"),
+            *bin(var("a"), BinOp::Or, bin(var("b"), BinOp::And, var("c")))
+        );
+        assert_eq!(
+            parse_expr("a & b | c"),
+            *bin(bin(var("a"), BinOp::And, var("b")), BinOp::Or, var("c"))
+        );
+    }
+
+    #[test]
+    fn boolean_operators_are_left_associative() {
+        assert_eq!(
+            parse_expr("a & b & c"),
+            *bin(bin(var("a"), BinOp::And, var("b")), BinOp::And, var("c"))
+        );
+        assert_eq!(
+            parse_expr("a | b | c"),
+            *bin(bin(var("a"), BinOp::Or, var("b")), BinOp::Or, var("c"))
+        );
+    }
+
+    #[test]
+    fn not_binds_tightest() {
+        assert_eq!(
+            parse_expr("!a & b"),
+            *bin(not(var("a")), BinOp::And, var("b"))
+        );
+        assert_eq!(
+            parse_expr("!(a & b)"),
+            *not(bin(var("a"), BinOp::And, var("b")))
+        );
+    }
+
+    #[test]
+    fn arithmetic_binds_tighter_than_boolean_operators() {
+        assert_eq!(
+            parse_expr("a + b & c * d"),
+            *bin(
+                bin(var("a"), BinOp::Add, var("b")),
+                BinOp::And,
+                bin(var("c"), BinOp::Mul, var("d")),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_doubled_operators() {
+        assert!(parse("x = a && b").is_err());
+        assert!(parse("x = a || b").is_err());
+        assert!(parse("x = a !").is_err());
     }
 
     #[test]

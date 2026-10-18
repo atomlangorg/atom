@@ -48,6 +48,12 @@ pub enum Token<'src> {
     Star,
     #[token("/")]
     Slash,
+    #[token("!")]
+    Bang,
+    #[token("&")]
+    Amp,
+    #[token("|")]
+    Pipe,
     #[token("=")]
     Eq,
     #[token("(")]
@@ -73,6 +79,9 @@ impl fmt::Display for Token<'_> {
             Self::Minus => write!(f, "-"),
             Self::Star => write!(f, "*"),
             Self::Slash => write!(f, "/"),
+            Self::Bang => write!(f, "!"),
+            Self::Amp => write!(f, "&"),
+            Self::Pipe => write!(f, "|"),
             Self::Eq => write!(f, "="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
@@ -111,8 +120,16 @@ mod tests {
     #[test]
     fn lexes_operators() {
         assert_eq!(
-            lex("+-*/"),
-            vec![Token::Plus, Token::Minus, Token::Star, Token::Slash]
+            lex("+-*/!&|"),
+            vec![
+                Token::Plus,
+                Token::Minus,
+                Token::Star,
+                Token::Slash,
+                Token::Bang,
+                Token::Amp,
+                Token::Pipe,
+            ]
         );
     }
 
