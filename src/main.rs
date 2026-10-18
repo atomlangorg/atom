@@ -17,7 +17,7 @@
 mod syntax;
 
 fn main() {
-    let src = "x = 1 + 2\ny = x - (3 - 4)\n";
+    let src = "x = -1 + 2 * 3\ny = x / (3 - -4)\n";
 
     match syntax::parse(src) {
         Ok(program) => println!("{program:#?}"),

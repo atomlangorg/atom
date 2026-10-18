@@ -35,6 +35,10 @@ pub enum Token<'src> {
     Plus,
     #[token("-")]
     Minus,
+    #[token("*")]
+    Star,
+    #[token("/")]
+    Slash,
     #[token("=")]
     Eq,
     #[token("(")]
@@ -55,6 +59,8 @@ impl fmt::Display for Token<'_> {
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
+            Self::Star => write!(f, "*"),
+            Self::Slash => write!(f, "/"),
             Self::Eq => write!(f, "="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
@@ -87,6 +93,14 @@ mod tests {
                 Token::Ident("y"),
                 Token::Newline,
             ]
+        );
+    }
+
+    #[test]
+    fn lexes_operators() {
+        assert_eq!(
+            lex("+-*/"),
+            vec![Token::Plus, Token::Minus, Token::Star, Token::Slash]
         );
     }
 

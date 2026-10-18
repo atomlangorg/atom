@@ -21,7 +21,7 @@ use chumsky::{
 use logos::Logos;
 
 use super::{
-    ast::{BinOp, Expr, Program, Stmt},
+    ast::{BinOp, Expr, Program, Stmt, UnOp},
     lexer::Token,
 };
 
@@ -51,15 +51,29 @@ where
             .or(expr.delimited_by(just(Token::LParen), just(Token::RParen)))
             .labelled("expression");
 
-        let op = select! {
+        let unary = just(Token::Minus)
+            .to(UnOp::Neg)
+            .repeated()
+            .foldr(atom, |op, rhs| Expr::Unary(op, Box::new(rhs)));
+
+        // Binary operators are left-associative: `a - b + c` is `(a - b) + c`.
+        let fold_binary = |lhs, (op, rhs)| Expr::Binary(Box::new(lhs), op, Box::new(rhs));
+
+        let product_op = select! {
+            Token::Star => BinOp::Mul,
+            Token::Slash => BinOp::Div,
+        };
+        let product = unary
+            .clone()
+            .foldl(product_op.then(unary).repeated(), fold_binary);
+
+        let sum_op = select! {
             Token::Plus => BinOp::Add,
             Token::Minus => BinOp::Sub,
         };
-
-        // Left-associative: `a - b + c` is `(a - b) + c`.
-        atom.clone().foldl(op.then(atom).repeated(), |lhs, (op, rhs)| {
-            Expr::Binary(Box::new(lhs), op, Box::new(rhs))
-        })
+        product
+            .clone()
+            .foldl(sum_op.then(product).repeated(), fold_binary)
     });
 
     let assign = ident
@@ -152,6 +166,72 @@ mod tests {
                     Box::new(Expr::Binary(int(2), BinOp::Add, int(3))),
                 ),
             )])
+        );
+    }
+
+    fn neg(expr: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Unary(UnOp::Neg, expr))
+    }
+
+    #[test]
+    fn parses_negation() {
+        assert_eq!(
+            parse("x = -5\ny = -y\nz = --(1)"),
+            Ok(vec![
+                assign("x", *neg(int(5))),
+                assign("y", *neg(var("y"))),
+                assign("z", *neg(neg(int(1)))),
+            ])
+        );
+    }
+
+    #[test]
+    fn subtraction_of_negative() {
+        assert_eq!(
+            parse("x = 1 - -2"),
+            Ok(vec![assign("x", Expr::Binary(int(1), BinOp::Sub, neg(int(2))))])
+        );
+    }
+
+    #[test]
+    fn multiplication_binds_tighter_than_addition() {
+        assert_eq!(
+            parse("x = 1 + 2 * 3 - 4 / 5"),
+            Ok(vec![assign(
+                "x",
+                Expr::Binary(
+                    Box::new(Expr::Binary(
+                        int(1),
+                        BinOp::Add,
+                        Box::new(Expr::Binary(int(2), BinOp::Mul, int(3))),
+                    )),
+                    BinOp::Sub,
+                    Box::new(Expr::Binary(int(4), BinOp::Div, int(5))),
+                ),
+            )])
+        );
+    }
+
+    #[test]
+    fn division_is_left_associative() {
+        assert_eq!(
+            parse("x = 8 / 4 * 2"),
+            Ok(vec![assign(
+                "x",
+                Expr::Binary(
+                    Box::new(Expr::Binary(int(8), BinOp::Div, int(4))),
+                    BinOp::Mul,
+                    int(2),
+                ),
+            )])
+        );
+    }
+
+    #[test]
+    fn negation_binds_tighter_than_multiplication() {
+        assert_eq!(
+            parse("x = -2 * 3"),
+            Ok(vec![assign("x", Expr::Binary(neg(int(2)), BinOp::Mul, int(3)))])
         );
     }
 

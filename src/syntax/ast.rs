@@ -18,12 +18,20 @@
 pub enum BinOp {
     Add,
     Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnOp {
+    Neg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Int(i64),
     Var(String),
+    Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
 }
 
