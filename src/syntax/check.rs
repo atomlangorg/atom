@@ -14,12 +14,27 @@
  * limitations under the License.
  */
 
-//! Checks that names are declared before use and that only `var`s are
-//! reassigned.
+//! Checks that names are declared before use, that only `var`s are
+//! reassigned, and that every expression is well typed.
 
 use std::{collections::HashMap, fmt};
 
 use super::ast::{Expr, Mutability, Program, Stmt};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Type {
+    Int,
+    Bool,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Int => write!(f, "int"),
+            Self::Bool => write!(f, "bool"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckError {
@@ -29,6 +44,18 @@ pub enum CheckError {
     Redeclared(String),
     /// A `let` constant was assigned to.
     AssignToConstant(String),
+    /// An operator was applied to an operand of the wrong type.
+    InvalidOperand {
+        op: &'static str,
+        expected: Type,
+        found: Type,
+    },
+    /// A `var` was assigned a value of a different type to its declaration.
+    AssignTypeMismatch {
+        name: String,
+        expected: Type,
+        found: Type,
+    },
 }
 
 impl fmt::Display for CheckError {
@@ -42,6 +69,19 @@ impl fmt::Display for CheckError {
                     "cannot assign to `{name}` because it was declared with `let`"
                 )
             }
+            Self::InvalidOperand {
+                op,
+                expected,
+                found,
+            } => write!(f, "operator `{op}` expects `{expected}`, found `{found}`"),
+            Self::AssignTypeMismatch {
+                name,
+                expected,
+                found,
+            } => write!(
+                f,
+                "cannot assign `{found}` to `{name}`, which has type `{expected}`"
+            ),
         }
     }
 }
@@ -59,9 +99,17 @@ pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Binding {
+    mutability: Mutability,
+    /// `None` if the declared value had an error, so that later uses don't
+    /// report errors caused by the same mistake.
+    ty: Option<Type>,
+}
+
 #[derive(Default)]
 struct Checker<'a> {
-    names: HashMap<&'a str, Mutability>,
+    names: HashMap<&'a str, Binding>,
     errors: Vec<CheckError>,
 }
 
@@ -74,16 +122,36 @@ impl<'a> Checker<'a> {
                 value,
             } => {
                 // Checked first so that `let x = x` refers to an earlier `x`.
-                self.expr(value);
-                if self.names.insert(name, *mutability).is_some() {
+                let ty = self.expr(value);
+                let binding = Binding {
+                    mutability: *mutability,
+                    ty,
+                };
+                if self.names.insert(name, binding).is_some() {
                     self.errors.push(CheckError::Redeclared(name.clone()));
                 }
             }
             Stmt::Assign { name, value } => {
-                self.expr(value);
-                match self.names.get(name.as_str()) {
-                    Some(Mutability::Var) => {}
-                    Some(Mutability::Let) => {
+                let found = self.expr(value);
+                match self.names.get(name.as_str()).copied() {
+                    Some(Binding {
+                        mutability: Mutability::Var,
+                        ty: expected,
+                    }) => {
+                        if let (Some(expected), Some(found)) = (expected, found)
+                            && expected != found
+                        {
+                            self.errors.push(CheckError::AssignTypeMismatch {
+                                name: name.clone(),
+                                expected,
+                                found,
+                            });
+                        }
+                    }
+                    Some(Binding {
+                        mutability: Mutability::Let,
+                        ..
+                    }) => {
                         self.errors.push(CheckError::AssignToConstant(name.clone()));
                     }
                     None => self.errors.push(CheckError::Undeclared(name.clone())),
@@ -92,19 +160,42 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn expr(&mut self, expr: &Expr) {
+    /// Returns the type of `expr`, or `None` if it can't be determined
+    /// because of an error that has already been reported.
+    fn expr(&mut self, expr: &Expr) -> Option<Type> {
         match expr {
-            Expr::Int(_) => {}
-            Expr::Var(name) => {
-                if !self.names.contains_key(name.as_str()) {
+            Expr::Int(_) => Some(Type::Int),
+            Expr::Bool(_) => Some(Type::Bool),
+            Expr::Var(name) => match self.names.get(name.as_str()) {
+                Some(binding) => binding.ty,
+                None => {
                     self.errors.push(CheckError::Undeclared(name.clone()));
+                    None
                 }
+            },
+            // Arithmetic always produces an `int`, even if an operand is
+            // invalid, so one bad operand doesn't cause further errors.
+            Expr::Unary(op, operand) => {
+                self.operand(op.symbol(), operand, Type::Int);
+                Some(Type::Int)
             }
-            Expr::Unary(_, operand) => self.expr(operand),
-            Expr::Binary(lhs, _, rhs) => {
-                self.expr(lhs);
-                self.expr(rhs);
+            Expr::Binary(lhs, op, rhs) => {
+                self.operand(op.symbol(), lhs, Type::Int);
+                self.operand(op.symbol(), rhs, Type::Int);
+                Some(Type::Int)
             }
+        }
+    }
+
+    fn operand(&mut self, op: &'static str, operand: &Expr, expected: Type) {
+        if let Some(found) = self.expr(operand)
+            && found != expected
+        {
+            self.errors.push(CheckError::InvalidOperand {
+                op,
+                expected,
+                found,
+            });
         }
     }
 }
@@ -118,9 +209,22 @@ mod tests {
         check(&parse(src).expect("source should parse"))
     }
 
+    fn invalid_operand(op: &'static str) -> CheckError {
+        CheckError::InvalidOperand {
+            op,
+            expected: Type::Int,
+            found: Type::Bool,
+        }
+    }
+
     #[test]
     fn accepts_valid_program() {
         assert_eq!(check_src("let x = 1\nvar y = x\ny = y + x\ny = -y"), Ok(()));
+    }
+
+    #[test]
+    fn accepts_booleans() {
+        assert_eq!(check_src("let t = true\nvar b = t\nb = false"), Ok(()));
     }
 
     #[test]
@@ -168,6 +272,60 @@ mod tests {
                 "{src:?}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_arithmetic_on_booleans() {
+        assert_eq!(
+            check_src("let x = true + 1"),
+            Err(vec![invalid_operand("+")])
+        );
+        assert_eq!(
+            check_src("let x = 1 - false"),
+            Err(vec![invalid_operand("-")])
+        );
+        assert_eq!(check_src("let x = -true"), Err(vec![invalid_operand("-")]));
+        assert_eq!(
+            check_src("let x = 4 / (true)"),
+            Err(vec![invalid_operand("/")])
+        );
+        assert_eq!(
+            check_src("let b = true\nlet x = b * b"),
+            Err(vec![invalid_operand("*"), invalid_operand("*")])
+        );
+    }
+
+    #[test]
+    fn rejects_assignment_of_different_type() {
+        assert_eq!(
+            check_src("var x = 1\nx = true"),
+            Err(vec![CheckError::AssignTypeMismatch {
+                name: "x".to_string(),
+                expected: Type::Int,
+                found: Type::Bool,
+            }])
+        );
+        assert_eq!(
+            check_src("var b = false\nb = 1 + 2"),
+            Err(vec![CheckError::AssignTypeMismatch {
+                name: "b".to_string(),
+                expected: Type::Bool,
+                found: Type::Int,
+            }])
+        );
+    }
+
+    #[test]
+    fn does_not_cascade_errors() {
+        // `x` has no known type, so later uses of it report nothing further.
+        assert_eq!(
+            check_src("var x = y\nlet z = x + 1\nx = true"),
+            Err(vec![CheckError::Undeclared("y".to_string())])
+        );
+        assert_eq!(
+            check_src("let x = -true\nlet y = x + 1"),
+            Err(vec![invalid_operand("-")])
+        );
     }
 
     #[test]

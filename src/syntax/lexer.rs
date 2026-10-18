@@ -28,6 +28,10 @@ pub enum Token<'src> {
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
     Int(i64),
 
+    #[token("true", |_| true)]
+    #[token("false", |_| false)]
+    Bool(bool),
+
     #[token("let")]
     Let,
     #[token("var")]
@@ -61,6 +65,7 @@ impl fmt::Display for Token<'_> {
         match self {
             Self::Error => write!(f, "<error>"),
             Self::Int(n) => write!(f, "{n}"),
+            Self::Bool(b) => write!(f, "{b}"),
             Self::Let => write!(f, "let"),
             Self::Var => write!(f, "var"),
             Self::Ident(name) => write!(f, "{name}"),
@@ -114,13 +119,17 @@ mod tests {
     #[test]
     fn keywords_are_not_prefixes() {
         assert_eq!(
-            lex("let letter _let var variable"),
+            lex("let letter _let var variable true truth false falsey"),
             vec![
                 Token::Let,
                 Token::Ident("letter"),
                 Token::Ident("_let"),
                 Token::Var,
                 Token::Ident("variable"),
+                Token::Bool(true),
+                Token::Ident("truth"),
+                Token::Bool(false),
+                Token::Ident("falsey"),
             ]
         );
     }

@@ -21,6 +21,8 @@ fn main() {
         let x = -1 + 2 * 3
         var y = x / (3 - -4)
         y = y * 2
+        var done = false
+        done = true
     ";
 
     let program = match syntax::parse(src) {

@@ -22,14 +22,34 @@ pub enum BinOp {
     Div,
 }
 
+impl BinOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
 }
 
+impl UnOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Neg => "-",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Int(i64),
+    Bool(bool),
     Var(String),
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),

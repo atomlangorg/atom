@@ -46,7 +46,12 @@ where
     let ident = select! { Token::Ident(name) => name.to_string() }.labelled("identifier");
 
     let expr = recursive(|expr| {
-        let atom = select! { Token::Int(n) => Expr::Int(n) }
+        let literal = select! {
+            Token::Int(n) => Expr::Int(n),
+            Token::Bool(b) => Expr::Bool(b),
+        };
+
+        let atom = literal
             .or(ident.map(Expr::Var))
             .or(expr.delimited_by(just(Token::LParen), just(Token::RParen)))
             .labelled("expression");
@@ -288,9 +293,34 @@ mod tests {
             "var = 1",
             "var var = 1",
             "x = var",
+            "true = 1",
+            "let false = 1",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
+    }
+
+    #[test]
+    fn parses_boolean_literals() {
+        assert_eq!(
+            parse("x = true\ny = false"),
+            Ok(vec![
+                assign("x", Expr::Bool(true)),
+                assign("y", Expr::Bool(false)),
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_ill_typed_expressions() {
+        // Type errors are caught by the checker, not the parser.
+        assert_eq!(
+            parse("x = -true + 1"),
+            Ok(vec![assign(
+                "x",
+                Expr::Binary(neg(Box::new(Expr::Bool(true))), BinOp::Add, int(1)),
+            )])
+        );
     }
 
     #[test]
