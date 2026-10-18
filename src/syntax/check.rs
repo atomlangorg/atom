@@ -464,7 +464,17 @@ mod tests {
     fn accepts_if_else() {
         assert_eq!(
             check_src(
-                "let a = true\nvar x = 0\nif a {\n    x = 1\n} else if !a {\n    x = 2\n} else {\n    x = 3\n}"
+                "
+                let a = true
+                var x = 0
+                if a {
+                    x = 1
+                } else if !a {
+                    x = 2
+                } else {
+                    x = 3
+                }
+                "
             ),
             Ok(())
         );
@@ -490,7 +500,16 @@ mod tests {
     #[test]
     fn checks_statements_inside_blocks() {
         assert_eq!(
-            check_src("let x = 1\nif true {\n    x = 2\n} else {\n    let y = z\n}"),
+            check_src(
+                "
+                let x = 1
+                if true {
+                    x = 2
+                } else {
+                    let y = z
+                }
+                "
+            ),
             Err(vec![
                 CheckError::AssignToConstant("x".to_string()),
                 CheckError::Undeclared("z".to_string()),
@@ -502,7 +521,15 @@ mod tests {
     fn blocks_can_use_and_assign_outer_names() {
         assert_eq!(
             check_src(
-                "let a = 1\nvar b = 2\nif true {\n    if true {\n        b = a + b\n    }\n}"
+                "
+                let a = 1
+                var b = 2
+                if true {
+                    if true {
+                        b = a + b
+                    }
+                }
+                "
             ),
             Ok(())
         );
@@ -511,11 +538,26 @@ mod tests {
     #[test]
     fn block_declarations_are_not_visible_outside() {
         assert_eq!(
-            check_src("if true {\n    let y = 1\n}\nlet z = y"),
+            check_src(
+                "
+                if true {
+                    let y = 1
+                }
+                let z = y
+                "
+            ),
             Err(vec![CheckError::Undeclared("y".to_string())])
         );
         assert_eq!(
-            check_src("if true {\n    let y = 1\n} else {\n    y = 2\n}"),
+            check_src(
+                "
+                if true {
+                    let y = 1
+                } else {
+                    y = 2
+                }
+                "
+            ),
             Err(vec![CheckError::Undeclared("y".to_string())])
         );
     }
@@ -523,7 +565,16 @@ mod tests {
     #[test]
     fn separate_blocks_can_reuse_names() {
         assert_eq!(
-            check_src("if true {\n    let y = 1\n} else {\n    let y = false\n}\nlet y = 2"),
+            check_src(
+                "
+                if true {
+                    let y = 1
+                } else {
+                    let y = false
+                }
+                let y = 2
+                "
+            ),
             Ok(())
         );
     }
@@ -531,7 +582,14 @@ mod tests {
     #[test]
     fn rejects_shadowing_outer_names() {
         assert_eq!(
-            check_src("let x = 1\nif true {\n    let x = 2\n}"),
+            check_src(
+                "
+                let x = 1
+                if true {
+                    let x = 2
+                }
+                "
+            ),
             Err(vec![CheckError::Redeclared("x".to_string())])
         );
     }

@@ -447,7 +447,14 @@ mod tests {
     #[test]
     fn parses_if() {
         assert_eq!(
-            parse("if c {\n    x = 1\n    y = 2\n}"),
+            parse(
+                "
+                if c {
+                    x = 1
+                    y = 2
+                }
+                "
+            ),
             Ok(vec![if_(
                 *var("c"),
                 vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2))],
@@ -459,7 +466,15 @@ mod tests {
     #[test]
     fn parses_if_else() {
         assert_eq!(
-            parse("if c {\n    x = 1\n} else {\n    x = 2\n}"),
+            parse(
+                "
+                if c {
+                    x = 1
+                } else {
+                    x = 2
+                }
+                "
+            ),
             Ok(vec![if_(
                 *var("c"),
                 vec![assign("x", Expr::Int(1))],
@@ -472,7 +487,17 @@ mod tests {
     fn parses_else_if_chain() {
         assert_eq!(
             parse(
-                "if a {\n    x = 1\n} else if b {\n    x = 2\n} else if c {\n    x = 3\n} else {\n    x = 4\n}"
+                "
+                if a {
+                    x = 1
+                } else if b {
+                    x = 2
+                } else if c {
+                    x = 3
+                } else {
+                    x = 4
+                }
+                "
             ),
             Ok(vec![if_(
                 *var("a"),
@@ -518,7 +543,18 @@ mod tests {
     #[test]
     fn parses_nested_if_and_surrounding_statements() {
         assert_eq!(
-            parse("let a = true\nif a {\n    if a {\n        let b = 1\n    }\n}\n\nx = 2\n"),
+            parse(
+                "
+                let a = true
+                if a {
+                    if a {
+                        let b = 1
+                    }
+                }
+
+                x = 2
+                "
+            ),
             Ok(vec![
                 Stmt::Decl {
                     mutability: Mutability::Let,
