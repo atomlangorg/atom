@@ -580,6 +580,60 @@ mod tests {
     }
 
     #[test]
+    fn parses_comments() {
+        assert_eq!(
+            parse(
+                "
+                // A comment on its own line.
+                let a = true // A comment after code.
+                    // An indented comment.
+
+                if a { // After an opening brace.
+                    // Inside a block.
+                    x = 1 // Inside a block, after code.
+                } else { // After `else`.
+                    x = 2
+                } // After a closing brace.
+                // At the end, without a trailing newline."
+            ),
+            Ok(vec![
+                Stmt::Decl {
+                    mutability: Mutability::Let,
+                    name: "a".to_string(),
+                    value: Expr::Bool(true),
+                },
+                if_(
+                    *var("a"),
+                    vec![assign("x", Expr::Int(1))],
+                    Some(vec![assign("x", Expr::Int(2))]),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_program_of_only_comments() {
+        assert_eq!(parse("// one\n// two"), Ok(vec![]));
+        assert_eq!(
+            parse("if c {\n    // nothing yet\n}"),
+            Ok(vec![if_(*var("c"), vec![], None)])
+        );
+    }
+
+    #[test]
+    fn comments_hide_the_rest_of_the_line() {
+        // Everything after `//` is ignored, including what would be an error.
+        assert_eq!(
+            parse("x = 1 // y = 2 $ {"),
+            Ok(vec![assign("x", Expr::Int(1))])
+        );
+        // A comment swallows the `{`, so the block is never opened.
+        assert!(parse("if c // {\n}").is_err());
+        // `else` must still be on the same line as `}`.
+        assert!(parse("if c {} // comment\nelse {}").is_err());
+    }
+
+    #[test]
     fn rejects_malformed_if() {
         for src in [
             // Missing braces or condition.

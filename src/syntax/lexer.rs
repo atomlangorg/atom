@@ -20,6 +20,9 @@ use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t\r\f]+")]
+// Comments run to the end of the line. The newline is kept, so a comment
+// never hides the end of a statement.
+#[logos(skip(r"//[^\n]*", allow_greedy = true))]
 pub enum Token<'src> {
     /// Produced for any input the lexer does not recognise, so that
     /// parsing can continue and report errors with spans.
@@ -191,5 +194,40 @@ mod tests {
     #[test]
     fn overflowing_integers_are_errors() {
         assert_eq!(lex("99999999999999999999"), vec![Token::Error]);
+    }
+
+    #[test]
+    fn skips_comments_but_keeps_newlines() {
+        assert_eq!(
+            lex("x = 1 // set x\n// whole line\ny"),
+            vec![
+                Token::Ident("x"),
+                Token::Eq,
+                Token::Int(1),
+                Token::Newline,
+                Token::Newline,
+                Token::Ident("y"),
+            ]
+        );
+    }
+
+    #[test]
+    fn comments_can_contain_anything() {
+        assert_eq!(lex("// let x = $ { // \"//"), vec![]);
+        assert_eq!(lex("1//2"), vec![Token::Int(1)]);
+    }
+
+    #[test]
+    fn single_slash_is_still_division() {
+        assert_eq!(
+            lex("4 / 2 / 1"),
+            vec![
+                Token::Int(4),
+                Token::Slash,
+                Token::Int(2),
+                Token::Slash,
+                Token::Int(1),
+            ]
+        );
     }
 }
