@@ -19,7 +19,7 @@ use std::fmt;
 use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash)]
-#[logos(skip r"[ \t\r\n\f]+")]
+#[logos(skip r"[ \t\r\f]+")]
 pub enum Token<'src> {
     /// Produced for any input the lexer does not recognise, so that
     /// parsing can continue and report errors with spans.
@@ -37,12 +37,14 @@ pub enum Token<'src> {
     Minus,
     #[token("=")]
     Eq,
-    #[token(";")]
-    Semi,
     #[token("(")]
     LParen,
     #[token(")")]
     RParen,
+
+    /// Statements are terminated by newlines.
+    #[token("\n")]
+    Newline,
 }
 
 impl fmt::Display for Token<'_> {
@@ -54,9 +56,9 @@ impl fmt::Display for Token<'_> {
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
             Self::Eq => write!(f, "="),
-            Self::Semi => write!(f, ";"),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
+            Self::Newline => write!(f, "<newline>"),
         }
     }
 }
@@ -74,7 +76,7 @@ mod tests {
     #[test]
     fn lexes_assignment() {
         assert_eq!(
-            lex("x = 1 + 23 - y;"),
+            lex("x = 1 + 23 - y\r\n"),
             vec![
                 Token::Ident("x"),
                 Token::Eq,
@@ -83,7 +85,7 @@ mod tests {
                 Token::Int(23),
                 Token::Minus,
                 Token::Ident("y"),
-                Token::Semi,
+                Token::Newline,
             ]
         );
     }

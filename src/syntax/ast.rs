@@ -29,7 +29,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    /// `name = value;`
+    /// `name = value`
     Assign { name: String, value: Expr },
 }
 

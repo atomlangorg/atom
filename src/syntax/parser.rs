@@ -65,10 +65,20 @@ where
     let assign = ident
         .then_ignore(just(Token::Eq))
         .then(expr)
-        .then_ignore(just(Token::Semi))
         .map(|(name, value)| Stmt::Assign { name, value });
 
-    assign.repeated().collect().then_ignore(end())
+    let newlines = just(Token::Newline).repeated();
+
+    // One statement per line; blank lines are allowed anywhere.
+    newlines
+        .clone()
+        .ignore_then(
+            assign
+                .separated_by(newlines.at_least(1))
+                .allow_trailing()
+                .collect(),
+        )
+        .then_ignore(end())
 }
 
 #[cfg(test)]
@@ -89,13 +99,14 @@ mod tests {
 
     #[test]
     fn parses_empty_program() {
-        assert_eq!(parse("  "), Ok(vec![]));
+        assert_eq!(parse(""), Ok(vec![]));
+        assert_eq!(parse("  \n\n  \n"), Ok(vec![]));
     }
 
     #[test]
     fn parses_assignments() {
         assert_eq!(
-            parse("x = 1 + 2; y = x - 3;"),
+            parse("x = 1 + 2\ny = x - 3"),
             Ok(vec![
                 assign("x", Expr::Binary(int(1), BinOp::Add, int(2))),
                 assign("y", Expr::Binary(var("x"), BinOp::Sub, int(3))),
@@ -104,9 +115,20 @@ mod tests {
     }
 
     #[test]
+    fn allows_blank_lines() {
+        assert_eq!(
+            parse("\n\nx = 1\n\n\ny = 2\n\n"),
+            Ok(vec![
+                assign("x", Expr::Int(1)),
+                assign("y", Expr::Int(2)),
+            ])
+        );
+    }
+
+    #[test]
     fn binary_ops_are_left_associative() {
         assert_eq!(
-            parse("x = 1 - 2 + 3;"),
+            parse("x = 1 - 2 + 3"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(
@@ -121,7 +143,7 @@ mod tests {
     #[test]
     fn parentheses_group() {
         assert_eq!(
-            parse("x = 1 - (2 + 3);"),
+            parse("x = 1 - (2 + 3)"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(
@@ -134,13 +156,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_semicolon() {
-        assert!(parse("x = 1").is_err());
+    fn rejects_two_statements_on_one_line() {
+        assert!(parse("x = 1 y = 2").is_err());
+    }
+
+    #[test]
+    fn rejects_semicolons() {
+        assert!(parse("x = 1;").is_err());
     }
 
     #[test]
     fn rejects_invalid_token() {
-        let errs = parse("x = 1 $ 2;").unwrap_err();
+        let errs = parse("x = 1 $ 2").unwrap_err();
         assert_eq!(errs[0].span().into_range(), 6..7);
     }
 }
