@@ -14,6 +14,17 @@
  * limitations under the License.
  */
 
+mod syntax;
+
 fn main() {
-    println!("Hello, world!");
+    let src = "x = 1 + 2;\ny = x - (3 - 4);\n";
+
+    match syntax::parse(src) {
+        Ok(program) => println!("{program:#?}"),
+        Err(errs) => {
+            for err in errs {
+                eprintln!("error at {:?}: {err}", err.span().into_range());
+            }
+        }
+    }
 }
