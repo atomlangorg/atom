@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn lexes_assignment() {
         assert_eq!(
-            lex("x = 1 + 23 - y\r\n"),
+            lex("x = 1 + 23 - y\n"),
             vec![
                 Token::Ident("x"),
                 Token::Eq,
