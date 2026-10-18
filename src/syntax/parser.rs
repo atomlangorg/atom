@@ -21,7 +21,7 @@ use chumsky::{
 use logos::Logos;
 
 use super::{
-    ast::{BinOp, Expr, Program, Stmt, UnOp},
+    ast::{BinOp, Expr, Mutability, Program, Stmt, UnOp},
     lexer::Token,
 };
 
@@ -76,10 +76,24 @@ where
             .foldl(sum_op.then(product).repeated(), fold_binary)
     });
 
-    let assign = ident
-        .then_ignore(just(Token::Eq))
-        .then(expr)
-        .map(|(name, value)| Stmt::Assign { name, value });
+    let binding = ident.then_ignore(just(Token::Eq)).then(expr);
+
+    let mutability = select! {
+        Token::Let => Mutability::Let,
+        Token::Var => Mutability::Var,
+    };
+
+    let decl = mutability
+        .then(binding.clone())
+        .map(|(mutability, (name, value))| Stmt::Decl {
+            mutability,
+            name,
+            value,
+        });
+
+    let assign = binding.map(|(name, value)| Stmt::Assign { name, value });
+
+    let stmt = decl.or(assign);
 
     let newlines = just(Token::Newline).repeated();
 
@@ -87,8 +101,7 @@ where
     newlines
         .clone()
         .ignore_then(
-            assign
-                .separated_by(newlines.at_least(1))
+            stmt.separated_by(newlines.at_least(1))
                 .allow_trailing()
                 .collect(),
         )
@@ -108,7 +121,10 @@ mod tests {
     }
 
     fn assign(name: &str, value: Expr) -> Stmt {
-        Stmt::Assign { name: name.to_string(), value }
+        Stmt::Assign {
+            name: name.to_string(),
+            value,
+        }
     }
 
     #[test]
@@ -132,10 +148,7 @@ mod tests {
     fn allows_blank_lines() {
         assert_eq!(
             parse("\n\nx = 1\n\n\ny = 2\n\n"),
-            Ok(vec![
-                assign("x", Expr::Int(1)),
-                assign("y", Expr::Int(2)),
-            ])
+            Ok(vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2)),])
         );
     }
 
@@ -189,7 +202,10 @@ mod tests {
     fn subtraction_of_negative() {
         assert_eq!(
             parse("x = 1 - -2"),
-            Ok(vec![assign("x", Expr::Binary(int(1), BinOp::Sub, neg(int(2))))])
+            Ok(vec![assign(
+                "x",
+                Expr::Binary(int(1), BinOp::Sub, neg(int(2)))
+            )])
         );
     }
 
@@ -231,8 +247,56 @@ mod tests {
     fn negation_binds_tighter_than_multiplication() {
         assert_eq!(
             parse("x = -2 * 3"),
-            Ok(vec![assign("x", Expr::Binary(neg(int(2)), BinOp::Mul, int(3)))])
+            Ok(vec![assign(
+                "x",
+                Expr::Binary(neg(int(2)), BinOp::Mul, int(3))
+            )])
         );
+    }
+
+    #[test]
+    fn parses_declarations() {
+        assert_eq!(
+            parse("let x = 1 + 2\nvar y = x\ny = 3\nlet letter = y"),
+            Ok(vec![
+                Stmt::Decl {
+                    mutability: Mutability::Let,
+                    name: "x".to_string(),
+                    value: Expr::Binary(int(1), BinOp::Add, int(2)),
+                },
+                Stmt::Decl {
+                    mutability: Mutability::Var,
+                    name: "y".to_string(),
+                    value: *var("x"),
+                },
+                assign("y", Expr::Int(3)),
+                Stmt::Decl {
+                    mutability: Mutability::Let,
+                    name: "letter".to_string(),
+                    value: *var("y"),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_keywords_as_identifiers() {
+        for src in [
+            "let = 1",
+            "let let = 1",
+            "x = let",
+            "var = 1",
+            "var var = 1",
+            "x = var",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_declaration_without_value() {
+        assert!(parse("let x").is_err());
+        assert!(parse("var x").is_err());
     }
 
     #[test]

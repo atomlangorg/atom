@@ -17,13 +17,23 @@
 mod syntax;
 
 fn main() {
-    let src = "x = -1 + 2 * 3\ny = x / (3 - -4)\n";
+    let src = "let x = -1 + 2 * 3\nvar y = x / (3 - -4)\ny = y * 2\n";
 
-    match syntax::parse(src) {
-        Ok(program) => println!("{program:#?}"),
+    let program = match syntax::parse(src) {
+        Ok(program) => program,
         Err(errs) => {
             for err in errs {
                 eprintln!("error at {:?}: {err}", err.span().into_range());
+            }
+            return;
+        }
+    };
+
+    match syntax::check(&program) {
+        Ok(()) => println!("{program:#?}"),
+        Err(errs) => {
+            for err in errs {
+                eprintln!("error: {err}");
             }
         }
     }

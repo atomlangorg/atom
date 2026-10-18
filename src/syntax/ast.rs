@@ -35,9 +35,23 @@ pub enum Expr {
     Binary(Box<Expr>, BinOp, Box<Expr>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mutability {
+    /// `let`: a constant that cannot be assigned to again.
+    Let,
+    /// `var`: a variable that can be reassigned.
+    Var,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    /// `name = value`
+    /// `let name = value` or `var name = value`
+    Decl {
+        mutability: Mutability,
+        name: String,
+        value: Expr,
+    },
+    /// `name = value`: reassigns an existing `var`.
     Assign { name: String, value: Expr },
 }
 

@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
-//! Front end of the compiler: turns source text into an AST.
+//! Front end of the compiler: turns source text into a checked AST.
 
 pub mod ast;
+pub mod check;
 pub mod lexer;
 pub mod parser;
 
+pub use check::check;
 pub use parser::parse;
