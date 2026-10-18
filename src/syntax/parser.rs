@@ -91,7 +91,7 @@ where
         and.clone().foldl(or_op.then(and).repeated(), fold_binary)
     });
 
-    let binding = ident.then_ignore(just(Token::Eq)).then(expr);
+    let binding = ident.then_ignore(just(Token::Eq)).then(expr.clone());
 
     let mutability = select! {
         Token::Let => Mutability::Let,
@@ -108,19 +108,39 @@ where
 
     let assign = binding.map(|(name, value)| Stmt::Assign { name, value });
 
-    let stmt = decl.or(assign);
-
     let newlines = just(Token::Newline).repeated();
 
     // One statement per line; blank lines are allowed anywhere.
-    newlines
-        .clone()
-        .ignore_then(
-            stmt.separated_by(newlines.at_least(1))
+    let stmts = recursive(|stmts| {
+        let block = stmts.delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+        // The `{` must be on the same line as the `if`, and `else` on the same
+        // line as the preceding `}`, so newlines never need disambiguating.
+        let if_ = recursive(|if_| {
+            let else_block =
+                just(Token::Else).ignore_then(block.clone().or(if_.map(|stmt| vec![stmt])));
+
+            just(Token::If)
+                .ignore_then(expr.clone())
+                .then(block.clone())
+                .then(else_block.or_not())
+                .map(|((cond, then_block), else_block)| Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                })
+        });
+
+        let stmt = decl.clone().or(assign.clone()).or(if_);
+
+        newlines.clone().ignore_then(
+            stmt.separated_by(newlines.clone().at_least(1))
                 .allow_trailing()
                 .collect(),
         )
-        .then_ignore(end())
+    });
+
+    stmts.then_ignore(end())
 }
 
 #[cfg(test)]
@@ -414,6 +434,139 @@ mod tests {
         assert!(parse("x = a && b").is_err());
         assert!(parse("x = a || b").is_err());
         assert!(parse("x = a !").is_err());
+    }
+
+    fn if_(cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>) -> Stmt {
+        Stmt::If {
+            cond,
+            then_block,
+            else_block,
+        }
+    }
+
+    #[test]
+    fn parses_if() {
+        assert_eq!(
+            parse("if c {\n    x = 1\n    y = 2\n}"),
+            Ok(vec![if_(
+                *var("c"),
+                vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2))],
+                None,
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_if_else() {
+        assert_eq!(
+            parse("if c {\n    x = 1\n} else {\n    x = 2\n}"),
+            Ok(vec![if_(
+                *var("c"),
+                vec![assign("x", Expr::Int(1))],
+                Some(vec![assign("x", Expr::Int(2))]),
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_else_if_chain() {
+        assert_eq!(
+            parse(
+                "if a {\n    x = 1\n} else if b {\n    x = 2\n} else if c {\n    x = 3\n} else {\n    x = 4\n}"
+            ),
+            Ok(vec![if_(
+                *var("a"),
+                vec![assign("x", Expr::Int(1))],
+                Some(vec![if_(
+                    *var("b"),
+                    vec![assign("x", Expr::Int(2))],
+                    Some(vec![if_(
+                        *var("c"),
+                        vec![assign("x", Expr::Int(3))],
+                        Some(vec![assign("x", Expr::Int(4))]),
+                    )]),
+                )]),
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_condition_expression() {
+        assert_eq!(
+            parse("if !a & b {}"),
+            Ok(vec![if_(
+                *bin(not(var("a")), BinOp::And, var("b")),
+                vec![],
+                None,
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_compact_and_empty_blocks() {
+        assert_eq!(
+            parse("if c { x = 1 } else {}"),
+            Ok(vec![if_(
+                *var("c"),
+                vec![assign("x", Expr::Int(1))],
+                Some(vec![]),
+            )])
+        );
+        assert_eq!(parse("if c {\n\n}"), Ok(vec![if_(*var("c"), vec![], None)]));
+    }
+
+    #[test]
+    fn parses_nested_if_and_surrounding_statements() {
+        assert_eq!(
+            parse("let a = true\nif a {\n    if a {\n        let b = 1\n    }\n}\n\nx = 2\n"),
+            Ok(vec![
+                Stmt::Decl {
+                    mutability: Mutability::Let,
+                    name: "a".to_string(),
+                    value: Expr::Bool(true),
+                },
+                if_(
+                    *var("a"),
+                    vec![if_(
+                        *var("a"),
+                        vec![Stmt::Decl {
+                            mutability: Mutability::Let,
+                            name: "b".to_string(),
+                            value: Expr::Int(1),
+                        }],
+                        None,
+                    )],
+                    None,
+                ),
+                assign("x", Expr::Int(2)),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_if() {
+        for src in [
+            // Missing braces or condition.
+            "if c x = 1",
+            "if {}",
+            "if c {",
+            "if c }",
+            // `{` must be on the same line as `if`.
+            "if c\n{}",
+            // `else` must be on the same line as `}`.
+            "if c {}\nelse {}",
+            // `else` needs a block or another `if`.
+            "if c {} else",
+            "if c {} else x = 1",
+            "else {}",
+            // Statements after `{` or `}` need their own line.
+            "if c {} x = 1",
+            "if c { x = 1 y = 2 }",
+            // `if` is a keyword.
+            "if = 1",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]

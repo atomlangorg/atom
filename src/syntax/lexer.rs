@@ -36,6 +36,10 @@ pub enum Token<'src> {
     Let,
     #[token("var")]
     Var,
+    #[token("if")]
+    If,
+    #[token("else")]
+    Else,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
@@ -60,6 +64,10 @@ pub enum Token<'src> {
     LParen,
     #[token(")")]
     RParen,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
 
     /// Statements are terminated by newlines.
     #[token("\n")]
@@ -74,6 +82,8 @@ impl fmt::Display for Token<'_> {
             Self::Bool(b) => write!(f, "{b}"),
             Self::Let => write!(f, "let"),
             Self::Var => write!(f, "var"),
+            Self::If => write!(f, "if"),
+            Self::Else => write!(f, "else"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
@@ -85,6 +95,8 @@ impl fmt::Display for Token<'_> {
             Self::Eq => write!(f, "="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
+            Self::LBrace => write!(f, "{{"),
+            Self::RBrace => write!(f, "}}"),
             Self::Newline => write!(f, "<newline>"),
         }
     }
@@ -148,6 +160,23 @@ mod tests {
                 Token::Bool(false),
                 Token::Ident("falsey"),
             ]
+        );
+        assert_eq!(
+            lex("if iffy else elsewhere"),
+            vec![
+                Token::If,
+                Token::Ident("iffy"),
+                Token::Else,
+                Token::Ident("elsewhere"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_braces() {
+        assert_eq!(
+            lex("if x {}"),
+            vec![Token::If, Token::Ident("x"), Token::LBrace, Token::RBrace]
         );
     }
 

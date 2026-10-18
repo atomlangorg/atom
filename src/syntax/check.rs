@@ -56,6 +56,8 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
+    /// An `if` condition was not a `Bool`.
+    ConditionNotBool(Type),
 }
 
 impl fmt::Display for CheckError {
@@ -82,15 +84,16 @@ impl fmt::Display for CheckError {
                 f,
                 "cannot assign `{found}` to `{name}`, which has type `{expected}`"
             ),
+            Self::ConditionNotBool(found) => {
+                write!(f, "`if` condition must be `Bool`, found `{found}`")
+            }
         }
     }
 }
 
 pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
     let mut checker = Checker::default();
-    for stmt in program {
-        checker.stmt(stmt);
-    }
+    checker.block(program);
 
     if checker.errors.is_empty() {
         Ok(())
@@ -109,11 +112,30 @@ struct Binding {
 
 #[derive(Default)]
 struct Checker<'a> {
-    names: HashMap<&'a str, Binding>,
+    /// One scope per enclosing block, innermost last.
+    scopes: Vec<HashMap<&'a str, Binding>>,
     errors: Vec<CheckError>,
 }
 
 impl<'a> Checker<'a> {
+    fn lookup(&self, name: &str) -> Option<Binding> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .copied()
+    }
+
+    /// Checks `stmts` in a new scope, so their declarations aren't visible
+    /// afterwards.
+    fn block(&mut self, stmts: &'a [Stmt]) {
+        self.scopes.push(HashMap::new());
+        for stmt in stmts {
+            self.stmt(stmt);
+        }
+        self.scopes.pop();
+    }
+
     fn stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
             Stmt::Decl {
@@ -123,17 +145,22 @@ impl<'a> Checker<'a> {
             } => {
                 // Checked first so that `let x = x` refers to an earlier `x`.
                 let ty = self.expr(value);
+
+                // Names can't be redeclared, even to shadow an outer scope.
+                if self.lookup(name).is_some() {
+                    self.errors.push(CheckError::Redeclared(name.clone()));
+                }
+
                 let binding = Binding {
                     mutability: *mutability,
                     ty,
                 };
-                if self.names.insert(name, binding).is_some() {
-                    self.errors.push(CheckError::Redeclared(name.clone()));
-                }
+                let scope = self.scopes.last_mut().expect("always in a scope");
+                scope.insert(name, binding);
             }
             Stmt::Assign { name, value } => {
                 let found = self.expr(value);
-                match self.names.get(name.as_str()).copied() {
+                match self.lookup(name) {
                     Some(Binding {
                         mutability: Mutability::Var,
                         ty: expected,
@@ -157,6 +184,22 @@ impl<'a> Checker<'a> {
                     None => self.errors.push(CheckError::Undeclared(name.clone())),
                 }
             }
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                if let Some(found) = self.expr(cond)
+                    && found != Type::Bool
+                {
+                    self.errors.push(CheckError::ConditionNotBool(found));
+                }
+
+                self.block(then_block);
+                if let Some(else_block) = else_block {
+                    self.block(else_block);
+                }
+            }
         }
     }
 
@@ -166,7 +209,7 @@ impl<'a> Checker<'a> {
         match expr {
             Expr::Int(_) => Some(Type::Int),
             Expr::Bool(_) => Some(Type::Bool),
-            Expr::Var(name) => match self.names.get(name.as_str()) {
+            Expr::Var(name) => match self.lookup(name) {
                 Some(binding) => binding.ty,
                 None => {
                     self.errors.push(CheckError::Undeclared(name.clone()));
@@ -410,6 +453,86 @@ mod tests {
         assert_eq!(
             messages("var b = false\nb = 1"),
             ["cannot assign `Int` to `b`, which has type `Bool`"]
+        );
+        assert_eq!(
+            messages("if 1 {}"),
+            ["`if` condition must be `Bool`, found `Int`"]
+        );
+    }
+
+    #[test]
+    fn accepts_if_else() {
+        assert_eq!(
+            check_src(
+                "let a = true\nvar x = 0\nif a {\n    x = 1\n} else if !a {\n    x = 2\n} else {\n    x = 3\n}"
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_non_boolean_condition() {
+        assert_eq!(
+            check_src("if 1 + 2 {}"),
+            Err(vec![CheckError::ConditionNotBool(Type::Int)])
+        );
+        assert_eq!(
+            check_src("if true {} else if 0 {}"),
+            Err(vec![CheckError::ConditionNotBool(Type::Int)])
+        );
+        // An undeclared condition is only reported once.
+        assert_eq!(
+            check_src("if c {}"),
+            Err(vec![CheckError::Undeclared("c".to_string())])
+        );
+    }
+
+    #[test]
+    fn checks_statements_inside_blocks() {
+        assert_eq!(
+            check_src("let x = 1\nif true {\n    x = 2\n} else {\n    let y = z\n}"),
+            Err(vec![
+                CheckError::AssignToConstant("x".to_string()),
+                CheckError::Undeclared("z".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn blocks_can_use_and_assign_outer_names() {
+        assert_eq!(
+            check_src(
+                "let a = 1\nvar b = 2\nif true {\n    if true {\n        b = a + b\n    }\n}"
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn block_declarations_are_not_visible_outside() {
+        assert_eq!(
+            check_src("if true {\n    let y = 1\n}\nlet z = y"),
+            Err(vec![CheckError::Undeclared("y".to_string())])
+        );
+        assert_eq!(
+            check_src("if true {\n    let y = 1\n} else {\n    y = 2\n}"),
+            Err(vec![CheckError::Undeclared("y".to_string())])
+        );
+    }
+
+    #[test]
+    fn separate_blocks_can_reuse_names() {
+        assert_eq!(
+            check_src("if true {\n    let y = 1\n} else {\n    let y = false\n}\nlet y = 2"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_shadowing_outer_names() {
+        assert_eq!(
+            check_src("let x = 1\nif true {\n    let x = 2\n}"),
+            Err(vec![CheckError::Redeclared("x".to_string())])
         );
     }
 

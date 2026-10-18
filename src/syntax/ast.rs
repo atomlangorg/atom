@@ -79,6 +79,17 @@ pub enum Stmt {
     },
     /// `name = value`: reassigns an existing `var`.
     Assign { name: String, value: Expr },
+    /// `if cond { ... } else { ... }`
+    ///
+    /// `else if` is represented as an `else` block containing a single `If`.
+    If {
+        cond: Expr,
+        then_block: Block,
+        else_block: Option<Block>,
+    },
 }
+
+/// A sequence of statements with its own scope, written `{ ... }`.
+pub type Block = Vec<Stmt>;
 
 pub type Program = Vec<Stmt>;

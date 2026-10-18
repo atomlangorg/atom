@@ -23,7 +23,16 @@ fn main() {
         y = y * 2
         var done = false
         let ready = true
-        done = !done & (ready | false)
+
+        if ready & !done {
+            y = y + 1
+            done = true
+        } else if ready {
+            y = 0
+        } else {
+            let fallback = -1
+            y = fallback
+        }
     ";
 
     let program = match syntax::parse(src) {
