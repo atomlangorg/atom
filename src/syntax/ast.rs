@@ -59,6 +59,18 @@ pub enum Expr {
     Var(String),
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
+    /// `callee(label: value, ...)`
+    Call {
+        callee: String,
+        args: Vec<Arg>,
+    },
+}
+
+/// An argument in a function call, such as `to: 3` or `3`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arg {
+    pub label: Option<String>,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +103,32 @@ pub enum Stmt {
         then_block: Block,
         else_block: Option<Block>,
     },
+    /// `fn name(label param: Type, ...) -> Type { ... }`
+    Fn {
+        name: String,
+        params: Vec<Param>,
+        /// The name of the return type. `fn f()` is the same as
+        /// `fn f() -> Void`, so this is `Void` when no type is written.
+        ret: String,
+        body: Block,
+    },
+    /// `return` or `return value`
+    Return(Option<Expr>),
+    /// An expression on its own line. Only function calls are allowed.
+    Expr(Expr),
+}
+
+/// A function parameter, such as `to value: Int`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    /// The label callers must use, or `None` if declared with `_`.
+    ///
+    /// When only one name is given, as in `value: Int`, it is both the label
+    /// and the parameter name.
+    pub label: Option<String>,
+    pub name: String,
+    /// The name of the parameter's type.
+    pub ty: String,
 }
 
 /// A sequence of statements with its own scope, written `{ ... }`.

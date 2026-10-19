@@ -21,7 +21,7 @@ use chumsky::{
 use logos::Logos;
 
 use super::{
-    ast::{BinOp, Expr, Mutability, Program, Stmt, UnOp},
+    ast::{Arg, BinOp, Expr, Mutability, Param, Program, Stmt, UnOp},
     lexer::Token,
 };
 
@@ -51,8 +51,25 @@ where
             Token::Bool(b) => Expr::Bool(b),
         };
 
+        // `label: value` or just `value`.
+        let arg = ident
+            .then_ignore(just(Token::Colon))
+            .or_not()
+            .then(expr.clone())
+            .map(|(label, value)| Arg { label, value });
+        let args = arg
+            .separated_by(just(Token::Comma))
+            .collect()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+
+        // A name followed by arguments is a call, otherwise it's a variable.
+        let name_or_call = ident.then(args.or_not()).map(|(name, args)| match args {
+            Some(args) => Expr::Call { callee: name, args },
+            None => Expr::Var(name),
+        });
+
         let atom = literal
-            .or(ident.map(Expr::Var))
+            .or(name_or_call)
             .or(expr.delimited_by(just(Token::LParen), just(Token::RParen)))
             .labelled("expression");
 
@@ -140,7 +157,59 @@ where
                 })
         });
 
-        let stmt = decl.clone().or(assign.clone()).or(if_);
+        // `label name: Type`, `_ name: Type`, or `name: Type`, where the name
+        // is also the label.
+        let param = just(Token::Underscore)
+            .ignore_then(ident)
+            .map(|name| (None, name))
+            .or(ident.then(ident).map(|(label, name)| (Some(label), name)))
+            .or(ident.map(|name| (Some(name.clone()), name)))
+            .then_ignore(just(Token::Colon))
+            .then(type_name)
+            .map(|((label, name), ty)| Param { label, name, ty });
+        let params = param
+            .separated_by(just(Token::Comma))
+            .collect()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+
+        let fn_ = just(Token::Fn)
+            .ignore_then(ident)
+            .then(params)
+            .then(
+                just(Token::Arrow)
+                    .ignore_then(type_name)
+                    .or_not()
+                    .map(|ret| ret.unwrap_or_else(|| "Void".to_string())),
+            )
+            .then(block.clone())
+            .map(|(((name, params), ret), body)| Stmt::Fn {
+                name,
+                params,
+                ret,
+                body,
+            });
+
+        let return_ = just(Token::Return)
+            .ignore_then(expr.clone().or_not())
+            .map(Stmt::Return);
+
+        // Only calls are useful on their own, since any other expression's
+        // value would be thrown away.
+        let call = expr.clone().try_map(|expr, span| match expr {
+            Expr::Call { .. } => Ok(Stmt::Expr(expr)),
+            _ => Err(Rich::custom(
+                span,
+                "only function calls can be used as statements",
+            )),
+        });
+
+        let stmt = decl
+            .clone()
+            .or(assign.clone())
+            .or(if_)
+            .or(fn_)
+            .or(return_)
+            .or(call);
 
         newlines.clone().ignore_then(
             stmt.separated_by(newlines.clone().at_least(1))
@@ -174,7 +243,16 @@ mod tests {
     #[test]
     fn parses_empty_program() {
         assert_eq!(parse(""), Ok(vec![]));
-        assert_eq!(parse("  \n\n  \n"), Ok(vec![]));
+        assert_eq!(
+            parse(
+                "
+
+
+
+            "
+            ),
+            Ok(vec![])
+        );
     }
 
     #[test]
@@ -684,7 +762,13 @@ mod tests {
     fn parses_program_of_only_comments() {
         assert_eq!(parse("// one\n// two"), Ok(vec![]));
         assert_eq!(
-            parse("if c {\n    // nothing yet\n}"),
+            parse(
+                "
+                if c {
+                    // nothing yet
+                }
+                "
+            ),
             Ok(vec![if_(*var("c"), vec![], None)])
         );
     }
@@ -742,5 +826,203 @@ mod tests {
     fn rejects_invalid_token() {
         let errs = parse("x = 1 $ 2").unwrap_err();
         assert_eq!(errs[0].span().into_range(), 6..7);
+    }
+
+    fn param(label: Option<&str>, name: &str, ty: &str) -> Param {
+        Param {
+            label: label.map(str::to_string),
+            name: name.to_string(),
+            ty: ty.to_string(),
+        }
+    }
+
+    fn arg(label: Option<&str>, value: Expr) -> Arg {
+        Arg {
+            label: label.map(str::to_string),
+            value,
+        }
+    }
+
+    fn call(callee: &str, args: Vec<Arg>) -> Box<Expr> {
+        Box::new(Expr::Call {
+            callee: callee.to_string(),
+            args,
+        })
+    }
+
+    #[test]
+    fn parses_function() {
+        assert_eq!(
+            parse(
+                "
+                fn addFive(to value: Int) -> Int {
+                    return value + 5
+                }
+                "
+            ),
+            Ok(vec![Stmt::Fn {
+                name: "addFive".to_string(),
+                params: vec![param(Some("to"), "value", "Int")],
+                ret: "Int".to_string(),
+                body: vec![Stmt::Return(Some(Expr::Binary(
+                    var("value"),
+                    BinOp::Add,
+                    int(5),
+                )))],
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_parameter_label_forms() {
+        assert_eq!(
+            parse("fn f(a: Int, to b: Bool, _ c: Int) {}"),
+            Ok(vec![Stmt::Fn {
+                name: "f".to_string(),
+                params: vec![
+                    // A single name is both the label and the parameter name.
+                    param(Some("a"), "a", "Int"),
+                    param(Some("to"), "b", "Bool"),
+                    // `_` means no label.
+                    param(None, "c", "Int"),
+                ],
+                ret: "Void".to_string(),
+                body: vec![],
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_function_without_parameters_or_return_type() {
+        assert_eq!(
+            parse(
+                "
+                fn reset() {
+                    count = 0
+                    return
+                }
+                "
+            ),
+            Ok(vec![Stmt::Fn {
+                name: "reset".to_string(),
+                params: vec![],
+                ret: "Void".to_string(),
+                body: vec![assign("count", Expr::Int(0)), Stmt::Return(None)],
+            }])
+        );
+    }
+
+    #[test]
+    fn missing_return_type_is_void() {
+        assert_eq!(parse("fn f() {}"), parse("fn f() -> Void {}"));
+    }
+
+    #[test]
+    fn parses_calls() {
+        assert_eq!(parse_expr("f()"), *call("f", vec![]));
+        assert_eq!(
+            parse_expr("addFive(to: 3)"),
+            *call("addFive", vec![arg(Some("to"), *int(3))])
+        );
+        assert_eq!(
+            parse_expr("f(a: 1 + 2, b, c: g(x))"),
+            *call(
+                "f",
+                vec![
+                    arg(Some("a"), *bin(int(1), BinOp::Add, int(2))),
+                    arg(None, *var("b")),
+                    arg(Some("c"), *call("g", vec![arg(None, *var("x"))])),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn calls_bind_tightest() {
+        assert_eq!(
+            parse_expr("-f(x: 1) * 2"),
+            *bin(
+                neg(call("f", vec![arg(Some("x"), *int(1))])),
+                BinOp::Mul,
+                int(2)
+            )
+        );
+    }
+
+    #[test]
+    fn parses_call_statement() {
+        assert_eq!(
+            parse("log(message: 1)"),
+            Ok(vec![Stmt::Expr(*call(
+                "log",
+                vec![arg(Some("message"), *int(1))]
+            ))])
+        );
+    }
+
+    #[test]
+    fn rejects_non_call_expression_statements() {
+        for src in ["x", "1 + 2", "-f()", "!f() & g()"] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+        let errs = parse("1 + 2").unwrap_err();
+        assert_eq!(
+            errs[0].to_string(),
+            "only function calls can be used as statements"
+        );
+    }
+
+    #[test]
+    fn parses_return_forms() {
+        assert_eq!(parse("return"), Ok(vec![Stmt::Return(None)]));
+        assert_eq!(
+            parse("return 1 + 2"),
+            Ok(vec![Stmt::Return(Some(*bin(int(1), BinOp::Add, int(2))))])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_functions() {
+        for src in [
+            // Missing parts.
+            "fn {}",
+            "fn f {}",
+            "fn f()",
+            "fn f() ->  {}",
+            "fn f(x) {}",
+            "fn f(x:) {}",
+            // Bad parameter labels.
+            "fn f(a b c: Int) {}",
+            "fn f(_: Int) {}",
+            "fn f(_ _ x: Int) {}",
+            "fn f(x _: Int) {}",
+            // Separators.
+            "fn f(a: Int b: Int) {}",
+            "fn f(a: Int,) {}",
+            // `{` must be on the same line.
+            "fn f()\n{}",
+            // Keywords.
+            "fn fn() {}",
+            "fn return() {}",
+            "let fn = 1",
+            "let _ = 1",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_calls() {
+        for src in [
+            "x = f(",
+            "x = f(a b)",
+            "x = f(a:)",
+            "x = f(_: 1)",
+            "x = f(1,)",
+            "x = f(a: b: 1)",
+            "x = 1(2)",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 }

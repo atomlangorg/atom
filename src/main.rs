@@ -34,6 +34,20 @@ fn main() {
             let fallback = -1
             y = fallback
         }
+
+        fn addFive(to value: Int) -> Int {
+            return value + 5
+        }
+
+        // Captures `y` from the enclosing scope.
+        fn bump(by amount: Int, _ twice: Bool) {
+            y = addFive(to: y) + amount
+            if twice {
+                y = y + amount
+            }
+        }
+
+        bump(by: 2, true)
     ";
 
     let program = match syntax::parse(src) {

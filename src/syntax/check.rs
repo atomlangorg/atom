@@ -15,16 +15,20 @@
  */
 
 //! Checks that names are declared before use, that only `var`s are
-//! reassigned, and that every expression is well typed.
+//! reassigned, that functions are called and return correctly, and that every
+//! expression is well typed.
 
 use std::{collections::HashMap, fmt};
 
-use super::ast::{BinOp, Expr, Mutability, Program, Stmt, UnOp};
+use super::ast::{Arg, BinOp, Expr, Mutability, Program, Stmt, UnOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int,
     Bool,
+    /// The return type of a function that doesn't return anything useful.
+    /// Functions without an explicit return type return `Void`.
+    Void,
 }
 
 impl Type {
@@ -32,6 +36,7 @@ impl Type {
         match name {
             "Int" => Some(Self::Int),
             "Bool" => Some(Self::Bool),
+            "Void" => Some(Self::Void),
             _ => None,
         }
     }
@@ -42,6 +47,7 @@ impl fmt::Display for Type {
         match self {
             Self::Int => write!(f, "Int"),
             Self::Bool => write!(f, "Bool"),
+            Self::Void => write!(f, "Void"),
         }
     }
 }
@@ -71,6 +77,43 @@ pub enum CheckError {
     ConditionNotBool(Type),
     /// An explicit type named a type that doesn't exist.
     UnknownType(String),
+    /// Something that isn't a function was called.
+    NotAFunction(String),
+    /// A function was used as a value, or assigned to.
+    NotAValue(String),
+    /// A function was called with the wrong number of arguments.
+    WrongArgumentCount {
+        function: String,
+        expected: usize,
+        found: usize,
+    },
+    /// An argument's label didn't match its parameter's label. `None` means
+    /// no label.
+    WrongLabel {
+        function: String,
+        expected: Option<String>,
+        found: Option<String>,
+    },
+    /// An argument had the wrong type.
+    ArgumentTypeMismatch {
+        function: String,
+        /// The argument's label, or the parameter name if it has none.
+        param: String,
+        expected: Type,
+        found: Type,
+    },
+    /// `return` was used outside a function.
+    ReturnOutsideFunction,
+    /// `return` had no value in a function that doesn't return `Void`.
+    MissingReturnValue { function: String, expected: Type },
+    /// A returned value had the wrong type.
+    ReturnTypeMismatch {
+        function: String,
+        expected: Type,
+        found: Type,
+    },
+    /// A function that doesn't return `Void` can finish without returning.
+    MissingReturn { function: String, expected: Type },
 }
 
 impl fmt::Display for CheckError {
@@ -101,6 +144,62 @@ impl fmt::Display for CheckError {
                 write!(f, "`if` condition must be `Bool`, found `{found}`")
             }
             Self::UnknownType(name) => write!(f, "unknown type `{name}`"),
+            Self::NotAFunction(name) => write!(f, "`{name}` is not a function"),
+            Self::NotAValue(name) => write!(f, "`{name}` is a function, not a value"),
+            Self::WrongArgumentCount {
+                function,
+                expected,
+                found,
+            } => {
+                let s = if *expected == 1 { "" } else { "s" };
+                write!(
+                    f,
+                    "`{function}` takes {expected} argument{s}, found {found}"
+                )
+            }
+            Self::WrongLabel {
+                function,
+                expected,
+                found,
+            } => match (expected, found) {
+                (Some(expected), Some(found)) => write!(
+                    f,
+                    "argument to `{function}` should be labelled `{expected}`, found `{found}`"
+                ),
+                (Some(expected), None) => write!(
+                    f,
+                    "argument to `{function}` is missing the label `{expected}`"
+                ),
+                (None, Some(found)) => write!(
+                    f,
+                    "argument to `{function}` should not have a label, found `{found}`"
+                ),
+                (None, None) => write!(f, "argument to `{function}` has the wrong label"),
+            },
+            Self::ArgumentTypeMismatch {
+                function,
+                param,
+                expected,
+                found,
+            } => write!(
+                f,
+                "argument `{param}` of `{function}` expects `{expected}`, found `{found}`"
+            ),
+            Self::ReturnOutsideFunction => {
+                write!(f, "`return` can only be used inside a function")
+            }
+            Self::MissingReturnValue { function, expected } => {
+                write!(f, "`{function}` must return a value of type `{expected}`")
+            }
+            Self::ReturnTypeMismatch {
+                function,
+                expected,
+                found,
+            } => write!(f, "`{function}` must return `{expected}`, found `{found}`"),
+            Self::MissingReturn { function, expected } => write!(
+                f,
+                "`{function}` must return a value of type `{expected}` on every path"
+            ),
         }
     }
 }
@@ -116,18 +215,50 @@ pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Binding {
-    mutability: Mutability,
-    /// `None` if the type couldn't be determined because of an error, so that
-    /// later uses don't report errors caused by the same mistake.
+#[derive(Debug, Clone)]
+struct Signature<'a> {
+    params: Vec<ParamSignature<'a>>,
+    /// `None` if the return type is unknown.
+    returns: Option<Type>,
+}
+
+#[derive(Debug, Clone)]
+struct ParamSignature<'a> {
+    label: Option<&'a str>,
+    name: &'a str,
+    /// `None` if the parameter's type is unknown.
     ty: Option<Type>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Binding {
+    Value {
+        mutability: Mutability,
+        /// `None` if the type couldn't be determined because of an error, so
+        /// that later uses don't report errors caused by the same mistake.
+        ty: Option<Type>,
+    },
+    /// An index into `Checker::functions`.
+    Function(usize),
+}
+
+/// The function whose body is being checked.
+#[derive(Debug, Clone, Copy)]
+struct FnContext<'a> {
+    name: &'a str,
+    /// `None` if the return type is unknown.
+    returns: Option<Type>,
 }
 
 #[derive(Default)]
 struct Checker<'a> {
     /// One scope per enclosing block, innermost last.
     scopes: Vec<HashMap<&'a str, Binding>>,
+    /// The index in `scopes` of the current function's outermost scope, or 0
+    /// outside of a function. Names can't be redeclared from here inwards.
+    fn_scope_start: usize,
+    current_fn: Option<FnContext<'a>>,
+    functions: Vec<Signature<'a>>,
     errors: Vec<CheckError>,
 }
 
@@ -138,6 +269,28 @@ impl<'a> Checker<'a> {
             .rev()
             .find_map(|scope| scope.get(name))
             .copied()
+    }
+
+    fn declare(&mut self, name: &'a str, binding: Binding) {
+        // Names can't be redeclared within a function, even to shadow an
+        // outer block. A function's own scope can reuse names from outside it.
+        if self.scopes[self.fn_scope_start..]
+            .iter()
+            .any(|scope| scope.contains_key(name))
+        {
+            self.errors.push(CheckError::Redeclared(name.to_string()));
+        }
+
+        let scope = self.scopes.last_mut().expect("always in a scope");
+        scope.insert(name, binding);
+    }
+
+    fn resolve_type(&mut self, name: &str) -> Option<Type> {
+        let ty = Type::from_name(name);
+        if ty.is_none() {
+            self.errors.push(CheckError::UnknownType(name.to_string()));
+        }
+        ty
     }
 
     /// Checks `stmts` in a new scope, so their declarations aren't visible
@@ -165,40 +318,34 @@ impl<'a> Checker<'a> {
                 // later uses are checked against what the programmer wrote.
                 let ty = match type_name {
                     Some(type_name) => {
-                        let expected = Type::from_name(type_name);
-                        if expected.is_none() {
-                            self.errors.push(CheckError::UnknownType(type_name.clone()));
-                        }
+                        let expected = self.resolve_type(type_name);
                         self.check_assignable(name, expected, found);
                         expected
                     }
                     None => found,
                 };
 
-                // Names can't be redeclared, even to shadow an outer scope.
-                if self.lookup(name).is_some() {
-                    self.errors.push(CheckError::Redeclared(name.clone()));
-                }
-
-                let binding = Binding {
+                let binding = Binding::Value {
                     mutability: *mutability,
                     ty,
                 };
-                let scope = self.scopes.last_mut().expect("always in a scope");
-                scope.insert(name, binding);
+                self.declare(name, binding);
             }
             Stmt::Assign { name, value } => {
                 let found = self.expr(value);
                 match self.lookup(name) {
-                    Some(Binding {
+                    Some(Binding::Value {
                         mutability: Mutability::Var,
                         ty: expected,
                     }) => self.check_assignable(name, expected, found),
-                    Some(Binding {
+                    Some(Binding::Value {
                         mutability: Mutability::Let,
                         ..
                     }) => {
                         self.errors.push(CheckError::AssignToConstant(name.clone()));
+                    }
+                    Some(Binding::Function(_)) => {
+                        self.errors.push(CheckError::NotAValue(name.clone()));
                     }
                     None => self.errors.push(CheckError::Undeclared(name.clone())),
                 }
@@ -219,6 +366,95 @@ impl<'a> Checker<'a> {
                     self.block(else_block);
                 }
             }
+            Stmt::Fn {
+                name,
+                params,
+                ret,
+                body,
+            } => {
+                let params: Vec<_> = params
+                    .iter()
+                    .map(|param| ParamSignature {
+                        label: param.label.as_deref(),
+                        name: &param.name,
+                        ty: self.resolve_type(&param.ty),
+                    })
+                    .collect();
+                let returns = self.resolve_type(ret);
+
+                // Declared before the body is checked, so it can call itself.
+                self.functions.push(Signature {
+                    params: params.clone(),
+                    returns,
+                });
+                self.declare(name, Binding::Function(self.functions.len() - 1));
+
+                // The body can see everything declared so far, but starts a
+                // new function scope holding the parameters.
+                let outer_scope_start =
+                    std::mem::replace(&mut self.fn_scope_start, self.scopes.len());
+                let outer_fn = self.current_fn.replace(FnContext { name, returns });
+                self.scopes.push(HashMap::new());
+
+                for param in params {
+                    let binding = Binding::Value {
+                        mutability: Mutability::Let,
+                        ty: param.ty,
+                    };
+                    self.declare(param.name, binding);
+                }
+                for stmt in body {
+                    self.stmt(stmt);
+                }
+
+                self.scopes.pop();
+                self.current_fn = outer_fn;
+                self.fn_scope_start = outer_scope_start;
+
+                // A `Void` function can finish without an explicit `return`.
+                if let Some(expected) = returns
+                    && expected != Type::Void
+                    && !always_returns(body)
+                {
+                    self.errors.push(CheckError::MissingReturn {
+                        function: name.clone(),
+                        expected,
+                    });
+                }
+            }
+            Stmt::Return(value) => {
+                let found = value.as_ref().map(|value| self.expr(value));
+                let Some(FnContext { name, returns }) = self.current_fn else {
+                    self.errors.push(CheckError::ReturnOutsideFunction);
+                    return;
+                };
+
+                // A bare `return` returns `Void`.
+                let function = name.to_string();
+                match (returns, found) {
+                    (Some(expected), None) if expected != Type::Void => {
+                        self.errors
+                            .push(CheckError::MissingReturnValue { function, expected });
+                    }
+                    (Some(expected), Some(Some(found))) if expected != found => {
+                        self.errors.push(CheckError::ReturnTypeMismatch {
+                            function,
+                            expected,
+                            found,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Stmt::Expr(expr) => match expr {
+                // A call's return value can be ignored.
+                Expr::Call { callee, args } => {
+                    self.call(callee, args);
+                }
+                _ => {
+                    self.expr(expr);
+                }
+            },
         }
     }
 
@@ -229,7 +465,11 @@ impl<'a> Checker<'a> {
             Expr::Int(_) => Some(Type::Int),
             Expr::Bool(_) => Some(Type::Bool),
             Expr::Var(name) => match self.lookup(name) {
-                Some(binding) => binding.ty,
+                Some(Binding::Value { ty, .. }) => ty,
+                Some(Binding::Function(_)) => {
+                    self.errors.push(CheckError::NotAValue(name.clone()));
+                    None
+                }
                 None => {
                     self.errors.push(CheckError::Undeclared(name.clone()));
                     None
@@ -248,7 +488,59 @@ impl<'a> Checker<'a> {
                 self.operand(op.symbol(), rhs, ty);
                 Some(ty)
             }
+            Expr::Call { callee, args } => self.call(callee, args),
         }
+    }
+
+    /// Checks a call, returning the function's return type, or `None` if it
+    /// can't be determined.
+    fn call(&mut self, callee: &str, args: &[Arg]) -> Option<Type> {
+        // Arguments are checked first, so their errors come before the call's.
+        let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
+
+        let index = match self.lookup(callee) {
+            Some(Binding::Function(index)) => index,
+            Some(Binding::Value { .. }) => {
+                self.errors
+                    .push(CheckError::NotAFunction(callee.to_string()));
+                return None;
+            }
+            None => {
+                self.errors.push(CheckError::Undeclared(callee.to_string()));
+                return None;
+            }
+        };
+        let signature = self.functions[index].clone();
+
+        if args.len() != signature.params.len() {
+            self.errors.push(CheckError::WrongArgumentCount {
+                function: callee.to_string(),
+                expected: signature.params.len(),
+                found: args.len(),
+            });
+            return signature.returns;
+        }
+
+        for ((arg, found), param) in args.iter().zip(found).zip(&signature.params) {
+            if arg.label.as_deref() != param.label {
+                self.errors.push(CheckError::WrongLabel {
+                    function: callee.to_string(),
+                    expected: param.label.map(str::to_string),
+                    found: arg.label.clone(),
+                });
+            } else if let (Some(expected), Some(found)) = (param.ty, found)
+                && expected != found
+            {
+                self.errors.push(CheckError::ArgumentTypeMismatch {
+                    function: callee.to_string(),
+                    param: param.label.unwrap_or(param.name).to_string(),
+                    expected,
+                    found,
+                });
+            }
+        }
+
+        signature.returns
     }
 
     /// Reports an error if a value of type `found` can't be given to `name`,
@@ -276,6 +568,20 @@ impl<'a> Checker<'a> {
             });
         }
     }
+}
+
+/// Whether `stmts` returns on every path. Both branches of an `if` must return
+/// for it to count, so an `if` without an `else` never does.
+fn always_returns(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Return(_) => true,
+        Stmt::If {
+            then_block,
+            else_block: Some(else_block),
+            ..
+        } => always_returns(then_block) && always_returns(else_block),
+        _ => false,
+    })
 }
 
 /// The type of a unary operator's operand, which is also its result type.
@@ -710,6 +1016,558 @@ mod tests {
                 CheckError::Undeclared("z".to_string()),
                 CheckError::Undeclared("y".to_string()),
             ])
+        );
+    }
+
+    fn messages(src: &str) -> Vec<String> {
+        match check_src(src) {
+            Ok(()) => vec![],
+            Err(errs) => errs.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn accepts_function_definition_and_calls() {
+        assert_eq!(
+            check_src(
+                "
+                fn addFive(to value: Int) -> Int {
+                    return value + 5
+                }
+                let x: Int = addFive(to: 3)
+                let y = addFive(to: addFive(to: x))
+                addFive(to: 1) // The result can be ignored.
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_all_label_forms() {
+        assert_eq!(
+            check_src(
+                "
+                fn f(a: Int, to b: Bool, _ c: Int) -> Bool {
+                    return b & !b | b
+                }
+                let r: Bool = f(a: 1, to: true, 2)
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_function_without_return_type() {
+        assert_eq!(
+            check_src(
+                "
+                var count = 1
+                fn reset() {
+                    count = 0
+                    return
+                }
+                reset()
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn functions_capture_earlier_names() {
+        assert_eq!(
+            check_src(
+                "
+                let step = 2
+                var total = 0
+                fn add(_ n: Int) {
+                    total = total + n * step
+                }
+                add(3)
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn functions_cannot_capture_later_names() {
+        assert_eq!(
+            check_src(
+                "
+                fn f() -> Int {
+                    return later
+                }
+                let later = 1
+                "
+            ),
+            Err(vec![CheckError::Undeclared("later".to_string())])
+        );
+    }
+
+    #[test]
+    fn captured_constants_stay_constant() {
+        assert_eq!(
+            check_src(
+                "
+                let x = 1
+                fn f() {
+                    x = 2
+                }
+                "
+            ),
+            Err(vec![CheckError::AssignToConstant("x".to_string())])
+        );
+    }
+
+    #[test]
+    fn functions_can_recurse() {
+        assert_eq!(
+            check_src(
+                "
+                fn sum(upTo n: Int, acc: Int) -> Int {
+                    return sum(upTo: n - 1, acc: acc + n)
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn functions_cannot_be_called_before_declaration() {
+        assert_eq!(
+            check_src(
+                "
+                let x = f()
+                fn f() -> Int {
+                    return 1
+                }
+                "
+            ),
+            Err(vec![CheckError::Undeclared("f".to_string())])
+        );
+    }
+
+    #[test]
+    fn parameters_are_constants() {
+        assert_eq!(
+            check_src(
+                "
+                fn f(x: Int) {
+                    x = 2
+                }
+                "
+            ),
+            Err(vec![CheckError::AssignToConstant("x".to_string())])
+        );
+    }
+
+    #[test]
+    fn function_scope_is_not_visible_outside() {
+        assert_eq!(
+            check_src(
+                "
+                fn f(x: Int) {
+                    let y = x
+                }
+                let a = x
+                let b = y
+                "
+            ),
+            Err(vec![
+                CheckError::Undeclared("x".to_string()),
+                CheckError::Undeclared("y".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn functions_can_reuse_outer_names() {
+        assert_eq!(
+            check_src(
+                "
+                let x = true
+                fn f(x: Int) -> Int {
+                    let y = x + 1
+                    return y
+                }
+                let y = false
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_redeclaration_within_function() {
+        assert_eq!(
+            check_src("fn f(x: Int, x: Int) {}"),
+            Err(vec![CheckError::Redeclared("x".to_string())])
+        );
+        assert_eq!(
+            check_src(
+                "
+                fn f(x: Int) {
+                    let x = 1
+                }
+                "
+            ),
+            Err(vec![CheckError::Redeclared("x".to_string())])
+        );
+        // Blocks inside a function still can't shadow.
+        assert_eq!(
+            check_src(
+                "
+                fn f(x: Int) {
+                    if true {
+                        let x = 1
+                    }
+                }
+                "
+            ),
+            Err(vec![CheckError::Redeclared("x".to_string())])
+        );
+        // Functions share names with values.
+        assert_eq!(
+            check_src("let f = 1\nfn f() {}"),
+            Err(vec![CheckError::Redeclared("f".to_string())])
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_argument_count() {
+        assert_eq!(
+            messages("fn f(a: Int) {}\nf()\nf(a: 1, a: 2)"),
+            [
+                "`f` takes 1 argument, found 0",
+                "`f` takes 1 argument, found 2",
+            ]
+        );
+        assert_eq!(
+            messages("fn g() {}\ng(1)"),
+            ["`g` takes 0 arguments, found 1"]
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_labels() {
+        assert_eq!(
+            messages(
+                "
+                fn f(to value: Int, _ other: Int) {}
+                f(from: 1, 2)
+                f(1, 2)
+                f(to: 1, other: 2)
+                f(value: 1, 2)
+                "
+            ),
+            [
+                "argument to `f` should be labelled `to`, found `from`",
+                "argument to `f` is missing the label `to`",
+                "argument to `f` should not have a label, found `other`",
+                "argument to `f` should be labelled `to`, found `value`",
+            ]
+        );
+    }
+
+    #[test]
+    fn labels_must_be_in_order() {
+        assert_eq!(
+            messages("fn f(a: Int, b: Int) {}\nf(b: 1, a: 2)"),
+            [
+                "argument to `f` should be labelled `a`, found `b`",
+                "argument to `f` should be labelled `b`, found `a`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_argument_types() {
+        assert_eq!(
+            messages("fn f(to value: Int, _ flag: Bool) {}\nf(to: true, 1)"),
+            [
+                "argument `to` of `f` expects `Int`, found `Bool`",
+                "argument `flag` of `f` expects `Bool`, found `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn checks_arguments_even_when_call_is_wrong() {
+        assert_eq!(
+            check_src("fn f() {}\nf(x)\nlet y = 1\ny(z)"),
+            Err(vec![
+                CheckError::Undeclared("x".to_string()),
+                CheckError::WrongArgumentCount {
+                    function: "f".to_string(),
+                    expected: 0,
+                    found: 1,
+                },
+                CheckError::Undeclared("z".to_string()),
+                CheckError::NotAFunction("y".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_using_functions_as_values() {
+        assert_eq!(
+            messages("fn f() {}\nlet x = f\nf = 2"),
+            [
+                "`f` is a function, not a value",
+                "`f` is a function, not a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_calling_undeclared_or_non_functions() {
+        assert_eq!(
+            messages("let x = 1\nx()\ng()"),
+            ["`x` is not a function", "`g` is not declared"]
+        );
+    }
+
+    #[test]
+    fn functions_without_return_type_return_void() {
+        assert_eq!(
+            messages(
+                "
+                fn f() {}
+                let x = f()
+                let y: Void = x
+                let z = 1 + f()
+                let w: Int = f()
+                if f() {}
+                "
+            ),
+            [
+                "operator `+` expects `Int`, found `Void`",
+                "cannot assign `Void` to `w`, which has type `Int`",
+                "`if` condition must be `Bool`, found `Void`",
+            ]
+        );
+    }
+
+    #[test]
+    fn return_type_is_used_by_callers() {
+        assert_eq!(
+            messages(
+                "
+                fn f() -> Bool {
+                    return true
+                }
+                let x = f() + 1
+                let y: Int = f()
+                "
+            ),
+            [
+                "operator `+` expects `Int`, found `Bool`",
+                "cannot assign `Bool` to `y`, which has type `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_return_values() {
+        assert_eq!(
+            messages(
+                "
+                fn a() -> Int {
+                    return true
+                }
+                fn b() -> Int {
+                    return
+                }
+                fn c() {
+                    return 1
+                }
+                "
+            ),
+            [
+                "`a` must return `Int`, found `Bool`",
+                "`b` must return a value of type `Int`",
+                "`c` must return `Void`, found `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_void_is_the_same_as_no_return_type() {
+        assert_eq!(
+            check_src(
+                "
+                fn a() -> Void {}
+                fn b() {}
+                fn c(flag: Bool) -> Void {
+                    if flag {
+                        return
+                    }
+                }
+                let x: Void = a()
+                let y: Void = b()
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn void_functions_can_return_void_values() {
+        assert_eq!(
+            check_src(
+                "
+                fn log() {}
+                fn wrapper() -> Void {
+                    return log()
+                }
+                fn other() {
+                    return wrapper()
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn void_can_be_used_like_other_types() {
+        assert_eq!(
+            check_src(
+                "
+                fn take(_ v: Void) -> Void {
+                    return v
+                }
+                fn nothing() {}
+                take(nothing())
+                "
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            messages("fn take(_ v: Void) {}\ntake(1)"),
+            ["argument `v` of `take` expects `Void`, found `Int`"]
+        );
+    }
+
+    #[test]
+    fn non_void_function_cannot_return_void() {
+        assert_eq!(
+            messages(
+                "
+                fn log() {}
+                fn f() -> Int {
+                    return log()
+                }
+                "
+            ),
+            ["`f` must return `Int`, found `Void`"]
+        );
+    }
+
+    #[test]
+    fn rejects_return_outside_function() {
+        assert_eq!(
+            messages(
+                "
+                return
+                if true {
+                    return 1
+                }
+                "
+            ),
+            [
+                "`return` can only be used inside a function",
+                "`return` can only be used inside a function",
+            ]
+        );
+    }
+
+    #[test]
+    fn requires_return_on_every_path() {
+        let missing = |function: &str| CheckError::MissingReturn {
+            function: function.to_string(),
+            expected: Type::Int,
+        };
+
+        assert_eq!(check_src("fn f() -> Int {}"), Err(vec![missing("f")]));
+        assert_eq!(
+            check_src(
+                "
+                fn f(c: Bool) -> Int {
+                    if c {
+                        return 1
+                    }
+                }
+                "
+            ),
+            Err(vec![missing("f")])
+        );
+        assert_eq!(
+            check_src(
+                "
+                fn f(c: Bool) -> Int {
+                    if c {
+                        return 1
+                    } else if !c {
+                        return 2
+                    }
+                }
+                "
+            ),
+            Err(vec![missing("f")])
+        );
+    }
+
+    #[test]
+    fn accepts_return_on_every_path() {
+        assert_eq!(
+            check_src(
+                "
+                fn f(c: Bool) -> Int {
+                    if c {
+                        return 1
+                    } else if !c {
+                        return 2
+                    } else {
+                        return 3
+                    }
+                }
+                fn g(c: Bool) -> Int {
+                    if c {
+                        return 1
+                    }
+                    return 2
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn nested_functions_have_their_own_return_type() {
+        assert_eq!(
+            check_src(
+                "
+                fn outer(x: Int) -> Bool {
+                    fn inner() -> Int {
+                        return x
+                    }
+                    // `inner`'s `return` is checked against `Int`, and this
+                    // one against `Bool`.
+                    return inner()
+                }
+                "
+            ),
+            Err(vec![CheckError::ReturnTypeMismatch {
+                function: "outer".to_string(),
+                expected: Type::Bool,
+                found: Type::Int,
+            }])
         );
     }
 }

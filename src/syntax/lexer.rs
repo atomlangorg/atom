@@ -43,6 +43,10 @@ pub enum Token<'src> {
     If,
     #[token("else")]
     Else,
+    #[token("fn")]
+    Fn,
+    #[token("return")]
+    Return,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
@@ -63,6 +67,13 @@ pub enum Token<'src> {
     Pipe,
     #[token(":")]
     Colon,
+    #[token(",")]
+    Comma,
+    #[token("->")]
+    Arrow,
+    /// Marks a parameter as having no label. Not a valid identifier.
+    #[token("_", priority = 3)]
+    Underscore,
     #[token("=")]
     Eq,
     #[token("(")]
@@ -89,6 +100,8 @@ impl fmt::Display for Token<'_> {
             Self::Var => write!(f, "var"),
             Self::If => write!(f, "if"),
             Self::Else => write!(f, "else"),
+            Self::Fn => write!(f, "fn"),
+            Self::Return => write!(f, "return"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
@@ -98,6 +111,9 @@ impl fmt::Display for Token<'_> {
             Self::Amp => write!(f, "&"),
             Self::Pipe => write!(f, "|"),
             Self::Colon => write!(f, ":"),
+            Self::Comma => write!(f, ","),
+            Self::Arrow => write!(f, "->"),
+            Self::Underscore => write!(f, "_"),
             Self::Eq => write!(f, "="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
@@ -188,6 +204,66 @@ mod tests {
                 Token::Colon,
                 Token::Ident("Int"),
             ]
+        );
+    }
+
+    #[test]
+    fn lexes_function() {
+        assert_eq!(
+            lex("fn add(to value: Int, _ b: Int) -> Int { return value }"),
+            vec![
+                Token::Fn,
+                Token::Ident("add"),
+                Token::LParen,
+                Token::Ident("to"),
+                Token::Ident("value"),
+                Token::Colon,
+                Token::Ident("Int"),
+                Token::Comma,
+                Token::Underscore,
+                Token::Ident("b"),
+                Token::Colon,
+                Token::Ident("Int"),
+                Token::RParen,
+                Token::Arrow,
+                Token::Ident("Int"),
+                Token::LBrace,
+                Token::Return,
+                Token::Ident("value"),
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn underscore_alone_is_not_an_identifier() {
+        assert_eq!(
+            lex("_ _a a_ __"),
+            vec![
+                Token::Underscore,
+                Token::Ident("_a"),
+                Token::Ident("a_"),
+                Token::Ident("__"),
+            ]
+        );
+    }
+
+    #[test]
+    fn arrow_is_not_minus() {
+        assert_eq!(
+            lex("a->b a - >"),
+            vec![
+                Token::Ident("a"),
+                Token::Arrow,
+                Token::Ident("b"),
+                Token::Ident("a"),
+                Token::Minus,
+                Token::Error,
+            ]
+        );
+        assert_eq!(
+            lex("fnord returned"),
+            vec![Token::Ident("fnord"), Token::Ident("returned")]
         );
     }
 
