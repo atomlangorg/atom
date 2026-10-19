@@ -91,22 +91,31 @@ where
         and.clone().foldl(or_op.then(and).repeated(), fold_binary)
     });
 
-    let binding = ident.then_ignore(just(Token::Eq)).then(expr.clone());
-
     let mutability = select! {
         Token::Let => Mutability::Let,
         Token::Var => Mutability::Var,
     };
 
+    // Type names are resolved by the checker, not reserved by the lexer.
+    let type_name = select! { Token::Ident(name) => name.to_string() }.labelled("type");
+    let annotation = just(Token::Colon).ignore_then(type_name);
+
     let decl = mutability
-        .then(binding.clone())
-        .map(|(mutability, (name, value))| Stmt::Decl {
+        .then(ident)
+        .then(annotation.or_not())
+        .then_ignore(just(Token::Eq))
+        .then(expr.clone())
+        .map(|(((mutability, name), ty), value)| Stmt::Decl {
             mutability,
             name,
+            ty,
             value,
         });
 
-    let assign = binding.map(|(name, value)| Stmt::Assign { name, value });
+    let assign = ident
+        .then_ignore(just(Token::Eq))
+        .then(expr.clone())
+        .map(|(name, value)| Stmt::Assign { name, value });
 
     let newlines = just(Token::Newline).repeated();
 
@@ -297,21 +306,78 @@ mod tests {
                 Stmt::Decl {
                     mutability: Mutability::Let,
                     name: "x".to_string(),
+                    ty: None,
                     value: Expr::Binary(int(1), BinOp::Add, int(2)),
                 },
                 Stmt::Decl {
                     mutability: Mutability::Var,
                     name: "y".to_string(),
+                    ty: None,
                     value: *var("x"),
                 },
                 assign("y", Expr::Int(3)),
                 Stmt::Decl {
                     mutability: Mutability::Let,
                     name: "letter".to_string(),
+                    ty: None,
                     value: *var("y"),
                 },
             ])
         );
+    }
+
+    fn decl(mutability: Mutability, name: &str, ty: Option<&str>, value: Expr) -> Stmt {
+        Stmt::Decl {
+            mutability,
+            name: name.to_string(),
+            ty: ty.map(str::to_string),
+            value,
+        }
+    }
+
+    #[test]
+    fn parses_explicit_types() {
+        assert_eq!(
+            parse(
+                "
+                let x: Int = 3
+                var y: Bool = true
+                let z = 1
+                let w : Int=-x
+                "
+            ),
+            Ok(vec![
+                decl(Mutability::Let, "x", Some("Int"), Expr::Int(3)),
+                decl(Mutability::Var, "y", Some("Bool"), Expr::Bool(true)),
+                decl(Mutability::Let, "z", None, Expr::Int(1)),
+                decl(Mutability::Let, "w", Some("Int"), *neg(var("x"))),
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_unknown_type_names() {
+        // Whether a type exists is decided by the checker.
+        assert_eq!(
+            parse("let x: Foo = 1"),
+            Ok(vec![decl(Mutability::Let, "x", Some("Foo"), Expr::Int(1))])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_explicit_types() {
+        for src in [
+            "let x: = 3",
+            "let x Int = 3",
+            "let x: Int",
+            "let x: 3 = 3",
+            "let x: Int Bool = 3",
+            "let x: true = 3",
+            // Only declarations can have an explicit type.
+            "x: Int = 3",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]
@@ -559,6 +625,7 @@ mod tests {
                 Stmt::Decl {
                     mutability: Mutability::Let,
                     name: "a".to_string(),
+                    ty: None,
                     value: Expr::Bool(true),
                 },
                 if_(
@@ -568,6 +635,7 @@ mod tests {
                         vec![Stmt::Decl {
                             mutability: Mutability::Let,
                             name: "b".to_string(),
+                            ty: None,
                             value: Expr::Int(1),
                         }],
                         None,
@@ -600,6 +668,7 @@ mod tests {
                 Stmt::Decl {
                     mutability: Mutability::Let,
                     name: "a".to_string(),
+                    ty: None,
                     value: Expr::Bool(true),
                 },
                 if_(

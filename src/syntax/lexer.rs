@@ -61,6 +61,8 @@ pub enum Token<'src> {
     Amp,
     #[token("|")]
     Pipe,
+    #[token(":")]
+    Colon,
     #[token("=")]
     Eq,
     #[token("(")]
@@ -95,6 +97,7 @@ impl fmt::Display for Token<'_> {
             Self::Bang => write!(f, "!"),
             Self::Amp => write!(f, "&"),
             Self::Pipe => write!(f, "|"),
+            Self::Colon => write!(f, ":"),
             Self::Eq => write!(f, "="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
@@ -171,6 +174,19 @@ mod tests {
                 Token::Ident("iffy"),
                 Token::Else,
                 Token::Ident("elsewhere"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_type_annotation() {
+        assert_eq!(
+            lex("let x: Int"),
+            vec![
+                Token::Let,
+                Token::Ident("x"),
+                Token::Colon,
+                Token::Ident("Int"),
             ]
         );
     }

@@ -72,9 +72,13 @@ pub enum Mutability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// `let name = value` or `var name = value`
+    ///
+    /// Either can have an explicit type, as in `let name: Int = value`.
     Decl {
         mutability: Mutability,
         name: String,
+        /// The name of the explicit type, if there is one.
+        ty: Option<String>,
         value: Expr,
     },
     /// `name = value`: reassigns an existing `var`.

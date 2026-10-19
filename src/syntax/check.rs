@@ -27,6 +27,16 @@ pub enum Type {
     Bool,
 }
 
+impl Type {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Int" => Some(Self::Int),
+            "Bool" => Some(Self::Bool),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -50,7 +60,8 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// A `var` was assigned a value of a different type to its declaration.
+    /// A name was given a value of a different type to its declared type,
+    /// either in an explicitly typed declaration or a later assignment.
     AssignTypeMismatch {
         name: String,
         expected: Type,
@@ -58,6 +69,8 @@ pub enum CheckError {
     },
     /// An `if` condition was not a `Bool`.
     ConditionNotBool(Type),
+    /// An explicit type named a type that doesn't exist.
+    UnknownType(String),
 }
 
 impl fmt::Display for CheckError {
@@ -87,6 +100,7 @@ impl fmt::Display for CheckError {
             Self::ConditionNotBool(found) => {
                 write!(f, "`if` condition must be `Bool`, found `{found}`")
             }
+            Self::UnknownType(name) => write!(f, "unknown type `{name}`"),
         }
     }
 }
@@ -105,8 +119,8 @@ pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
 #[derive(Debug, Clone, Copy)]
 struct Binding {
     mutability: Mutability,
-    /// `None` if the declared value had an error, so that later uses don't
-    /// report errors caused by the same mistake.
+    /// `None` if the type couldn't be determined because of an error, so that
+    /// later uses don't report errors caused by the same mistake.
     ty: Option<Type>,
 }
 
@@ -141,10 +155,25 @@ impl<'a> Checker<'a> {
             Stmt::Decl {
                 mutability,
                 name,
+                ty: type_name,
                 value,
             } => {
                 // Checked first so that `let x = x` refers to an earlier `x`.
-                let ty = self.expr(value);
+                let found = self.expr(value);
+
+                // An explicit type takes precedence over the value's type, so
+                // later uses are checked against what the programmer wrote.
+                let ty = match type_name {
+                    Some(type_name) => {
+                        let expected = Type::from_name(type_name);
+                        if expected.is_none() {
+                            self.errors.push(CheckError::UnknownType(type_name.clone()));
+                        }
+                        self.check_assignable(name, expected, found);
+                        expected
+                    }
+                    None => found,
+                };
 
                 // Names can't be redeclared, even to shadow an outer scope.
                 if self.lookup(name).is_some() {
@@ -164,17 +193,7 @@ impl<'a> Checker<'a> {
                     Some(Binding {
                         mutability: Mutability::Var,
                         ty: expected,
-                    }) => {
-                        if let (Some(expected), Some(found)) = (expected, found)
-                            && expected != found
-                        {
-                            self.errors.push(CheckError::AssignTypeMismatch {
-                                name: name.clone(),
-                                expected,
-                                found,
-                            });
-                        }
-                    }
+                    }) => self.check_assignable(name, expected, found),
                     Some(Binding {
                         mutability: Mutability::Let,
                         ..
@@ -229,6 +248,20 @@ impl<'a> Checker<'a> {
                 self.operand(op.symbol(), rhs, ty);
                 Some(ty)
             }
+        }
+    }
+
+    /// Reports an error if a value of type `found` can't be given to `name`,
+    /// whose type is `expected`. Unknown types are assumed to be fine.
+    fn check_assignable(&mut self, name: &str, expected: Option<Type>, found: Option<Type>) {
+        if let (Some(expected), Some(found)) = (expected, found)
+            && expected != found
+        {
+            self.errors.push(CheckError::AssignTypeMismatch {
+                name: name.to_string(),
+                expected,
+                found,
+            });
         }
     }
 
@@ -458,6 +491,80 @@ mod tests {
             messages("if 1 {}"),
             ["`if` condition must be `Bool`, found `Int`"]
         );
+        assert_eq!(messages("let x: int = 1"), ["unknown type `int`"]);
+    }
+
+    #[test]
+    fn accepts_matching_explicit_types() {
+        assert_eq!(
+            check_src(
+                "
+                let x: Int = 3
+                var y: Bool = true
+                var z: Int = x * 2
+                y = !y
+                z = 4
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_value_of_wrong_explicit_type() {
+        assert_eq!(
+            check_src("let x: Int = true"),
+            Err(vec![CheckError::AssignTypeMismatch {
+                name: "x".to_string(),
+                expected: Type::Int,
+                found: Type::Bool,
+            }])
+        );
+        assert_eq!(
+            check_src("var y: Bool = 1 + 2"),
+            Err(vec![CheckError::AssignTypeMismatch {
+                name: "y".to_string(),
+                expected: Type::Bool,
+                found: Type::Int,
+            }])
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_types() {
+        for name in ["Foo", "int", "bool", "x"] {
+            assert_eq!(
+                check_src(&format!("let x: {name} = 1")),
+                Err(vec![CheckError::UnknownType(name.to_string())]),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_type_is_used_after_a_mismatch() {
+        // `x` is an `Int` as written, so only the declaration is an error.
+        assert_eq!(
+            check_src("var x: Int = true\nx = 1\nlet y = x + 1"),
+            Err(vec![CheckError::AssignTypeMismatch {
+                name: "x".to_string(),
+                expected: Type::Int,
+                found: Type::Bool,
+            }])
+        );
+    }
+
+    #[test]
+    fn unknown_type_does_not_cascade() {
+        assert_eq!(
+            check_src("var x: Foo = 1\nx = true\nlet y = x + 1"),
+            Err(vec![CheckError::UnknownType("Foo".to_string())])
+        );
+    }
+
+    #[test]
+    fn type_names_are_not_reserved() {
+        assert_eq!(check_src("let Int: Int = 1\nlet Bool: Bool = true"), Ok(()));
     }
 
     #[test]

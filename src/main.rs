@@ -21,8 +21,8 @@ fn main() {
         let x = -1 + 2 * 3
         var y = x / (3 - -4)
         y = y * 2
-        var done = false
-        let ready = true // Never changes.
+        var done: Bool = false
+        let ready: Bool = true // Never changes.
 
         // Update `y` depending on the current state.
         if ready & !done {
