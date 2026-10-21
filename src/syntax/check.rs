@@ -1459,7 +1459,7 @@ mod tests {
                 struct Int {}
                 let a: Int = 1
                 let b: stdlib.Int = 1
-                fn f(_ x: main.Int) -> stdlib.Bool {
+                fn f(x: main.Int) -> stdlib.Bool {
                     return true
                 }
                 "
@@ -1496,15 +1496,15 @@ mod tests {
                     let bool: Bool
                     let void: Void
                 }
-                fn unwrap(_ w: Wrapper) -> Wrapper {
-                    return w
+                fn unwrap(wrapper: Wrapper) -> Wrapper {
+                    return wrapper
                 }
                 "
             ),
             Ok(())
         );
         assert_eq!(
-            messages("fn f(_ w: Bool) -> Int {\nreturn w\n}"),
+            messages("fn f(flag: Bool) -> Int {\nreturn flag\n}"),
             ["`f` must return `Int`, found `Bool`"]
         );
     }
@@ -1718,10 +1718,10 @@ mod tests {
                 "
                 let step = 2
                 var total = 0
-                fn add(_ n: Int) {
-                    total = total + n * step
+                fn add(amount: Int) {
+                    total = total + amount * step
                 }
-                add(3)
+                add(amount: 3)
                 "
             ),
             [
@@ -1763,9 +1763,9 @@ mod tests {
                 "
                 fn outer() {
                     struct Point {}
-                    fn helper(_ p: Point) {}
-                    fn inner(_ p: Point) {
-                        helper(p)
+                    fn helper(point: Point) {}
+                    fn inner(point: Point) {
+                        helper(point: point)
                         outer()
                     }
                 }
@@ -1796,9 +1796,9 @@ mod tests {
                 "
                 let x: Int = f()
                 fn f() -> Int {
-                    return g(true)
+                    return g(flag: true)
                 }
-                fn g(_ flag: Bool) -> Int {
+                fn g(flag: Bool) -> Int {
                     if flag {
                         return f()
                     }
@@ -2125,18 +2125,18 @@ mod tests {
         assert_eq!(
             check_body(
                 "
-                fn take(_ v: Void) -> Void {
-                    return v
+                fn take(value: Void) -> Void {
+                    return value
                 }
                 fn nothing() {}
-                take(nothing())
+                take(value: nothing())
                 "
             ),
             Ok(())
         );
         assert_eq!(
-            messages("fn take(_ v: Void) {}\ntake(1)"),
-            ["argument `v` of `take` expects `Void`, found `Int`"]
+            messages("fn take(value: Void) {}\ntake(value: 1)"),
+            ["argument `value` of `take` expects `Void`, found `Int`"]
         );
     }
 
@@ -2229,14 +2229,14 @@ mod tests {
                 struct Post {
                     let author: User
                 }
-                fn first(_ a: User, _ b: User) -> User {
+                fn pick(first a: User, or b: User) -> User {
                     let user: User = a
                     var other = b
                     other = user
                     return other
                 }
-                fn repost(_ post: Post) -> Post {
-                    return repost(post)
+                fn repost(post: Post) -> Post {
+                    return repost(post: post)
                 }
                 "
             ),
@@ -2266,11 +2266,11 @@ mod tests {
             messages(
                 "
                 struct User {}
-                fn f(_ user: User) -> User {
+                fn f(user: User) -> User {
                     let x: Int = user
                     let y = user + 1
                     if user {}
-                    f(1)
+                    f(user: 1)
                     return true
                 }
                 "
@@ -2296,7 +2296,7 @@ mod tests {
                 struct B {
                     let x: Int
                 }
-                fn f(_ a: A) -> B {
+                fn f(a: A) -> B {
                     return a
                 }
                 "
@@ -2313,10 +2313,10 @@ mod tests {
             messages(
                 "
                 struct A {}
-                fn f(_ a: A) {
+                fn f(a: A) {
                     struct A {}
-                    fn g(_ b: A) {}
-                    g(a)
+                    fn g(b: A) {}
+                    g(b: a)
                 }
                 "
             ),
@@ -2380,8 +2380,8 @@ mod tests {
         assert_eq!(
             check_top(
                 "
-                fn f(_ user: User) -> Post {
-                    return f(user)
+                fn f(user: User) -> Post {
+                    return f(user: user)
                 }
                 struct Post {
                     let author: User
@@ -2402,7 +2402,7 @@ mod tests {
             check_body(
                 "
                 fn outer() {
-                    fn f(_ user: User) {}
+                    fn f(user: User) {}
                     struct Post {
                         let author: User
                     }
@@ -2547,8 +2547,8 @@ mod tests {
                 let x = 1
                 let y: x = 1
                 fn f() {}
-                fn g(_ a: f) {}
-                fn h(_ a: Int) {
+                fn g(a: f) {}
+                fn h(a: Int) {
                     let b: a = 1
                     let c: x = 1
                     struct S {
@@ -2574,9 +2574,9 @@ mod tests {
                 "
                 if true {
                     struct A {}
-                    fn f(_ a: A) {}
+                    fn f(a: A) {}
                 }
-                fn g(_ a: A) {}
+                fn g(a: A) {}
                 "
             ),
             Err(vec![CheckError::UnknownType("A".to_string())])
@@ -2586,9 +2586,9 @@ mod tests {
                 "
                 fn f() {
                     struct A {}
-                    fn g(_ a: A) {}
+                    fn g(a: A) {}
                 }
-                fn h(_ a: A) {}
+                fn h(a: A) {}
                 "
             ),
             Err(vec![CheckError::UnknownType("A".to_string())])
@@ -2662,8 +2662,8 @@ mod tests {
                     use ./dir/other
 
                     let total: Int = limit + 1
-                    fn f(_ p: Point) -> Point {
-                        return identity(p)
+                    fn f(point: Point) -> Point {
+                        return identity(of: point)
                     }
                     ",
                 ),
@@ -2672,8 +2672,8 @@ mod tests {
                     "/dir/other",
                     "
                     struct Point {}
-                    fn identity(_ p: Point) -> Point {
-                        return p
+                    fn identity(of point: Point) -> Point {
+                        return point
                     }
                     ",
                 ),
@@ -2860,8 +2860,8 @@ mod tests {
                     struct A {
                         let b: B
                     }
-                    fn f(_ b: B) -> Int {
-                        return g(b)
+                    fn f(b: B) -> Int {
+                        return g(b: b)
                     }
                     let x = y + 1
                     ",
@@ -2871,7 +2871,7 @@ mod tests {
                     "
                     use /a
                     struct B {}
-                    fn g(_ b: B) -> Int {
+                    fn g(b: B) -> Int {
                         return 1
                     }
                     let y = 2

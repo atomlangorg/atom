@@ -5,6 +5,6 @@ struct Team {
     let size: Int
 }
 
-fn describe(_ team: Team) -> Int {
+fn describe(team: Team) -> Int {
     return 2
 }

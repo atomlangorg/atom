@@ -6,6 +6,6 @@ struct User {
 
 let maxAge = 120
 
-fn describe(_ user: User) -> Int {
+fn describe(user: User) -> Int {
     return 1
 }

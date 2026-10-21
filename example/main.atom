@@ -22,7 +22,7 @@ fn run() {
         y = fallback
     }
 
-    y = bump(y, by: 2, true)
+    y = bump(y, by: 2, twice: true)
 }
 
 fn addFive(to value: Int) -> Int {
@@ -31,7 +31,7 @@ fn addFive(to value: Int) -> Int {
 
 // Functions can't use values from outside them, so `y` is passed in and
 // returned.
-fn bump(_ value: Int, by amount: Int, _ twice: Bool) -> Int {
+fn bump(_ value: Int, by amount: Int, twice: Bool) -> Int {
     var result = addFive(to: value) + amount
     if twice {
         result = result + amount
@@ -39,8 +39,8 @@ fn bump(_ value: Int, by amount: Int, _ twice: Bool) -> Int {
     return result
 }
 
-fn choose(_ first: User, or second: User, _ preferFirst: Bool) -> User {
-    if preferFirst {
+fn choose(_ first: User, or second: User, preferringFirst: Bool) -> User {
+    if preferringFirst {
         return first
     }
     return second
@@ -48,6 +48,6 @@ fn choose(_ first: User, or second: User, _ preferFirst: Bool) -> User {
 
 // `describe` is declared in both /users/user and /teams/team, so it has to
 // be qualified with the file it comes from.
-fn describeBoth(_ t: Team, _ u: User) -> Int {
-    return team.describe(t) + user.describe(u)
+fn describeBoth(team t: Team, user u: User) -> Int {
+    return team.describe(team: t) + user.describe(user: u)
 }
