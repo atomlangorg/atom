@@ -16,12 +16,13 @@
 
 use std::fmt;
 
-use logos::Logos;
+use logos::{FilterResult, Lexer, Logos};
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t\r\f]+")]
-// Comments run to the end of the line. The newline is kept, so a comment
-// never hides the end of a statement.
+// Line comments run to the end of the line. The newline is kept, so a
+// comment never hides the end of a statement. Block comments are handled by
+// `block_comment`.
 #[logos(skip(r"//[^\n]*", allow_greedy = true))]
 pub enum Token<'src> {
     /// Produced for any input the lexer does not recognise, so that
@@ -91,9 +92,47 @@ pub enum Token<'src> {
     #[token("}")]
     RBrace,
 
-    /// Statements are terminated by newlines.
+    /// Statements are terminated by newlines, including those inside a block
+    /// comment.
     #[token("\n")]
+    #[token("/*", block_comment)]
     Newline,
+}
+
+/// Skips the rest of a `/* ... */` comment, whose opening `/*` has just been
+/// lexed. Block comments nest, so `/* /* */ */` is a single comment.
+///
+/// A comment spanning more than one line becomes a newline, so like a line
+/// comment, it never hides the end of a statement. A comment that is never
+/// closed is an error.
+fn block_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<(), ()> {
+    let rest = lex.remainder().as_bytes();
+    let mut depth = 1;
+    let mut i = 0;
+    while i < rest.len() {
+        match &rest[i..] {
+            [b'/', b'*', ..] => {
+                depth += 1;
+                i += 2;
+            }
+            [b'*', b'/', ..] => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    lex.bump(i);
+                    return if lex.slice().contains('\n') {
+                        FilterResult::Emit(())
+                    } else {
+                        FilterResult::Skip
+                    };
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    lex.bump(rest.len());
+    FilterResult::Error(())
 }
 
 impl fmt::Display for Token<'_> {
@@ -377,6 +416,59 @@ mod tests {
     fn comments_can_contain_anything() {
         assert_eq!(lex("// let x = $ { // \"//"), vec![]);
         assert_eq!(lex("1//2"), vec![Token::Int(1)]);
+    }
+
+    #[test]
+    fn skips_block_comments() {
+        assert_eq!(
+            lex("x /* a comment */ = /**/ 1 /* // */"),
+            vec![Token::Ident("x"), Token::Eq, Token::Int(1)]
+        );
+        assert_eq!(lex("/* let x = $ { \" */"), vec![]);
+    }
+
+    #[test]
+    fn block_comments_nest() {
+        assert_eq!(lex("/* /* */ */ x"), vec![Token::Ident("x")]);
+        assert_eq!(
+            lex("1 /* a /* b /* c */ b */ a */ 2"),
+            vec![Token::Int(1), Token::Int(2)]
+        );
+        // Each `/*` needs its own `*/`.
+        assert_eq!(lex("/* /* */ x"), vec![Token::Error]);
+    }
+
+    #[test]
+    fn multi_line_block_comments_are_newlines() {
+        assert_eq!(
+            lex("x = 1 /* one\ntwo\nthree */ y"),
+            vec![
+                Token::Ident("x"),
+                Token::Eq,
+                Token::Int(1),
+                Token::Newline,
+                Token::Ident("y"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unclosed_block_comments_are_errors() {
+        assert_eq!(lex("1 /* never closed"), vec![Token::Int(1), Token::Error]);
+        assert_eq!(lex("/*/"), vec![Token::Error]);
+    }
+
+    #[test]
+    fn comment_markers_inside_line_comments_are_ignored() {
+        assert_eq!(
+            lex("// /* not a block comment\nx"),
+            vec![Token::Newline, Token::Ident("x"),]
+        );
+    }
+
+    #[test]
+    fn stray_comment_close_is_not_a_comment() {
+        assert_eq!(lex("*/"), vec![Token::Star, Token::Slash]);
     }
 
     #[test]

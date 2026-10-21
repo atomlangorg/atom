@@ -882,6 +882,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_block_comments() {
+        assert_eq!(
+            parse_body(
+                "
+                /*
+                 * A comment over several lines.
+                 */
+                x = /* inline */ 1 + /**/ 2
+                /* Commented-out code, with its own comment:
+                if c {
+                    x = 2 /* nested */
+                }
+                */
+                y = 3 /* after code */
+                "
+            ),
+            Ok(vec![
+                assign("x", Expr::Binary(int(1), BinOp::Add, int(2))),
+                assign("y", Expr::Int(3)),
+            ])
+        );
+    }
+
+    #[test]
+    fn block_comments_spanning_lines_end_statements() {
+        assert_eq!(
+            parse_body("x = 1 /*\n*/ y = 2"),
+            Ok(vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2))])
+        );
+        for src in [
+            // On one line, a comment doesn't separate statements.
+            "x = 1 /* */ y = 2",
+            // A newline inside a comment still splits a statement.
+            "x = /*\n*/ 1",
+            "if c /*\n*/ {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_unbalanced_block_comments() {
+        let errs = parse("let x = 1 /* /* */").unwrap_err();
+        assert_eq!(errs[0].span().into_range(), 10..18);
+        assert!(parse("let x = 1 /* */ */").is_err());
+    }
+
+    #[test]
     fn comments_hide_the_rest_of_the_line() {
         // Everything after `//` is ignored, including what would be an error.
         assert_eq!(

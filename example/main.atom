@@ -46,6 +46,12 @@ fn choose(_ first: User, or second: User, preferringFirst: Bool) -> User {
     return second
 }
 
+/* Block comments can be nested, so code containing one can be commented out:
+fn unused() -> Int {
+    return 1 /* Always one. */
+}
+*/
+
 // `describe` is declared in both /users/user and /teams/team, so it has to
 // be qualified with the file it comes from.
 fn describeBoth(team t: Team, user u: User) -> Int {
