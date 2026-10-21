@@ -88,10 +88,14 @@ pub enum CheckError {
     ConditionNotBool(Type),
     /// An explicit type named a type that doesn't exist.
     UnknownType(String),
+    /// A value or function was used as a type.
+    NotAType(String),
     /// Something that isn't a function was called.
     NotAFunction(String),
     /// A function was used as a value, or assigned to.
     NotAValue(String),
+    /// A type was used as a value, or assigned to.
+    TypeAsValue(String),
     /// A function was called with the wrong number of arguments.
     WrongArgumentCount {
         function: String,
@@ -156,7 +160,9 @@ impl fmt::Display for CheckError {
             }
             Self::UnknownType(name) => write!(f, "unknown type `{name}`"),
             Self::NotAFunction(name) => write!(f, "`{name}` is not a function"),
+            Self::NotAType(name) => write!(f, "`{name}` is not a type"),
             Self::NotAValue(name) => write!(f, "`{name}` is a function, not a value"),
+            Self::TypeAsValue(name) => write!(f, "`{name}` is a type, not a value"),
             Self::WrongArgumentCount {
                 function,
                 expected,
@@ -251,6 +257,8 @@ enum Binding {
     },
     /// An index into `Checker::functions`.
     Function(usize),
+    /// A struct, or one of the built-in types.
+    Type(Type),
 }
 
 /// The function whose body is being checked.
@@ -262,16 +270,10 @@ struct FnContext<'a> {
 }
 
 #[derive(Default)]
-struct Scope<'a> {
-    values: HashMap<&'a str, Binding>,
-    /// Types are named separately from values, so `let Int: Int` is allowed.
-    types: HashMap<&'a str, Type>,
-}
-
-#[derive(Default)]
 struct Checker<'a> {
-    /// One scope per enclosing block, innermost last.
-    scopes: Vec<Scope<'a>>,
+    /// One scope per enclosing block, innermost last. Values, functions and
+    /// types all share the same names.
+    scopes: Vec<HashMap<&'a str, Binding>>,
     /// The index in `scopes` of the current function's outermost scope, or 0
     /// outside of a function. Names can't be redeclared from here inwards.
     fn_scope_start: usize,
@@ -284,60 +286,50 @@ struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     fn lookup(&self, name: &str) -> Option<Binding> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.values.get(name))
-            .cloned()
+        // Built-in types come first, since they can never be redeclared.
+        Type::from_name(name).map(Binding::Type).or_else(|| {
+            self.scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(name))
+                .cloned()
+        })
     }
 
     fn declare(&mut self, name: &'a str, binding: Binding) {
         // Names can't be redeclared within a function, even to shadow an
-        // outer block. A function's own scope can reuse names from outside it.
-        if self.scopes[self.fn_scope_start..]
-            .iter()
-            .any(|scope| scope.values.contains_key(name))
-        {
-            self.errors.push(CheckError::Redeclared(name.to_string()));
-        }
-
-        let scope = self.scopes.last_mut().expect("always in a scope");
-        scope.values.insert(name, binding);
-    }
-
-    /// Declares a type, following the same rules as `declare`. Built-in types
-    /// can never be redeclared.
-    fn declare_type(&mut self, name: &'a str, ty: Type) {
+        // outer block. A function's own scope can reuse names from outside it,
+        // except for the built-in types.
         if Type::from_name(name).is_some()
             || self.scopes[self.fn_scope_start..]
                 .iter()
-                .any(|scope| scope.types.contains_key(name))
+                .any(|scope| scope.contains_key(name))
         {
             self.errors.push(CheckError::Redeclared(name.to_string()));
         }
 
         let scope = self.scopes.last_mut().expect("always in a scope");
-        scope.types.insert(name, ty);
+        scope.insert(name, binding);
     }
 
     fn resolve_type(&mut self, name: &str) -> Option<Type> {
-        let ty = Type::from_name(name).or_else(|| {
-            self.scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.types.get(name))
-                .cloned()
-        });
-        if ty.is_none() {
-            self.errors.push(CheckError::UnknownType(name.to_string()));
+        match self.lookup(name) {
+            Some(Binding::Type(ty)) => Some(ty),
+            Some(_) => {
+                self.errors.push(CheckError::NotAType(name.to_string()));
+                None
+            }
+            None => {
+                self.errors.push(CheckError::UnknownType(name.to_string()));
+                None
+            }
         }
-        ty
     }
 
     /// Checks `stmts` in a new scope, so their declarations aren't visible
     /// afterwards.
     fn block(&mut self, stmts: &'a [Stmt]) {
-        self.scopes.push(Scope::default());
+        self.scopes.push(HashMap::new());
         for stmt in stmts {
             self.stmt(stmt);
         }
@@ -387,6 +379,9 @@ impl<'a> Checker<'a> {
                     }
                     Some(Binding::Function(_)) => {
                         self.errors.push(CheckError::NotAValue(name.clone()));
+                    }
+                    Some(Binding::Type(_)) => {
+                        self.errors.push(CheckError::TypeAsValue(name.clone()));
                     }
                     None => self.errors.push(CheckError::Undeclared(name.clone())),
                 }
@@ -438,7 +433,7 @@ impl<'a> Checker<'a> {
                     name,
                     returns: returns.clone(),
                 });
-                self.scopes.push(Scope::default());
+                self.scopes.push(HashMap::new());
 
                 for param in params {
                     let binding = Binding::Value {
@@ -483,7 +478,7 @@ impl<'a> Checker<'a> {
                     name: name.clone(),
                 };
                 self.next_struct_id += 1;
-                self.declare_type(name, ty);
+                self.declare(name, Binding::Type(ty));
             }
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
@@ -533,6 +528,10 @@ impl<'a> Checker<'a> {
                     self.errors.push(CheckError::NotAValue(name.clone()));
                     None
                 }
+                Some(Binding::Type(_)) => {
+                    self.errors.push(CheckError::TypeAsValue(name.clone()));
+                    None
+                }
                 None => {
                     self.errors.push(CheckError::Undeclared(name.clone()));
                     None
@@ -563,7 +562,7 @@ impl<'a> Checker<'a> {
 
         let index = match self.lookup(callee) {
             Some(Binding::Function(index)) => index,
-            Some(Binding::Value { .. }) => {
+            Some(Binding::Value { .. } | Binding::Type(_)) => {
                 self.errors
                     .push(CheckError::NotAFunction(callee.to_string()));
                 return None;
@@ -932,8 +931,29 @@ mod tests {
     }
 
     #[test]
-    fn type_names_are_not_reserved() {
-        assert_eq!(check_src("let Int: Int = 1\nlet Bool: Bool = true"), Ok(()));
+    fn built_in_type_names_cannot_be_redeclared() {
+        assert_eq!(
+            check_src("let Int: Int = 1\nvar Bool = true"),
+            Err(vec![
+                CheckError::Redeclared("Int".to_string()),
+                CheckError::Redeclared("Bool".to_string()),
+            ])
+        );
+        // Not even inside a function, which can otherwise reuse outer names.
+        assert_eq!(
+            check_src(
+                "
+                fn Void(Int: Int) {
+                    let Bool = 1
+                }
+                "
+            ),
+            Err(vec![
+                CheckError::Redeclared("Void".to_string()),
+                CheckError::Redeclared("Int".to_string()),
+                CheckError::Redeclared("Bool".to_string()),
+            ])
+        );
     }
 
     #[test]
@@ -1830,17 +1850,63 @@ mod tests {
     }
 
     #[test]
-    fn structs_do_not_share_names_with_values() {
+    fn structs_share_names_with_values_and_functions() {
+        for src in [
+            "struct User {}\nlet User = 1",
+            "let User = 1\nstruct User {}",
+            "struct User {}\nfn User() {}",
+            "fn User() {}\nstruct User {}",
+            "fn f(User: Int) {\nstruct User {}\n}",
+        ] {
+            assert_eq!(
+                check_src(src),
+                Err(vec![CheckError::Redeclared("User".to_string())]),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_using_types_as_values() {
         assert_eq!(
-            check_src(
+            messages(
                 "
                 struct User {}
-                let User = 1
-                fn Post(_ user: User) {}
-                struct Post {}
+                let x = User
+                User = 1
+                let y = Int + 1
+                User()
                 "
             ),
-            Ok(())
+            [
+                "`User` is a type, not a value",
+                "`User` is a type, not a value",
+                "`Int` is a type, not a value",
+                "`User` is not a function",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_using_values_and_functions_as_types() {
+        assert_eq!(
+            messages(
+                "
+                let x = 1
+                fn f() {}
+                let y: x = 1
+                fn g(_ a: f) -> x {}
+                struct S {
+                    let field: f
+                }
+                "
+            ),
+            [
+                "`x` is not a type",
+                "`f` is not a type",
+                "`x` is not a type",
+                "`f` is not a type",
+            ]
         );
     }
 
