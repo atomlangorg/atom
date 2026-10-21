@@ -17,13 +17,18 @@
 //! Checks that names are declared before use, that only `var`s are
 //! reassigned, that functions are called and return correctly, that structs
 //! are well formed, and that every expression is well typed.
+//!
+//! Functions and structs at the top level of the program are hoisted, so they
+//! can be used in any order. This is safe because functions can't capture
+//! values from outside them, so calling one early never reads a value that
+//! hasn't been set yet.
 
 use std::{
     collections::{HashMap, HashSet},
     fmt,
 };
 
-use super::ast::{Arg, BinOp, Expr, Mutability, Program, Stmt, UnOp};
+use super::ast::{Arg, BinOp, Expr, Field, Mutability, Param, Program, Stmt, UnOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -67,6 +72,11 @@ impl fmt::Display for Type {
 pub enum CheckError {
     /// A name was used or assigned without being declared.
     Undeclared(String),
+    /// A function used a value declared outside it.
+    Captured(String),
+    /// A struct contains itself, directly or through other structs, so it
+    /// would be infinitely large.
+    RecursiveStruct(String),
     /// A name was declared twice.
     Redeclared(String),
     /// A `let` constant was assigned to.
@@ -135,6 +145,11 @@ impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Undeclared(name) => write!(f, "`{name}` is not declared"),
+            Self::Captured(name) => write!(
+                f,
+                "functions can't use `{name}`, because it is declared outside the function"
+            ),
+            Self::RecursiveStruct(name) => write!(f, "`{name}` contains itself"),
             Self::Redeclared(name) => write!(f, "`{name}` is already declared"),
             Self::AssignToConstant(name) => {
                 write!(
@@ -223,7 +238,7 @@ impl fmt::Display for CheckError {
 
 pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
     let mut checker = Checker::default();
-    checker.block(program);
+    checker.program(program);
 
     if checker.errors.is_empty() {
         Ok(())
@@ -279,21 +294,44 @@ struct Checker<'a> {
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
-    /// The `id` to give the next struct.
-    next_struct_id: usize,
+    /// For each struct, indexed by `id`, the `id`s of the structs its fields
+    /// have as types.
+    struct_fields: Vec<Vec<usize>>,
     errors: Vec<CheckError>,
 }
 
 impl<'a> Checker<'a> {
+    /// Finds the closest declaration of `name`, along with the index of the
+    /// scope it's in.
+    fn find(&self, name: &str) -> Option<(usize, &Binding)> {
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, scope)| scope.get(name).map(|binding| (index, binding)))
+    }
+
     fn lookup(&self, name: &str) -> Option<Binding> {
         // Built-in types come first, since they can never be redeclared.
-        Type::from_name(name).map(Binding::Type).or_else(|| {
-            self.scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(name))
-                .cloned()
-        })
+        if let Some(ty) = Type::from_name(name) {
+            return Some(Binding::Type(ty));
+        }
+
+        match self.find(name)? {
+            // Functions can't capture values from outside them. Functions and
+            // types can still be used, since they never depend on a value.
+            (index, Binding::Value { .. }) if index < self.fn_scope_start => None,
+            (_, binding) => Some(binding.clone()),
+        }
+    }
+
+    /// The error for a name that `lookup` couldn't find.
+    fn undeclared(&self, name: &str) -> CheckError {
+        if self.find(name).is_some() {
+            CheckError::Captured(name.to_string())
+        } else {
+            CheckError::Undeclared(name.to_string())
+        }
     }
 
     fn declare(&mut self, name: &'a str, binding: Binding) {
@@ -319,9 +357,163 @@ impl<'a> Checker<'a> {
                 self.errors.push(CheckError::NotAType(name.to_string()));
                 None
             }
+            // A value from outside the function is still not a type.
+            None if self.find(name).is_some() => {
+                self.errors.push(CheckError::NotAType(name.to_string()));
+                None
+            }
             None => {
                 self.errors.push(CheckError::UnknownType(name.to_string()));
                 None
+            }
+        }
+    }
+
+    /// Checks the top level of the program, declaring its structs and
+    /// functions before anything else.
+    fn program(&mut self, program: &'a Program) {
+        self.scopes.push(HashMap::new());
+
+        // Every struct is declared before any fields are resolved, so structs
+        // can contain each other in any order.
+        let structs: Vec<_> = program
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Struct { name, fields } => Some((self.declare_struct(name), name, fields)),
+                _ => None,
+            })
+            .collect();
+        for (id, _, fields) in &structs {
+            self.define_struct(*id, fields);
+        }
+        for (id, name, _) in &structs {
+            self.check_not_recursive(*id, name);
+        }
+
+        // Functions are declared after structs, since their signatures can
+        // use them.
+        let mut functions = program
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Fn {
+                    name, params, ret, ..
+                } => Some(self.declare_fn(name, params, ret)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .into_iter();
+
+        for stmt in program {
+            match stmt {
+                Stmt::Fn { name, body, .. } => {
+                    let index = functions.next().expect("declared above");
+                    self.fn_body(index, name, body);
+                }
+                Stmt::Struct { .. } => {}
+                _ => self.stmt(stmt),
+            }
+        }
+
+        self.scopes.pop();
+    }
+
+    /// Declares a function, returning its index into `functions`.
+    fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &str) -> usize {
+        let params = params
+            .iter()
+            .map(|param| ParamSignature {
+                label: param.label.as_deref(),
+                name: &param.name,
+                ty: self.resolve_type(&param.ty),
+            })
+            .collect();
+        let returns = self.resolve_type(ret);
+
+        self.functions.push(Signature { params, returns });
+        let index = self.functions.len() - 1;
+        self.declare(name, Binding::Function(index));
+        index
+    }
+
+    /// Checks the body of the function at `index` in `functions`.
+    fn fn_body(&mut self, index: usize, name: &'a str, body: &'a [Stmt]) {
+        let Signature { params, returns } = self.functions[index].clone();
+
+        // The body starts a new function scope holding the parameters. It can
+        // see the functions and types declared outside it, but not values.
+        let outer_scope_start = std::mem::replace(&mut self.fn_scope_start, self.scopes.len());
+        let outer_fn = self.current_fn.replace(FnContext {
+            name,
+            returns: returns.clone(),
+        });
+        self.scopes.push(HashMap::new());
+
+        for param in params {
+            let binding = Binding::Value {
+                mutability: Mutability::Let,
+                ty: param.ty,
+            };
+            self.declare(param.name, binding);
+        }
+        for stmt in body {
+            self.stmt(stmt);
+        }
+
+        self.scopes.pop();
+        self.current_fn = outer_fn;
+        self.fn_scope_start = outer_scope_start;
+
+        // A `Void` function can finish without an explicit `return`.
+        if let Some(expected) = returns
+            && expected != Type::Void
+            && !always_returns(body)
+        {
+            self.errors.push(CheckError::MissingReturn {
+                function: name.to_string(),
+                expected,
+            });
+        }
+    }
+
+    /// Declares a struct without its fields, returning its `id`.
+    fn declare_struct(&mut self, name: &'a str) -> usize {
+        let id = self.struct_fields.len();
+        self.struct_fields.push(vec![]);
+        let ty = Type::Struct {
+            id,
+            name: name.to_string(),
+        };
+        self.declare(name, Binding::Type(ty));
+        id
+    }
+
+    /// Resolves the fields of the struct with `id`.
+    fn define_struct(&mut self, id: usize, fields: &[Field]) {
+        // Field names only need to be unique within their struct.
+        let mut field_names = HashSet::new();
+        for field in fields {
+            if !field_names.insert(&field.name) {
+                self.errors.push(CheckError::Redeclared(field.name.clone()));
+            }
+            if let Some(Type::Struct { id: field_id, .. }) = self.resolve_type(&field.ty) {
+                self.struct_fields[id].push(field_id);
+            }
+        }
+    }
+
+    /// Reports an error if the struct with `id` contains itself, which would
+    /// make it infinitely large.
+    fn check_not_recursive(&mut self, id: usize, name: &str) {
+        let mut seen = HashSet::new();
+        let mut unvisited = self.struct_fields[id].clone();
+        while let Some(next) = unvisited.pop() {
+            if next == id {
+                self.errors
+                    .push(CheckError::RecursiveStruct(name.to_string()));
+                return;
+            }
+            if seen.insert(next) {
+                unvisited.extend(&self.struct_fields[next]);
             }
         }
     }
@@ -383,7 +575,10 @@ impl<'a> Checker<'a> {
                     Some(Binding::Type(_)) => {
                         self.errors.push(CheckError::TypeAsValue(name.clone()));
                     }
-                    None => self.errors.push(CheckError::Undeclared(name.clone())),
+                    None => {
+                        let err = self.undeclared(name);
+                        self.errors.push(err);
+                    }
                 }
             }
             Stmt::If {
@@ -402,83 +597,22 @@ impl<'a> Checker<'a> {
                     self.block(else_block);
                 }
             }
+            // Outside the top level, functions and structs are only visible
+            // after they're declared.
             Stmt::Fn {
                 name,
                 params,
                 ret,
                 body,
             } => {
-                let params: Vec<_> = params
-                    .iter()
-                    .map(|param| ParamSignature {
-                        label: param.label.as_deref(),
-                        name: &param.name,
-                        ty: self.resolve_type(&param.ty),
-                    })
-                    .collect();
-                let returns = self.resolve_type(ret);
-
                 // Declared before the body is checked, so it can call itself.
-                self.functions.push(Signature {
-                    params: params.clone(),
-                    returns: returns.clone(),
-                });
-                self.declare(name, Binding::Function(self.functions.len() - 1));
-
-                // The body can see everything declared so far, but starts a
-                // new function scope holding the parameters.
-                let outer_scope_start =
-                    std::mem::replace(&mut self.fn_scope_start, self.scopes.len());
-                let outer_fn = self.current_fn.replace(FnContext {
-                    name,
-                    returns: returns.clone(),
-                });
-                self.scopes.push(HashMap::new());
-
-                for param in params {
-                    let binding = Binding::Value {
-                        mutability: Mutability::Let,
-                        ty: param.ty,
-                    };
-                    self.declare(param.name, binding);
-                }
-                for stmt in body {
-                    self.stmt(stmt);
-                }
-
-                self.scopes.pop();
-                self.current_fn = outer_fn;
-                self.fn_scope_start = outer_scope_start;
-
-                // A `Void` function can finish without an explicit `return`.
-                if let Some(expected) = returns
-                    && expected != Type::Void
-                    && !always_returns(body)
-                {
-                    self.errors.push(CheckError::MissingReturn {
-                        function: name.clone(),
-                        expected,
-                    });
-                }
+                let index = self.declare_fn(name, params, ret);
+                self.fn_body(index, name, body);
             }
             Stmt::Struct { name, fields } => {
-                // Field names only need to be unique within their struct.
-                let mut field_names = HashSet::new();
-                for field in fields {
-                    if !field_names.insert(&field.name) {
-                        self.errors.push(CheckError::Redeclared(field.name.clone()));
-                    }
-                    self.resolve_type(&field.ty);
-                }
-
-                // Declared after its fields are resolved, so a struct can't
-                // contain itself, which would make it infinitely large.
-                let ty = Type::Struct {
-                    id: self.next_struct_id,
-                    name: name.clone(),
-                };
-                self.next_struct_id += 1;
-                self.declare(name, Binding::Type(ty));
+                let id = self.declare_struct(name);
+                self.define_struct(id, fields);
+                self.check_not_recursive(id, name);
             }
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
@@ -533,7 +667,8 @@ impl<'a> Checker<'a> {
                     None
                 }
                 None => {
-                    self.errors.push(CheckError::Undeclared(name.clone()));
+                    let err = self.undeclared(name);
+                    self.errors.push(err);
                     None
                 }
             },
@@ -568,7 +703,8 @@ impl<'a> Checker<'a> {
                 return None;
             }
             None => {
-                self.errors.push(CheckError::Undeclared(callee.to_string()));
+                let err = self.undeclared(callee);
+                self.errors.push(err);
                 return None;
             }
         };
@@ -1146,8 +1282,8 @@ mod tests {
         assert_eq!(
             check_src(
                 "
-                var count = 1
                 fn reset() {
+                    var count = 1
                     count = 0
                     return
                 }
@@ -1159,9 +1295,9 @@ mod tests {
     }
 
     #[test]
-    fn functions_capture_earlier_names() {
+    fn functions_cannot_capture_values() {
         assert_eq!(
-            check_src(
+            messages(
                 "
                 let step = 2
                 var total = 0
@@ -1171,37 +1307,54 @@ mod tests {
                 add(3)
                 "
             ),
+            [
+                "functions can't use `total`, because it is declared outside the function",
+                "functions can't use `step`, because it is declared outside the function",
+                "functions can't use `total`, because it is declared outside the function",
+            ]
+        );
+        // Not even from an enclosing function, or a block around them.
+        assert_eq!(
+            check_src(
+                "
+                fn outer(x: Int) {
+                    let y = 1
+                    fn inner() -> Int {
+                        return x + y
+                    }
+                }
+                if true {
+                    let z = 1
+                    fn f() -> Int {
+                        return z
+                    }
+                }
+                "
+            ),
+            Err(vec![
+                CheckError::Captured("x".to_string()),
+                CheckError::Captured("y".to_string()),
+                CheckError::Captured("z".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn functions_can_use_outer_functions_and_types() {
+        assert_eq!(
+            check_src(
+                "
+                fn outer() {
+                    struct Point {}
+                    fn helper(_ p: Point) {}
+                    fn inner(_ p: Point) {
+                        helper(p)
+                        outer()
+                    }
+                }
+                "
+            ),
             Ok(())
-        );
-    }
-
-    #[test]
-    fn functions_cannot_capture_later_names() {
-        assert_eq!(
-            check_src(
-                "
-                fn f() -> Int {
-                    return later
-                }
-                let later = 1
-                "
-            ),
-            Err(vec![CheckError::Undeclared("later".to_string())])
-        );
-    }
-
-    #[test]
-    fn captured_constants_stay_constant() {
-        assert_eq!(
-            check_src(
-                "
-                let x = 1
-                fn f() {
-                    x = 2
-                }
-                "
-            ),
-            Err(vec![CheckError::AssignToConstant("x".to_string())])
         );
     }
 
@@ -1220,18 +1373,52 @@ mod tests {
     }
 
     #[test]
-    fn functions_cannot_be_called_before_declaration() {
+    fn top_level_functions_can_be_used_in_any_order() {
         assert_eq!(
             check_src(
                 "
-                let x = f()
+                let x: Int = f()
                 fn f() -> Int {
+                    return g(true)
+                }
+                fn g(_ flag: Bool) -> Int {
+                    if flag {
+                        return f()
+                    }
                     return 1
                 }
                 "
             ),
-            Err(vec![CheckError::Undeclared("f".to_string())])
+            Ok(())
         );
+    }
+
+    #[test]
+    fn nested_functions_cannot_be_called_before_declaration() {
+        for src in [
+            "
+            fn outer() {
+                let x = f()
+                fn f() -> Int {
+                    return 1
+                }
+            }
+            ",
+            "
+            if true {
+                let x = f()
+                fn f() -> Int {
+                    return 1
+                }
+            }
+            ",
+        ] {
+            assert_eq!(
+                check_src(src),
+                Err(vec![CheckError::Undeclared("f".to_string())]),
+                "{src:?}"
+            );
+        }
     }
 
     #[test]
@@ -1790,15 +1977,38 @@ mod tests {
     }
 
     #[test]
-    fn structs_must_be_declared_before_use() {
+    fn top_level_structs_can_be_used_in_any_order() {
         assert_eq!(
             check_src(
                 "
-                fn f(_ user: User) {}
+                fn f(_ user: User) -> Post {
+                    return f(user)
+                }
                 struct Post {
                     let author: User
                 }
-                struct User {}
+                struct User {
+                    let address: Address
+                }
+                struct Address {}
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn nested_structs_must_be_declared_before_use() {
+        assert_eq!(
+            check_src(
+                "
+                fn outer() {
+                    fn f(_ user: User) {}
+                    struct Post {
+                        let author: User
+                    }
+                    struct User {}
+                }
                 "
             ),
             Err(vec![
@@ -1816,9 +2026,58 @@ mod tests {
                 struct Node {
                     let next: Node
                 }
+                fn f() {
+                    struct Inner {
+                        let inner: Inner
+                    }
+                }
                 "
             ),
-            Err(vec![CheckError::UnknownType("Node".to_string())])
+            Err(vec![
+                CheckError::RecursiveStruct("Node".to_string()),
+                CheckError::RecursiveStruct("Inner".to_string()),
+            ])
+        );
+        // Every struct in a cycle is reported, but not one that only contains
+        // a struct in a cycle.
+        assert_eq!(
+            messages(
+                "
+                struct A {
+                    let b: B
+                }
+                struct B {
+                    let c: C
+                }
+                struct C {
+                    let a: A
+                }
+                struct D {
+                    let a: A
+                }
+                "
+            ),
+            [
+                "`A` contains itself",
+                "`B` contains itself",
+                "`C` contains itself"
+            ]
+        );
+    }
+
+    #[test]
+    fn structs_can_contain_the_same_struct_twice() {
+        assert_eq!(
+            check_src(
+                "
+                struct Line {
+                    let start: Point
+                    let end: Point
+                }
+                struct Point {}
+                "
+            ),
+            Ok(())
         );
     }
 
@@ -1893,17 +2152,22 @@ mod tests {
             messages(
                 "
                 let x = 1
-                fn f() {}
                 let y: x = 1
-                fn g(_ a: f) -> x {}
-                struct S {
-                    let field: f
+                fn f() {}
+                fn g(_ a: f) {}
+                fn h(_ a: Int) {
+                    let b: a = 1
+                    let c: x = 1
+                    struct S {
+                        let field: f
+                    }
                 }
                 "
             ),
             [
-                "`x` is not a type",
                 "`f` is not a type",
+                "`x` is not a type",
+                "`a` is not a type",
                 "`x` is not a type",
                 "`f` is not a type",
             ]
@@ -1945,7 +2209,6 @@ mod tests {
                 } else {
                     struct A {}
                 }
-                struct A {}
                 "
             ),
             Ok(())
@@ -1972,9 +2235,9 @@ mod tests {
         assert_eq!(
             check_src(
                 "
-                fn outer(x: Int) -> Bool {
+                fn outer() -> Bool {
                     fn inner() -> Int {
-                        return x
+                        return 1
                     }
                     // `inner`'s `return` is checked against `Int`, and this
                     // one against `Bool`.

@@ -39,24 +39,33 @@ fn main() {
             return value + 5
         }
 
-        // Captures `y` from the enclosing scope.
-        fn bump(by amount: Int, _ twice: Bool) {
-            y = addFive(to: y) + amount
+        // Functions can't capture `y`, so it's passed in and returned.
+        fn bump(_ value: Int, by amount: Int, _ twice: Bool) -> Int {
+            var result = addFive(to: value) + amount
             if twice {
-                y = y + amount
+                result = result + amount
             }
+            return result
         }
 
-        bump(by: 2, true)
+        y = bump(y, by: 2, true)
+
+        // Top-level functions and structs can be used before they're declared.
+        fn choose(_ first: User, or second: User, _ preferFirst: Bool) -> User {
+            if preferFirst {
+                return first
+            }
+            return second
+        }
+
+        struct Team {
+            let lead: User
+        }
 
         // Fields have types but no values.
         struct User {
             let age: Int
             var isAdmin: Bool
-        }
-
-        fn pick(_ user: User, or other: User) -> User {
-            return user
         }
     ";
 
