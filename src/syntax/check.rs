@@ -22,49 +22,37 @@
 //! can be used in any order. This is safe because functions can't capture
 //! values from outside them, so calling one early never reads a value that
 //! hasn't been set yet.
+//!
+//! The standard library is checked first, in a scope around the program, so
+//! its names can be used everywhere without importing them.
 
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    sync::LazyLock,
 };
 
-use super::ast::{Arg, BinOp, Expr, Field, Mutability, Param, Program, Stmt, UnOp};
+use super::{
+    ast::{Arg, BinOp, Expr, Field, Mutability, Param, Program, Stmt, UnOp},
+    parser::parse,
+};
 
+static STDLIB: LazyLock<Program> = LazyLock::new(|| {
+    parse(include_str!("../stdlib.atom")).expect("the standard library should parse")
+});
+
+/// Every type is a struct, including `Int`, `Bool` and `Void`, which are
+/// declared in the standard library. Structs in different scopes can share a
+/// name, so they're told apart by `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Type {
-    Int,
-    Bool,
-    /// The return type of a function that doesn't return anything useful.
-    /// Functions without an explicit return type return `Void`.
-    Void,
-    /// A struct declared with `struct`. Structs in different scopes can share
-    /// a name, so they're told apart by `id`.
-    Struct {
-        id: usize,
-        name: String,
-    },
-}
-
-impl Type {
-    /// The built-in type called `name`, if there is one.
-    fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "Int" => Some(Self::Int),
-            "Bool" => Some(Self::Bool),
-            "Void" => Some(Self::Void),
-            _ => None,
-        }
-    }
+pub struct Type {
+    id: usize,
+    name: String,
 }
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Int => write!(f, "Int"),
-            Self::Bool => write!(f, "Bool"),
-            Self::Void => write!(f, "Void"),
-            Self::Struct { name, .. } => write!(f, "{name}"),
-        }
+        write!(f, "{}", self.name)
     }
 }
 
@@ -237,8 +225,8 @@ impl fmt::Display for CheckError {
 }
 
 pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
-    let mut checker = Checker::default();
-    checker.program(program);
+    let mut checker = Checker::new();
+    checker.top_level(program);
 
     if checker.errors.is_empty() {
         Ok(())
@@ -272,7 +260,6 @@ enum Binding {
     },
     /// An index into `Checker::functions`.
     Function(usize),
-    /// A struct, or one of the built-in types.
     Type(Type),
 }
 
@@ -290,7 +277,9 @@ struct Checker<'a> {
     /// types all share the same names.
     scopes: Vec<HashMap<&'a str, Binding>>,
     /// The index in `scopes` of the current function's outermost scope, or 0
-    /// outside of a function. Names can't be redeclared from here inwards.
+    /// outside of a function. Names can't be redeclared from here inwards, so
+    /// the program can't redeclare the standard library's names at the top
+    /// level, but functions can reuse them like any other outer name.
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
@@ -301,6 +290,27 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
+    /// A checker whose outermost scope holds the standard library.
+    fn new() -> Self {
+        let mut checker = Self::default();
+        checker.top_level(&STDLIB);
+        assert!(
+            checker.errors.is_empty(),
+            "the standard library should check: {:?}",
+            checker.errors
+        );
+        checker
+    }
+
+    /// A type from the standard library, such as `Int` for integer literals.
+    /// Found in the standard library's own scope, so it can't be shadowed.
+    fn std_type(&self, name: &str) -> Type {
+        match self.scopes[0].get(name) {
+            Some(Binding::Type(ty)) => ty.clone(),
+            _ => panic!("the standard library should declare `{name}`"),
+        }
+    }
+
     /// Finds the closest declaration of `name`, along with the index of the
     /// scope it's in.
     fn find(&self, name: &str) -> Option<(usize, &Binding)> {
@@ -312,11 +322,6 @@ impl<'a> Checker<'a> {
     }
 
     fn lookup(&self, name: &str) -> Option<Binding> {
-        // Built-in types come first, since they can never be redeclared.
-        if let Some(ty) = Type::from_name(name) {
-            return Some(Binding::Type(ty));
-        }
-
         match self.find(name)? {
             // Functions can't capture values from outside them. Functions and
             // types can still be used, since they never depend on a value.
@@ -336,12 +341,10 @@ impl<'a> Checker<'a> {
 
     fn declare(&mut self, name: &'a str, binding: Binding) {
         // Names can't be redeclared within a function, even to shadow an
-        // outer block. A function's own scope can reuse names from outside it,
-        // except for the built-in types.
-        if Type::from_name(name).is_some()
-            || self.scopes[self.fn_scope_start..]
-                .iter()
-                .any(|scope| scope.contains_key(name))
+        // outer block. A function's own scope can reuse names from outside it.
+        if self.scopes[self.fn_scope_start..]
+            .iter()
+            .any(|scope| scope.contains_key(name))
         {
             self.errors.push(CheckError::Redeclared(name.to_string()));
         }
@@ -369,9 +372,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks the top level of the program, declaring its structs and
-    /// functions before anything else.
-    fn program(&mut self, program: &'a Program) {
+    /// Checks top-level statements in a new scope, declaring their structs
+    /// and functions before anything else. The scope is left open, so that
+    /// the standard library stays visible to the program.
+    fn top_level(&mut self, program: &'a [Stmt]) {
         self.scopes.push(HashMap::new());
 
         // Every struct is declared before any fields are resolved, so structs
@@ -413,8 +417,6 @@ impl<'a> Checker<'a> {
                 _ => self.stmt(stmt),
             }
         }
-
-        self.scopes.pop();
     }
 
     /// Declares a function, returning its index into `functions`.
@@ -465,7 +467,7 @@ impl<'a> Checker<'a> {
 
         // A `Void` function can finish without an explicit `return`.
         if let Some(expected) = returns
-            && expected != Type::Void
+            && expected != self.std_type("Void")
             && !always_returns(body)
         {
             self.errors.push(CheckError::MissingReturn {
@@ -479,7 +481,7 @@ impl<'a> Checker<'a> {
     fn declare_struct(&mut self, name: &'a str) -> usize {
         let id = self.struct_fields.len();
         self.struct_fields.push(vec![]);
-        let ty = Type::Struct {
+        let ty = Type {
             id,
             name: name.to_string(),
         };
@@ -495,8 +497,8 @@ impl<'a> Checker<'a> {
             if !field_names.insert(&field.name) {
                 self.errors.push(CheckError::Redeclared(field.name.clone()));
             }
-            if let Some(Type::Struct { id: field_id, .. }) = self.resolve_type(&field.ty) {
-                self.struct_fields[id].push(field_id);
+            if let Some(ty) = self.resolve_type(&field.ty) {
+                self.struct_fields[id].push(ty.id);
             }
         }
     }
@@ -587,7 +589,7 @@ impl<'a> Checker<'a> {
                 else_block,
             } => {
                 if let Some(found) = self.expr(cond)
-                    && found != Type::Bool
+                    && found != self.std_type("Bool")
                 {
                     self.errors.push(CheckError::ConditionNotBool(found));
                 }
@@ -624,7 +626,7 @@ impl<'a> Checker<'a> {
                 // A bare `return` returns `Void`.
                 let function = name.to_string();
                 match (returns, found) {
-                    (Some(expected), None) if expected != Type::Void => {
+                    (Some(expected), None) if expected != self.std_type("Void") => {
                         self.errors
                             .push(CheckError::MissingReturnValue { function, expected });
                     }
@@ -654,8 +656,8 @@ impl<'a> Checker<'a> {
     /// because of an error that has already been reported.
     fn expr(&mut self, expr: &Expr) -> Option<Type> {
         match expr {
-            Expr::Int(_) => Some(Type::Int),
-            Expr::Bool(_) => Some(Type::Bool),
+            Expr::Int(_) => Some(self.std_type("Int")),
+            Expr::Bool(_) => Some(self.std_type("Bool")),
             Expr::Var(name) => match self.lookup(name) {
                 Some(Binding::Value { ty, .. }) => ty,
                 Some(Binding::Function(_)) => {
@@ -675,12 +677,12 @@ impl<'a> Checker<'a> {
             // Operators always produce their result type, even if an operand
             // is invalid, so one bad operand doesn't cause further errors.
             Expr::Unary(op, operand) => {
-                let ty = unary_type(op);
+                let ty = self.std_type(unary_type(op));
                 self.operand(op.symbol(), operand, ty.clone());
                 Some(ty)
             }
             Expr::Binary(lhs, op, rhs) => {
-                let ty = binary_type(op);
+                let ty = self.std_type(binary_type(op));
                 self.operand(op.symbol(), lhs, ty.clone());
                 self.operand(op.symbol(), rhs, ty.clone());
                 Some(ty)
@@ -782,19 +784,21 @@ fn always_returns(stmts: &[Stmt]) -> bool {
     })
 }
 
-/// The type of a unary operator's operand, which is also its result type.
-fn unary_type(op: &UnOp) -> Type {
+/// The name of the standard library type of a unary operator's operand,
+/// which is also its result type.
+fn unary_type(op: &UnOp) -> &'static str {
     match op {
-        UnOp::Neg => Type::Int,
-        UnOp::Not => Type::Bool,
+        UnOp::Neg => "Int",
+        UnOp::Not => "Bool",
     }
 }
 
-/// The type of a binary operator's operands, which is also its result type.
-fn binary_type(op: &BinOp) -> Type {
+/// The name of the standard library type of a binary operator's operands,
+/// which is also its result type.
+fn binary_type(op: &BinOp) -> &'static str {
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => Type::Int,
-        BinOp::And | BinOp::Or => Type::Bool,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => "Int",
+        BinOp::And | BinOp::Or => "Bool",
     }
 }
 
@@ -803,6 +807,11 @@ mod tests {
     use super::*;
     use crate::syntax::parse;
 
+    /// The standard library type called `name`.
+    fn ty(name: &str) -> Type {
+        Checker::new().std_type(name)
+    }
+
     fn check_src(src: &str) -> Result<(), Vec<CheckError>> {
         check(&parse(src).expect("source should parse"))
     }
@@ -810,8 +819,8 @@ mod tests {
     fn invalid_operand(op: &'static str) -> CheckError {
         CheckError::InvalidOperand {
             op,
-            expected: Type::Int,
-            found: Type::Bool,
+            expected: ty("Int"),
+            found: ty("Bool"),
         }
     }
 
@@ -837,8 +846,8 @@ mod tests {
     fn rejects_boolean_operators_on_integers() {
         let invalid = |op| CheckError::InvalidOperand {
             op,
-            expected: Type::Bool,
-            found: Type::Int,
+            expected: ty("Bool"),
+            found: ty("Int"),
         };
 
         assert_eq!(check_src("let x = !1"), Err(vec![invalid("!")]));
@@ -859,8 +868,8 @@ mod tests {
             check_src("var n = 0\nn = !false"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "n".to_string(),
-                expected: Type::Int,
-                found: Type::Bool,
+                expected: ty("Int"),
+                found: ty("Bool"),
             }])
         );
     }
@@ -946,16 +955,16 @@ mod tests {
             check_src("var x = 1\nx = true"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "x".to_string(),
-                expected: Type::Int,
-                found: Type::Bool,
+                expected: ty("Int"),
+                found: ty("Bool"),
             }])
         );
         assert_eq!(
             check_src("var b = false\nb = 1 + 2"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "b".to_string(),
-                expected: Type::Bool,
-                found: Type::Int,
+                expected: ty("Bool"),
+                found: ty("Int"),
             }])
         );
     }
@@ -1020,16 +1029,16 @@ mod tests {
             check_src("let x: Int = true"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "x".to_string(),
-                expected: Type::Int,
-                found: Type::Bool,
+                expected: ty("Int"),
+                found: ty("Bool"),
             }])
         );
         assert_eq!(
             check_src("var y: Bool = 1 + 2"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "y".to_string(),
-                expected: Type::Bool,
-                found: Type::Int,
+                expected: ty("Bool"),
+                found: ty("Int"),
             }])
         );
     }
@@ -1052,8 +1061,8 @@ mod tests {
             check_src("var x: Int = true\nx = 1\nlet y = x + 1"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "x".to_string(),
-                expected: Type::Int,
-                found: Type::Bool,
+                expected: ty("Int"),
+                found: ty("Bool"),
             }])
         );
     }
@@ -1067,28 +1076,52 @@ mod tests {
     }
 
     #[test]
-    fn built_in_type_names_cannot_be_redeclared() {
+    fn std_names_cannot_be_redeclared_at_the_top_level() {
         assert_eq!(
-            check_src("let Int: Int = 1\nvar Bool = true"),
-            Err(vec![
-                CheckError::Redeclared("Int".to_string()),
-                CheckError::Redeclared("Bool".to_string()),
-            ])
-        );
-        // Not even inside a function, which can otherwise reuse outer names.
-        assert_eq!(
-            check_src(
-                "
-                fn Void(Int: Int) {
-                    let Bool = 1
-                }
-                "
-            ),
+            check_src("let Int: Int = 1\nvar Bool = true\nfn Void() {}"),
             Err(vec![
                 CheckError::Redeclared("Void".to_string()),
                 CheckError::Redeclared("Int".to_string()),
                 CheckError::Redeclared("Bool".to_string()),
             ])
+        );
+    }
+
+    #[test]
+    fn functions_can_reuse_std_names() {
+        // Like any other outer name.
+        assert_eq!(
+            check_src(
+                "
+                fn f(Int: Int) {
+                    let Bool = 1
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn std_types_are_structs() {
+        assert_eq!(
+            check_src(
+                "
+                struct Wrapper {
+                    let int: Int
+                    let bool: Bool
+                    let void: Void
+                }
+                fn unwrap(_ w: Wrapper) -> Wrapper {
+                    return w
+                }
+                "
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            messages("fn f(_ w: Bool) -> Int {\nreturn w\n}"),
+            ["`f` must return `Int`, found `Bool`"]
         );
     }
 
@@ -1116,11 +1149,11 @@ mod tests {
     fn rejects_non_boolean_condition() {
         assert_eq!(
             check_src("if 1 + 2 {}"),
-            Err(vec![CheckError::ConditionNotBool(Type::Int)])
+            Err(vec![CheckError::ConditionNotBool(ty("Int"))])
         );
         assert_eq!(
             check_src("if true {} else if 0 {}"),
-            Err(vec![CheckError::ConditionNotBool(Type::Int)])
+            Err(vec![CheckError::ConditionNotBool(ty("Int"))])
         );
         // An undeclared condition is only reported once.
         assert_eq!(
@@ -1760,7 +1793,7 @@ mod tests {
     fn requires_return_on_every_path() {
         let missing = |function: &str| CheckError::MissingReturn {
             function: function.to_string(),
-            expected: Type::Int,
+            expected: ty("Int"),
         };
 
         assert_eq!(check_src("fn f() -> Int {}"), Err(vec![missing("f")]));
@@ -2094,9 +2127,10 @@ mod tests {
                 "{name:?}"
             );
         }
-        // Built-in types can't be redeclared inside functions either.
+        // A function can declare its own `Int`, which is a different type,
+        // but literals still have the standard library's `Int`.
         assert_eq!(
-            check_src(
+            messages(
                 "
                 fn f() {
                     struct Int {}
@@ -2104,7 +2138,7 @@ mod tests {
                 }
                 "
             ),
-            Err(vec![CheckError::Redeclared("Int".to_string())])
+            ["cannot assign `Int` to `x`, which has type `Int`"]
         );
     }
 
@@ -2247,8 +2281,8 @@ mod tests {
             ),
             Err(vec![CheckError::ReturnTypeMismatch {
                 function: "outer".to_string(),
-                expected: Type::Bool,
-                found: Type::Int,
+                expected: ty("Bool"),
+                found: ty("Int"),
             }])
         );
     }
