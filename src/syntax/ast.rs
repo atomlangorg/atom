@@ -14,6 +14,58 @@
  * limitations under the License.
  */
 
+use std::fmt;
+
+/// The path to a module, as in `use /dir/other`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModulePath {
+    /// `/dir/other`: from the root of the project.
+    Absolute(Vec<String>),
+    /// `./dir/other`: from the directory of the current file.
+    Relative(Vec<String>),
+    /// `other`: by name alone. In a `use`, this names a library built into
+    /// the language, such as `stdlib`. As a qualifier, it matches any
+    /// imported module with that name.
+    Named(String),
+}
+
+impl fmt::Display for ModulePath {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Absolute(segments) => write!(f, "/{}", segments.join("/")),
+            Self::Relative(segments) => write!(f, "./{}", segments.join("/")),
+            Self::Named(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+/// A name, optionally qualified by the module it's declared in, as in `f`,
+/// `other.f` or `/dir/other.f`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Name {
+    pub module: Option<ModulePath>,
+    pub name: String,
+}
+
+impl Name {
+    /// A name without a module.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            module: None,
+            name: name.into(),
+        }
+    }
+}
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.module {
+            Some(module) => write!(f, "{module}.{}", self.name),
+            None => write!(f, "{}", self.name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -56,12 +108,12 @@ impl UnOp {
 pub enum Expr {
     Int(i64),
     Bool(bool),
-    Var(String),
+    Var(Name),
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
     /// `callee(label: value, ...)`
     Call {
-        callee: String,
+        callee: Name,
         args: Vec<Arg>,
     },
 }
@@ -83,6 +135,9 @@ pub enum Mutability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
+    /// `use /dir/other`: makes the names declared at the top level of another
+    /// module visible. Only allowed at the top level.
+    Use(ModulePath),
     /// `let name = value` or `var name = value`
     ///
     /// Either can have an explicit type, as in `let name: Int = value`.
@@ -90,7 +145,7 @@ pub enum Stmt {
         mutability: Mutability,
         name: String,
         /// The name of the explicit type, if there is one.
-        ty: Option<String>,
+        ty: Option<Name>,
         value: Expr,
     },
     /// `name = value`: reassigns an existing `var`.
@@ -109,7 +164,7 @@ pub enum Stmt {
         params: Vec<Param>,
         /// The name of the return type. `fn f()` is the same as
         /// `fn f() -> Void`, so this is `Void` when no type is written.
-        ret: String,
+        ret: Name,
         body: Block,
     },
     /// `struct Name { let field: Type ... }`
@@ -130,7 +185,7 @@ pub struct Param {
     pub label: Option<String>,
     pub name: String,
     /// The name of the parameter's type.
-    pub ty: String,
+    pub ty: Name,
 }
 
 /// A struct field, such as `let age: Int`. Fields can't have values.
@@ -139,10 +194,11 @@ pub struct Field {
     pub mutability: Mutability,
     pub name: String,
     /// The name of the field's type.
-    pub ty: String,
+    pub ty: Name,
 }
 
 /// A sequence of statements with its own scope, written `{ ... }`.
 pub type Block = Vec<Stmt>;
 
+/// The statements in a file. Only declarations are allowed at the top level.
 pub type Program = Vec<Stmt>;

@@ -16,75 +16,80 @@
 
 mod syntax;
 
+use std::{fs, io, path::Path};
+
+use syntax::Module;
+
 fn main() {
-    let src = "
-        let x = -1 + 2 * 3
-        var y = x / (3 - -4)
-        y = y * 2
-        var done: Bool = false
-        let ready: Bool = true // Never changes.
-
-        // Update `y` depending on the current state.
-        if ready & !done {
-            y = y + 1
-            done = true
-        } else if ready {
-            y = 0
-        } else {
-            let fallback = -1
-            y = fallback
-        }
-
-        fn addFive(to value: Int) -> Int {
-            return value + 5
-        }
-
-        // Functions can't capture `y`, so it's passed in and returned.
-        fn bump(_ value: Int, by amount: Int, _ twice: Bool) -> Int {
-            var result = addFive(to: value) + amount
-            if twice {
-                result = result + amount
-            }
-            return result
-        }
-
-        y = bump(y, by: 2, true)
-
-        // Top-level functions and structs can be used before they're declared.
-        fn choose(_ first: User, or second: User, _ preferFirst: Bool) -> User {
-            if preferFirst {
-                return first
-            }
-            return second
-        }
-
-        struct Team {
-            let lead: User
-        }
-
-        // Fields have types but no values.
-        struct User {
-            let age: Int
-            var isAdmin: Bool
-        }
-    ";
-
-    let program = match syntax::parse(src) {
-        Ok(program) => program,
-        Err(errs) => {
-            for err in errs {
-                eprintln!("error at {:?}: {err}", err.span().into_range());
-            }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+    let files = match read_atom_files(&root) {
+        Ok(files) => files,
+        Err(err) => {
+            eprintln!("error reading {}: {err}", root.display());
             return;
         }
     };
 
-    match syntax::check(&program) {
-        Ok(()) => println!("{program:#?}"),
-        Err(errs) => {
-            for err in errs {
-                eprintln!("error: {err}");
+    let mut modules = vec![];
+    let mut parsed = true;
+    for (path, src) in &files {
+        match syntax::parse(src) {
+            Ok(program) => modules.push(Module {
+                path: path.clone(),
+                program,
+            }),
+            Err(errs) => {
+                parsed = false;
+                for err in errs {
+                    let range = err.span().into_range();
+                    eprintln!("error in /{} at {range:?}: {err}", path.join("/"));
+                }
             }
         }
     }
+    if !parsed {
+        return;
+    }
+
+    match syntax::check(&modules) {
+        Ok(()) => {
+            for module in &modules {
+                println!("/{}: {:#?}", module.path.join("/"), module.program);
+            }
+        }
+        Err(errs) => {
+            for err in errs {
+                eprintln!("error in {err}");
+            }
+        }
+    }
+}
+
+/// Reads every `.atom` file under `root`, returning each one's path from
+/// `root` without `.atom`, such as `["dir", "other"]`, along with its source.
+fn read_atom_files(root: &Path) -> io::Result<Vec<(Vec<String>, String)>> {
+    let mut files = vec![];
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "atom") {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("found under `root`")
+                    .with_extension("");
+                let segments = relative
+                    .iter()
+                    .map(|segment| segment.to_string_lossy().into_owned())
+                    .collect();
+                files.push((segments, fs::read_to_string(&path)?));
+            }
+        }
+    }
+
+    // Sorted so that errors are always reported in the same order.
+    files.sort();
+    Ok(files)
 }

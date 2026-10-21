@@ -1,0 +1,10 @@
+use /users/user
+
+struct Team {
+    let lead: User
+    let size: Int
+}
+
+fn describe(_ team: Team) -> Int {
+    return 2
+}

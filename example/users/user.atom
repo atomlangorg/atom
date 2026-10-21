@@ -1,0 +1,11 @@
+// Fields have types but no values.
+struct User {
+    let age: Int
+    var isAdmin: Bool
+}
+
+let maxAge = 120
+
+fn describe(_ user: User) -> Int {
+    return 1
+}

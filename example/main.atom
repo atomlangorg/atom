@@ -1,0 +1,53 @@
+// The top level can only declare things. Declarations can be used in any
+// order, even across files.
+use ./users/user
+use ./teams/team
+
+// `maxAge` comes from /users/user.
+let oldest = maxAge + 1
+let ready: Bool = true // Never changes.
+
+fn run() {
+    let x = -1 + 2 * 3
+    var y = x / (3 - -4)
+    y = y * 2
+    var done: Bool = false
+
+    // Update `y` depending on the current state.
+    if !done {
+        y = y + 1
+        done = true
+    } else {
+        let fallback = -1
+        y = fallback
+    }
+
+    y = bump(y, by: 2, true)
+}
+
+fn addFive(to value: Int) -> Int {
+    return value + 5
+}
+
+// Functions can't use values from outside them, so `y` is passed in and
+// returned.
+fn bump(_ value: Int, by amount: Int, _ twice: Bool) -> Int {
+    var result = addFive(to: value) + amount
+    if twice {
+        result = result + amount
+    }
+    return result
+}
+
+fn choose(_ first: User, or second: User, _ preferFirst: Bool) -> User {
+    if preferFirst {
+        return first
+    }
+    return second
+}
+
+// `describe` is declared in both /users/user and /teams/team, so it has to
+// be qualified with the file it comes from.
+fn describeBoth(_ t: Team, _ u: User) -> Int {
+    return team.describe(t) + user.describe(u)
+}

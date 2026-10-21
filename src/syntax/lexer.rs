@@ -49,6 +49,8 @@ pub enum Token<'src> {
     Return,
     #[token("struct")]
     Struct,
+    #[token("use")]
+    Use,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
@@ -71,6 +73,8 @@ pub enum Token<'src> {
     Colon,
     #[token(",")]
     Comma,
+    #[token(".")]
+    Dot,
     #[token("->")]
     Arrow,
     /// Marks a parameter as having no label. Not a valid identifier.
@@ -105,6 +109,7 @@ impl fmt::Display for Token<'_> {
             Self::Fn => write!(f, "fn"),
             Self::Return => write!(f, "return"),
             Self::Struct => write!(f, "struct"),
+            Self::Use => write!(f, "use"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
@@ -115,6 +120,7 @@ impl fmt::Display for Token<'_> {
             Self::Pipe => write!(f, "|"),
             Self::Colon => write!(f, ":"),
             Self::Comma => write!(f, ","),
+            Self::Dot => write!(f, "."),
             Self::Arrow => write!(f, "->"),
             Self::Underscore => write!(f, "_"),
             Self::Eq => write!(f, "="),
@@ -256,6 +262,45 @@ mod tests {
     }
 
     #[test]
+    fn lexes_use_paths() {
+        assert_eq!(
+            lex("use ./dir/other\nuse /main"),
+            vec![
+                Token::Use,
+                Token::Dot,
+                Token::Slash,
+                Token::Ident("dir"),
+                Token::Slash,
+                Token::Ident("other"),
+                Token::Newline,
+                Token::Use,
+                Token::Slash,
+                Token::Ident("main"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_qualified_names() {
+        assert_eq!(
+            lex("other.f() /dir/other.Int"),
+            vec![
+                Token::Ident("other"),
+                Token::Dot,
+                Token::Ident("f"),
+                Token::LParen,
+                Token::RParen,
+                Token::Slash,
+                Token::Ident("dir"),
+                Token::Slash,
+                Token::Ident("other"),
+                Token::Dot,
+                Token::Ident("Int"),
+            ]
+        );
+    }
+
+    #[test]
     fn underscore_alone_is_not_an_identifier() {
         assert_eq!(
             lex("_ _a a_ __"),
@@ -282,11 +327,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            lex("fnord returned structure"),
+            lex("fnord returned structure user"),
             vec![
                 Token::Ident("fnord"),
                 Token::Ident("returned"),
                 Token::Ident("structure"),
+                Token::Ident("user"),
             ]
         );
     }

@@ -18,28 +18,44 @@
 //! reassigned, that functions are called and return correctly, that structs
 //! are well formed, and that every expression is well typed.
 //!
-//! Functions and structs at the top level of the program are hoisted, so they
-//! can be used in any order. This is safe because functions can't capture
-//! values from outside them, so calling one early never reads a value that
-//! hasn't been set yet.
+//! Every file is a module, named by its path from the project root, so
+//! `dir/other.atom` is `/dir/other`. The top level of a module can only hold
+//! declarations, which are hoisted so they can be used in any order, even
+//! across modules. This is safe because functions can't capture values from
+//! outside them, so calling one early never reads a value that hasn't been set
+//! yet, and top-level values whose initialisers depend on themselves are
+//! rejected.
 //!
-//! The standard library is checked first, in a scope around the program, so
-//! its names can be used everywhere without importing them.
+//! The standard library is a module called `stdlib`, which every module
+//! imports without needing a `use`.
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt,
+    fmt, iter,
     sync::LazyLock,
 };
 
 use super::{
-    ast::{Arg, BinOp, Expr, Field, Mutability, Param, Program, Stmt, UnOp},
+    ast::{Arg, BinOp, Expr, Field, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp},
     parser::parse,
 };
+
+/// The name of the standard library, which is how it's imported and
+/// qualified, as in `stdlib.Int`.
+const STDLIB_NAME: &str = "stdlib";
 
 static STDLIB: LazyLock<Program> = LazyLock::new(|| {
     parse(include_str!("../stdlib.atom")).expect("the standard library should parse")
 });
+
+/// A parsed `.atom` file.
+#[derive(Debug, Clone)]
+pub struct Module {
+    /// The file's path from the project root without `.atom`, such as
+    /// `["dir", "other"]` for `dir/other.atom`.
+    pub path: Vec<String>,
+    pub program: Program,
+}
 
 /// Every type is a struct, including `Int`, `Bool` and `Void`, which are
 /// declared in the standard library. Structs in different scopes can share a
@@ -56,12 +72,38 @@ impl fmt::Display for Type {
     }
 }
 
+/// An error, along with the module it's in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleError {
+    /// The module's path, such as `/dir/other`, or `stdlib`.
+    pub module: String,
+    pub error: CheckError,
+}
+
+impl fmt::Display for ModuleError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", self.module, self.error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckError {
     /// A name was used or assigned without being declared.
     Undeclared(String),
     /// A function used a value declared outside it.
     Captured(String),
+    /// A name without a module was declared in more than one of the modules
+    /// it could come from.
+    Ambiguous { name: String, modules: Vec<String> },
+    /// A `use` named a module that doesn't exist.
+    UnknownModule(String),
+    /// A qualified name's module isn't the current module or one it imports.
+    NotImported(String),
+    /// A qualified name's module matched more than one module by name, so
+    /// its full path is needed.
+    AmbiguousModule { name: String, modules: Vec<String> },
+    /// A top-level value's initialiser depends on the value itself.
+    CyclicValue(String),
     /// A struct contains itself, directly or through other structs, so it
     /// would be infinitely large.
     RecursiveStruct(String),
@@ -115,8 +157,6 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// `return` was used outside a function.
-    ReturnOutsideFunction,
     /// `return` had no value in a function that doesn't return `Void`.
     MissingReturnValue { function: String, expected: Type },
     /// A returned value had the wrong type.
@@ -129,6 +169,17 @@ pub enum CheckError {
     MissingReturn { function: String, expected: Type },
 }
 
+/// Formats `items` as "`a`", "`a` and `b`", or "`a`, `b` and `c`", using
+/// `conjunction` in place of "and".
+fn quoted_list(items: &[String], conjunction: &str) -> String {
+    let quoted: Vec<_> = items.iter().map(|item| format!("`{item}`")).collect();
+    match quoted.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} {conjunction} {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -137,6 +188,19 @@ impl fmt::Display for CheckError {
                 f,
                 "functions can't use `{name}`, because it is declared outside the function"
             ),
+            Self::Ambiguous { name, modules } => write!(
+                f,
+                "`{name}` is declared in {}, so it must be qualified",
+                quoted_list(modules, "and")
+            ),
+            Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
+            Self::NotImported(path) => write!(f, "`{path}` is not an imported module"),
+            Self::AmbiguousModule { name, modules } => write!(
+                f,
+                "`{name}` could be {}, so the full path must be used",
+                quoted_list(modules, "or")
+            ),
+            Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
             Self::RecursiveStruct(name) => write!(f, "`{name}` contains itself"),
             Self::Redeclared(name) => write!(f, "`{name}` is already declared"),
             Self::AssignToConstant(name) => {
@@ -205,9 +269,6 @@ impl fmt::Display for CheckError {
                 f,
                 "argument `{param}` of `{function}` expects `{expected}`, found `{found}`"
             ),
-            Self::ReturnOutsideFunction => {
-                write!(f, "`return` can only be used inside a function")
-            }
             Self::MissingReturnValue { function, expected } => {
                 write!(f, "`{function}` must return a value of type `{expected}`")
             }
@@ -224,9 +285,16 @@ impl fmt::Display for CheckError {
     }
 }
 
-pub fn check(program: &Program) -> Result<(), Vec<CheckError>> {
-    let mut checker = Checker::new();
-    checker.top_level(program);
+/// Checks every module in a project, along with the standard library.
+pub fn check(modules: &[Module]) -> Result<(), Vec<ModuleError>> {
+    let mut checker = Checker::default();
+    checker.add_module(STDLIB_NAME.to_string(), &[], STDLIB_NAME, &STDLIB);
+    for module in modules {
+        let name = module.path.last().expect("module paths aren't empty");
+        let display = format!("/{}", module.path.join("/"));
+        checker.add_module(display, &module.path, name, &module.program);
+    }
+    checker.check_modules();
 
     if checker.errors.is_empty() {
         Ok(())
@@ -258,9 +326,29 @@ enum Binding {
         /// that later uses don't report errors caused by the same mistake.
         ty: Option<Type>,
     },
+    /// A top-level value, as an index into `Checker::globals`.
+    Global(usize),
     /// An index into `Checker::functions`.
     Function(usize),
     Type(Type),
+}
+
+/// A value declared at the top level of a module. Its type is worked out when
+/// it's first needed, since top-level values can be used in any order.
+struct Global<'a> {
+    module: usize,
+    name: &'a str,
+    ty: Option<&'a Name>,
+    value: &'a Expr,
+    state: GlobalState,
+}
+
+enum GlobalState {
+    Unchecked,
+    /// Its initialiser is being checked, so needing its type again means it
+    /// depends on itself.
+    Checking,
+    Checked(Option<Type>),
 }
 
 /// The function whose body is being checked.
@@ -271,156 +359,411 @@ struct FnContext<'a> {
     returns: Option<Type>,
 }
 
+struct ModuleInfo<'a> {
+    /// The module's path, such as `/dir/other`, or `stdlib`.
+    display: String,
+    /// The module's path from the project root. Empty for the standard
+    /// library.
+    path: &'a [String],
+    /// The name used to qualify the module's names, such as `other` in
+    /// `other.f`.
+    name: &'a str,
+    program: &'a Program,
+    /// The names declared at the module's top level.
+    scope: HashMap<&'a str, Binding>,
+    /// The other modules whose top-level names this one can use.
+    imports: Vec<usize>,
+}
+
+/// Why `Checker::lookup` couldn't find a name.
+enum LookupError {
+    Undeclared,
+    Captured,
+    /// The name was found in each of these modules.
+    Ambiguous(Vec<String>),
+    /// The name's module couldn't be found.
+    Module(CheckError),
+}
+
+/// A top-level declaration that still needs checking once every module's
+/// names have been declared.
+enum Pending<'a> {
+    Global(usize),
+    Fn {
+        index: usize,
+        name: &'a str,
+        body: &'a [Stmt],
+    },
+}
+
 #[derive(Default)]
 struct Checker<'a> {
-    /// One scope per enclosing block, innermost last. Values, functions and
-    /// types all share the same names.
+    /// The standard library first, then the project's modules.
+    modules: Vec<ModuleInfo<'a>>,
+    /// The index in `modules` of the module being checked.
+    module: usize,
+    /// One scope per enclosing block inside functions, innermost last. Empty
+    /// at the top level, where names are in the module's own scope. Values,
+    /// functions and types all share the same names.
     scopes: Vec<HashMap<&'a str, Binding>>,
-    /// The index in `scopes` of the current function's outermost scope, or 0
-    /// outside of a function. Names can't be redeclared from here inwards, so
-    /// the program can't redeclare the standard library's names at the top
-    /// level, but functions can reuse them like any other outer name.
+    /// The index in `scopes` of the current function's outermost scope. Names
+    /// can't be redeclared from here inwards.
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
+    globals: Vec<Global<'a>>,
     /// For each struct, indexed by `id`, the `id`s of the structs its fields
     /// have as types.
     struct_fields: Vec<Vec<usize>>,
-    errors: Vec<CheckError>,
+    errors: Vec<ModuleError>,
 }
 
 impl<'a> Checker<'a> {
-    /// A checker whose outermost scope holds the standard library.
-    fn new() -> Self {
-        let mut checker = Self::default();
-        checker.top_level(&STDLIB);
-        assert!(
-            checker.errors.is_empty(),
-            "the standard library should check: {:?}",
-            checker.errors
-        );
-        checker
+    fn add_module(
+        &mut self,
+        display: String,
+        path: &'a [String],
+        name: &'a str,
+        program: &'a Program,
+    ) {
+        self.modules.push(ModuleInfo {
+            display,
+            path,
+            name,
+            program,
+            scope: HashMap::new(),
+            imports: vec![],
+        });
+    }
+
+    fn error(&mut self, error: CheckError) {
+        self.error_in(self.module, error);
+    }
+
+    fn error_in(&mut self, module: usize, error: CheckError) {
+        let module = self.modules[module].display.clone();
+        self.errors.push(ModuleError { module, error });
+    }
+
+    /// Checks every module. Each kind of top-level declaration is declared in
+    /// every module before the next kind, and before anything is checked, so
+    /// top-level names can be used in any order.
+    fn check_modules(&mut self) {
+        for module in 0..self.modules.len() {
+            self.module = module;
+            self.resolve_imports();
+        }
+
+        // Every struct is declared before any fields are resolved, so structs
+        // can contain each other in any order.
+        let mut structs = vec![];
+        for module in 0..self.modules.len() {
+            self.module = module;
+            for stmt in self.modules[module].program {
+                if let Stmt::Struct { name, fields } = stmt {
+                    structs.push((module, self.declare_struct(name), name, fields));
+                }
+            }
+        }
+        for &(module, id, _, fields) in &structs {
+            self.module = module;
+            self.define_struct(id, fields);
+        }
+        for &(module, id, name, _) in &structs {
+            self.module = module;
+            self.check_not_recursive(id, name);
+        }
+
+        // Functions and values come after structs, since their types can be
+        // structs.
+        let mut pending = vec![];
+        for module in 0..self.modules.len() {
+            self.module = module;
+            for stmt in self.modules[module].program {
+                match stmt {
+                    Stmt::Fn {
+                        name,
+                        params,
+                        ret,
+                        body,
+                    } => {
+                        let index = self.declare_fn(name, params, ret);
+                        pending.push((module, Pending::Fn { index, name, body }));
+                    }
+                    Stmt::Decl {
+                        name, ty, value, ..
+                    } => {
+                        self.globals.push(Global {
+                            module,
+                            name,
+                            ty: ty.as_ref(),
+                            value,
+                            state: GlobalState::Unchecked,
+                        });
+                        let index = self.globals.len() - 1;
+                        self.declare(name, Binding::Global(index));
+                        pending.push((module, Pending::Global(index)));
+                    }
+                    Stmt::Use(_) | Stmt::Struct { .. } => {}
+                    _ => unreachable!("the parser only allows declarations at the top level"),
+                }
+            }
+        }
+
+        for (module, pending) in pending {
+            self.module = module;
+            match pending {
+                Pending::Global(index) => {
+                    self.global_type(index);
+                }
+                Pending::Fn { index, name, body } => self.fn_body(index, name, body),
+            }
+        }
+    }
+
+    /// Finds the modules imported by the current module. The standard library
+    /// is always imported.
+    fn resolve_imports(&mut self) {
+        let mut imports = vec![];
+        if self.module != 0 {
+            imports.push(0);
+        }
+
+        for stmt in self.modules[self.module].program {
+            let Stmt::Use(path) = stmt else { continue };
+            match self.resolve_path(path) {
+                // Importing a module twice, or importing itself, is harmless.
+                Some(module) if module == self.module || imports.contains(&module) => {}
+                Some(module) => imports.push(module),
+                None => self.error(CheckError::UnknownModule(path.to_string())),
+            }
+        }
+
+        self.modules[self.module].imports = imports;
+    }
+
+    /// Finds the module at `path`, which is relative to the current module if
+    /// it starts with `./`. Only libraries, such as `stdlib`, are found by
+    /// name.
+    fn resolve_path(&self, path: &ModulePath) -> Option<usize> {
+        let full: Vec<&String> = match path {
+            ModulePath::Absolute(segments) => segments.iter().collect(),
+            ModulePath::Relative(segments) => {
+                let current = self.modules[self.module].path;
+                let dir = current.split_last().map_or(current, |(_, dir)| dir);
+                dir.iter().chain(segments).collect()
+            }
+            ModulePath::Named(name) => return (name == STDLIB_NAME).then_some(0),
+        };
+        self.modules
+            .iter()
+            .position(|module| module.path.iter().eq(full.iter().copied()))
+    }
+
+    /// The modules whose top-level names the current module can use: itself,
+    /// then its imports.
+    fn visible_modules(&self) -> impl Iterator<Item = usize> + '_ {
+        iter::once(self.module).chain(self.modules[self.module].imports.iter().copied())
+    }
+
+    /// Finds the module a qualified name refers to. It must be the current
+    /// module or one it imports.
+    fn resolve_qualifier(&self, path: &ModulePath) -> Result<usize, CheckError> {
+        if let ModulePath::Named(name) = path {
+            let matches: Vec<_> = self
+                .visible_modules()
+                .filter(|&module| self.modules[module].name == name)
+                .collect();
+            return match matches[..] {
+                [] => Err(CheckError::NotImported(name.clone())),
+                [module] => Ok(module),
+                _ => Err(CheckError::AmbiguousModule {
+                    name: name.clone(),
+                    modules: matches
+                        .iter()
+                        .map(|&module| self.modules[module].display.clone())
+                        .collect(),
+                }),
+            };
+        }
+
+        self.resolve_path(path)
+            .filter(|module| self.visible_modules().any(|visible| visible == *module))
+            .ok_or_else(|| CheckError::NotImported(path.to_string()))
     }
 
     /// A type from the standard library, such as `Int` for integer literals.
-    /// Found in the standard library's own scope, so it can't be shadowed.
+    /// Found in the standard library itself, so it can't be shadowed.
     fn std_type(&self, name: &str) -> Type {
-        match self.scopes[0].get(name) {
+        match self.modules[0].scope.get(name) {
             Some(Binding::Type(ty)) => ty.clone(),
             _ => panic!("the standard library should declare `{name}`"),
         }
     }
 
-    /// Finds the closest declaration of `name`, along with the index of the
-    /// scope it's in.
-    fn find(&self, name: &str) -> Option<(usize, &Binding)> {
-        self.scopes
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, scope)| scope.get(name).map(|binding| (index, binding)))
+    fn lookup(&self, name: &Name) -> Result<Binding, LookupError> {
+        let binding = match &name.module {
+            Some(path) => {
+                let module = self.resolve_qualifier(path).map_err(LookupError::Module)?;
+                self.modules[module]
+                    .scope
+                    .get(name.name.as_str())
+                    .ok_or(LookupError::Undeclared)?
+            }
+            None => {
+                let local = self
+                    .scopes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, scope)| scope.get(name.name.as_str()).map(|b| (index, b)));
+                match local {
+                    // Functions can't capture values from outside them.
+                    // Functions and types can still be used, since they never
+                    // depend on a value.
+                    Some((index, Binding::Value { .. })) if index < self.fn_scope_start => {
+                        return Err(LookupError::Captured);
+                    }
+                    Some((_, binding)) => return Ok(binding.clone()),
+                    None => {}
+                }
+
+                // A name that isn't qualified must only be declared in one of
+                // the modules it could come from.
+                let found: Vec<_> = self
+                    .visible_modules()
+                    .filter_map(|module| {
+                        let binding = self.modules[module].scope.get(name.name.as_str())?;
+                        Some((module, binding))
+                    })
+                    .collect();
+                match found[..] {
+                    [] => return Err(LookupError::Undeclared),
+                    [(_, binding)] => binding,
+                    _ => {
+                        let modules = found
+                            .iter()
+                            .map(|&(module, _)| self.modules[module].display.clone())
+                            .collect();
+                        return Err(LookupError::Ambiguous(modules));
+                    }
+                }
+            }
+        };
+
+        // Top-level values are outside every function.
+        if matches!(binding, Binding::Global(_)) && self.current_fn.is_some() {
+            return Err(LookupError::Captured);
+        }
+        Ok(binding.clone())
     }
 
-    fn lookup(&self, name: &str) -> Option<Binding> {
-        match self.find(name)? {
-            // Functions can't capture values from outside them. Functions and
-            // types can still be used, since they never depend on a value.
-            (index, Binding::Value { .. }) if index < self.fn_scope_start => None,
-            (_, binding) => Some(binding.clone()),
-        }
-    }
-
-    /// The error for a name that `lookup` couldn't find.
-    fn undeclared(&self, name: &str) -> CheckError {
-        if self.find(name).is_some() {
-            CheckError::Captured(name.to_string())
-        } else {
-            CheckError::Undeclared(name.to_string())
-        }
+    /// Reports why `name` couldn't be found.
+    fn lookup_error(&mut self, name: &Name, error: LookupError) {
+        let name_string = name.to_string();
+        let error = match error {
+            LookupError::Undeclared => CheckError::Undeclared(name_string),
+            LookupError::Captured => CheckError::Captured(name_string),
+            LookupError::Ambiguous(modules) => CheckError::Ambiguous {
+                name: name_string,
+                modules,
+            },
+            LookupError::Module(error) => error,
+        };
+        self.error(error);
     }
 
     fn declare(&mut self, name: &'a str, binding: Binding) {
         // Names can't be redeclared within a function, even to shadow an
         // outer block. A function's own scope can reuse names from outside it.
-        if self.scopes[self.fn_scope_start..]
-            .iter()
-            .any(|scope| scope.contains_key(name))
-        {
-            self.errors.push(CheckError::Redeclared(name.to_string()));
-        }
-
-        let scope = self.scopes.last_mut().expect("always in a scope");
+        // At the top level, names only need to be unique within their module.
+        let scope = match self.scopes.last_mut() {
+            Some(_) => {
+                if self.scopes[self.fn_scope_start..]
+                    .iter()
+                    .any(|scope| scope.contains_key(name))
+                {
+                    self.error(CheckError::Redeclared(name.to_string()));
+                }
+                self.scopes.last_mut().expect("checked above")
+            }
+            None => {
+                if self.modules[self.module].scope.contains_key(name) {
+                    self.error(CheckError::Redeclared(name.to_string()));
+                }
+                &mut self.modules[self.module].scope
+            }
+        };
         scope.insert(name, binding);
     }
 
-    fn resolve_type(&mut self, name: &str) -> Option<Type> {
+    fn resolve_type(&mut self, name: &Name) -> Option<Type> {
         match self.lookup(name) {
-            Some(Binding::Type(ty)) => Some(ty),
-            Some(_) => {
-                self.errors.push(CheckError::NotAType(name.to_string()));
-                None
-            }
+            Ok(Binding::Type(ty)) => Some(ty),
             // A value from outside the function is still not a type.
-            None if self.find(name).is_some() => {
-                self.errors.push(CheckError::NotAType(name.to_string()));
+            Ok(_) | Err(LookupError::Captured) => {
+                self.error(CheckError::NotAType(name.to_string()));
                 None
             }
-            None => {
-                self.errors.push(CheckError::UnknownType(name.to_string()));
+            Err(LookupError::Undeclared) => {
+                self.error(CheckError::UnknownType(name.to_string()));
+                None
+            }
+            Err(error) => {
+                self.lookup_error(name, error);
                 None
             }
         }
     }
 
-    /// Checks top-level statements in a new scope, declaring their structs
-    /// and functions before anything else. The scope is left open, so that
-    /// the standard library stays visible to the program.
-    fn top_level(&mut self, program: &'a [Stmt]) {
-        self.scopes.push(HashMap::new());
-
-        // Every struct is declared before any fields are resolved, so structs
-        // can contain each other in any order.
-        let structs: Vec<_> = program
-            .iter()
-            .filter_map(|stmt| match stmt {
-                Stmt::Struct { name, fields } => Some((self.declare_struct(name), name, fields)),
-                _ => None,
-            })
-            .collect();
-        for (id, _, fields) in &structs {
-            self.define_struct(*id, fields);
-        }
-        for (id, name, _) in &structs {
-            self.check_not_recursive(*id, name);
-        }
-
-        // Functions are declared after structs, since their signatures can
-        // use them.
-        let mut functions = program
-            .iter()
-            .filter_map(|stmt| match stmt {
-                Stmt::Fn {
-                    name, params, ret, ..
-                } => Some(self.declare_fn(name, params, ret)),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .into_iter();
-
-        for stmt in program {
-            match stmt {
-                Stmt::Fn { name, body, .. } => {
-                    let index = functions.next().expect("declared above");
-                    self.fn_body(index, name, body);
-                }
-                Stmt::Struct { .. } => {}
-                _ => self.stmt(stmt),
+    /// The type of the top-level value at `index` in `globals`, checking its
+    /// declaration if that hasn't been done yet.
+    fn global_type(&mut self, index: usize) -> Option<Type> {
+        let global = &self.globals[index];
+        match &global.state {
+            GlobalState::Checked(ty) => return ty.clone(),
+            GlobalState::Checking => {
+                let error = CheckError::CyclicValue(global.name.to_string());
+                self.error_in(global.module, error);
+                return None;
             }
+            GlobalState::Unchecked => {}
+        }
+
+        // Checked as part of its own module, even when another module needs
+        // it first. Top-level values are only used at the top level, so
+        // there are no local scopes to set aside.
+        let (module, name, type_name, value) =
+            (global.module, global.name, global.ty, global.value);
+        self.globals[index].state = GlobalState::Checking;
+        let outer_module = std::mem::replace(&mut self.module, module);
+        let ty = self.decl_type(name, type_name, value);
+        self.module = outer_module;
+
+        self.globals[index].state = GlobalState::Checked(ty.clone());
+        ty
+    }
+
+    /// Checks a `let` or `var` declaration's value, returning the type it's
+    /// declared with.
+    fn decl_type(&mut self, name: &str, type_name: Option<&Name>, value: &Expr) -> Option<Type> {
+        // Checked first so that `let x = x` refers to an earlier `x`.
+        let found = self.expr(value);
+
+        // An explicit type takes precedence over the value's type, so later
+        // uses are checked against what the programmer wrote.
+        match type_name {
+            Some(type_name) => {
+                let expected = self.resolve_type(type_name);
+                self.check_assignable(name, expected.clone(), found);
+                expected
+            }
+            None => found,
         }
     }
 
     /// Declares a function, returning its index into `functions`.
-    fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &str) -> usize {
+    fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &Name) -> usize {
         let params = params
             .iter()
             .map(|param| ParamSignature {
@@ -470,7 +813,7 @@ impl<'a> Checker<'a> {
             && expected != self.std_type("Void")
             && !always_returns(body)
         {
-            self.errors.push(CheckError::MissingReturn {
+            self.error(CheckError::MissingReturn {
                 function: name.to_string(),
                 expected,
             });
@@ -495,7 +838,7 @@ impl<'a> Checker<'a> {
         let mut field_names = HashSet::new();
         for field in fields {
             if !field_names.insert(&field.name) {
-                self.errors.push(CheckError::Redeclared(field.name.clone()));
+                self.error(CheckError::Redeclared(field.name.clone()));
             }
             if let Some(ty) = self.resolve_type(&field.ty) {
                 self.struct_fields[id].push(ty.id);
@@ -510,8 +853,7 @@ impl<'a> Checker<'a> {
         let mut unvisited = self.struct_fields[id].clone();
         while let Some(next) = unvisited.pop() {
             if next == id {
-                self.errors
-                    .push(CheckError::RecursiveStruct(name.to_string()));
+                self.error(CheckError::RecursiveStruct(name.to_string()));
                 return;
             }
             if seen.insert(next) {
@@ -530,28 +872,17 @@ impl<'a> Checker<'a> {
         self.scopes.pop();
     }
 
+    /// Checks a statement inside a function.
     fn stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
+            Stmt::Use(_) => unreachable!("the parser only allows `use` at the top level"),
             Stmt::Decl {
                 mutability,
                 name,
                 ty: type_name,
                 value,
             } => {
-                // Checked first so that `let x = x` refers to an earlier `x`.
-                let found = self.expr(value);
-
-                // An explicit type takes precedence over the value's type, so
-                // later uses are checked against what the programmer wrote.
-                let ty = match type_name {
-                    Some(type_name) => {
-                        let expected = self.resolve_type(type_name);
-                        self.check_assignable(name, expected.clone(), found);
-                        expected
-                    }
-                    None => found,
-                };
-
+                let ty = self.decl_type(name, type_name.as_ref(), value);
                 let binding = Binding::Value {
                     mutability: *mutability,
                     ty,
@@ -560,27 +891,28 @@ impl<'a> Checker<'a> {
             }
             Stmt::Assign { name, value } => {
                 let found = self.expr(value);
-                match self.lookup(name) {
-                    Some(Binding::Value {
+                let target = Name::new(name);
+                match self.lookup(&target) {
+                    Ok(Binding::Value {
                         mutability: Mutability::Var,
                         ty: expected,
                     }) => self.check_assignable(name, expected, found),
-                    Some(Binding::Value {
+                    Ok(Binding::Value {
                         mutability: Mutability::Let,
                         ..
                     }) => {
-                        self.errors.push(CheckError::AssignToConstant(name.clone()));
+                        self.error(CheckError::AssignToConstant(name.clone()));
                     }
-                    Some(Binding::Function(_)) => {
-                        self.errors.push(CheckError::NotAValue(name.clone()));
+                    Ok(Binding::Function(_)) => {
+                        self.error(CheckError::NotAValue(name.clone()));
                     }
-                    Some(Binding::Type(_)) => {
-                        self.errors.push(CheckError::TypeAsValue(name.clone()));
+                    Ok(Binding::Type(_)) => {
+                        self.error(CheckError::TypeAsValue(name.clone()));
                     }
-                    None => {
-                        let err = self.undeclared(name);
-                        self.errors.push(err);
-                    }
+                    // `lookup` never finds top-level values from inside a
+                    // function, which is the only place assignments can be.
+                    Ok(Binding::Global(_)) => self.lookup_error(&target, LookupError::Captured),
+                    Err(error) => self.lookup_error(&target, error),
                 }
             }
             Stmt::If {
@@ -591,7 +923,7 @@ impl<'a> Checker<'a> {
                 if let Some(found) = self.expr(cond)
                     && found != self.std_type("Bool")
                 {
-                    self.errors.push(CheckError::ConditionNotBool(found));
+                    self.error(CheckError::ConditionNotBool(found));
                 }
 
                 self.block(then_block);
@@ -599,8 +931,8 @@ impl<'a> Checker<'a> {
                     self.block(else_block);
                 }
             }
-            // Outside the top level, functions and structs are only visible
-            // after they're declared.
+            // Inside functions, functions and structs are only visible after
+            // they're declared.
             Stmt::Fn {
                 name,
                 params,
@@ -618,20 +950,19 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
-                let Some(FnContext { name, returns }) = self.current_fn.clone() else {
-                    self.errors.push(CheckError::ReturnOutsideFunction);
-                    return;
-                };
+                let FnContext { name, returns } = self
+                    .current_fn
+                    .clone()
+                    .expect("statements are only checked inside functions");
 
                 // A bare `return` returns `Void`.
                 let function = name.to_string();
                 match (returns, found) {
                     (Some(expected), None) if expected != self.std_type("Void") => {
-                        self.errors
-                            .push(CheckError::MissingReturnValue { function, expected });
+                        self.error(CheckError::MissingReturnValue { function, expected });
                     }
                     (Some(expected), Some(Some(found))) if expected != found => {
-                        self.errors.push(CheckError::ReturnTypeMismatch {
+                        self.error(CheckError::ReturnTypeMismatch {
                             function,
                             expected,
                             found,
@@ -659,18 +990,18 @@ impl<'a> Checker<'a> {
             Expr::Int(_) => Some(self.std_type("Int")),
             Expr::Bool(_) => Some(self.std_type("Bool")),
             Expr::Var(name) => match self.lookup(name) {
-                Some(Binding::Value { ty, .. }) => ty,
-                Some(Binding::Function(_)) => {
-                    self.errors.push(CheckError::NotAValue(name.clone()));
+                Ok(Binding::Value { ty, .. }) => ty,
+                Ok(Binding::Global(index)) => self.global_type(index),
+                Ok(Binding::Function(_)) => {
+                    self.error(CheckError::NotAValue(name.to_string()));
                     None
                 }
-                Some(Binding::Type(_)) => {
-                    self.errors.push(CheckError::TypeAsValue(name.clone()));
+                Ok(Binding::Type(_)) => {
+                    self.error(CheckError::TypeAsValue(name.to_string()));
                     None
                 }
-                None => {
-                    let err = self.undeclared(name);
-                    self.errors.push(err);
+                Err(error) => {
+                    self.lookup_error(name, error);
                     None
                 }
             },
@@ -693,28 +1024,27 @@ impl<'a> Checker<'a> {
 
     /// Checks a call, returning the function's return type, or `None` if it
     /// can't be determined.
-    fn call(&mut self, callee: &str, args: &[Arg]) -> Option<Type> {
+    fn call(&mut self, callee: &Name, args: &[Arg]) -> Option<Type> {
         // Arguments are checked first, so their errors come before the call's.
         let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
 
         let index = match self.lookup(callee) {
-            Some(Binding::Function(index)) => index,
-            Some(Binding::Value { .. } | Binding::Type(_)) => {
-                self.errors
-                    .push(CheckError::NotAFunction(callee.to_string()));
+            Ok(Binding::Function(index)) => index,
+            Ok(Binding::Value { .. } | Binding::Global(_) | Binding::Type(_)) => {
+                self.error(CheckError::NotAFunction(callee.to_string()));
                 return None;
             }
-            None => {
-                let err = self.undeclared(callee);
-                self.errors.push(err);
+            Err(error) => {
+                self.lookup_error(callee, error);
                 return None;
             }
         };
         let signature = self.functions[index].clone();
+        let function = callee.to_string();
 
         if args.len() != signature.params.len() {
-            self.errors.push(CheckError::WrongArgumentCount {
-                function: callee.to_string(),
+            self.error(CheckError::WrongArgumentCount {
+                function,
                 expected: signature.params.len(),
                 found: args.len(),
             });
@@ -723,16 +1053,16 @@ impl<'a> Checker<'a> {
 
         for ((arg, found), param) in args.iter().zip(found).zip(&signature.params) {
             if arg.label.as_deref() != param.label {
-                self.errors.push(CheckError::WrongLabel {
-                    function: callee.to_string(),
+                self.error(CheckError::WrongLabel {
+                    function: function.clone(),
                     expected: param.label.map(str::to_string),
                     found: arg.label.clone(),
                 });
             } else if let (Some(expected), Some(found)) = (&param.ty, found)
                 && *expected != found
             {
-                self.errors.push(CheckError::ArgumentTypeMismatch {
-                    function: callee.to_string(),
+                self.error(CheckError::ArgumentTypeMismatch {
+                    function: function.clone(),
                     param: param.label.unwrap_or(param.name).to_string(),
                     expected: expected.clone(),
                     found,
@@ -749,7 +1079,7 @@ impl<'a> Checker<'a> {
         if let (Some(expected), Some(found)) = (expected, found)
             && expected != found
         {
-            self.errors.push(CheckError::AssignTypeMismatch {
+            self.error(CheckError::AssignTypeMismatch {
                 name: name.to_string(),
                 expected,
                 found,
@@ -761,7 +1091,7 @@ impl<'a> Checker<'a> {
         if let Some(found) = self.expr(operand)
             && found != expected
         {
-            self.errors.push(CheckError::InvalidOperand {
+            self.error(CheckError::InvalidOperand {
                 op,
                 expected,
                 found,
@@ -809,11 +1139,49 @@ mod tests {
 
     /// The standard library type called `name`.
     fn ty(name: &str) -> Type {
-        Checker::new().std_type(name)
+        let mut checker = Checker::default();
+        checker.add_module(STDLIB_NAME.to_string(), &[], STDLIB_NAME, &STDLIB);
+        checker.check_modules();
+        checker.std_type(name)
     }
 
-    fn check_src(src: &str) -> Result<(), Vec<CheckError>> {
-        check(&parse(src).expect("source should parse"))
+    /// Checks each `(path, src)` pair as a module, with paths like
+    /// `/dir/other`.
+    fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<ModuleError>> {
+        let modules: Vec<_> = files
+            .iter()
+            .map(|(path, src)| Module {
+                path: path[1..].split('/').map(str::to_string).collect(),
+                program: parse(src).expect("source should parse"),
+            })
+            .collect();
+        check(&modules)
+    }
+
+    fn file_messages(files: &[(&str, &str)]) -> Vec<String> {
+        match check_files(files) {
+            Ok(()) => vec![],
+            Err(errs) => errs.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Checks `src` as the only module, `/main`.
+    fn check_top(src: &str) -> Result<(), Vec<CheckError>> {
+        check_files(&[("/main", src)])
+            .map_err(|errs| errs.into_iter().map(|err| err.error).collect())
+    }
+
+    fn messages_top(src: &str) -> Vec<String> {
+        match check_top(src) {
+            Ok(()) => vec![],
+            Err(errs) => errs.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Checks `src` as the body of a function, since statements other than
+    /// declarations aren't allowed at the top level.
+    fn check_body(src: &str) -> Result<(), Vec<CheckError>> {
+        check_top(&format!("fn body() {{\n{src}\n}}"))
     }
 
     fn invalid_operand(op: &'static str) -> CheckError {
@@ -826,18 +1194,21 @@ mod tests {
 
     #[test]
     fn accepts_valid_program() {
-        assert_eq!(check_src("let x = 1\nvar y = x\ny = y + x\ny = -y"), Ok(()));
+        assert_eq!(
+            check_body("let x = 1\nvar y = x\ny = y + x\ny = -y"),
+            Ok(())
+        );
     }
 
     #[test]
     fn accepts_booleans() {
-        assert_eq!(check_src("let t = true\nvar b = t\nb = false"), Ok(()));
+        assert_eq!(check_body("let t = true\nvar b = t\nb = false"), Ok(()));
     }
 
     #[test]
     fn accepts_boolean_operators() {
         assert_eq!(
-            check_src("let t = true\nvar b = !t & (false | t)\nb = !!b | b"),
+            check_body("let t = true\nvar b = !t & (false | t)\nb = !!b | b"),
             Ok(())
         );
     }
@@ -850,10 +1221,10 @@ mod tests {
             found: ty("Int"),
         };
 
-        assert_eq!(check_src("let x = !1"), Err(vec![invalid("!")]));
-        assert_eq!(check_src("let x = true & 1"), Err(vec![invalid("&")]));
+        assert_eq!(check_body("let x = !1"), Err(vec![invalid("!")]));
+        assert_eq!(check_body("let x = true & 1"), Err(vec![invalid("&")]));
         assert_eq!(
-            check_src("let x = 1 | 2"),
+            check_body("let x = 1 | 2"),
             Err(vec![invalid("|"), invalid("|")])
         );
     }
@@ -861,11 +1232,11 @@ mod tests {
     #[test]
     fn boolean_operators_produce_booleans() {
         assert_eq!(
-            check_src("let x = (true | false) + 1"),
+            check_body("let x = (true | false) + 1"),
             Err(vec![invalid_operand("+")])
         );
         assert_eq!(
-            check_src("var n = 0\nn = !false"),
+            check_body("var n = 0\nn = !false"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "n".to_string(),
                 expected: ty("Int"),
@@ -878,13 +1249,16 @@ mod tests {
     fn rejects_mixing_negations() {
         // `-` needs an `Int` and `!` needs a `Bool`, so `-!x` and `!-x` can
         // never be valid.
-        assert_eq!(check_src("let x = -!true"), Err(vec![invalid_operand("-")]));
+        assert_eq!(
+            check_body("let x = -!true"),
+            Err(vec![invalid_operand("-")])
+        );
     }
 
     #[test]
     fn rejects_assignment_without_declaration() {
         assert_eq!(
-            check_src("x = 1"),
+            check_body("x = 1"),
             Err(vec![CheckError::Undeclared("x".to_string())])
         );
     }
@@ -892,7 +1266,7 @@ mod tests {
     #[test]
     fn rejects_assignment_to_constant() {
         assert_eq!(
-            check_src("let x = 1\nx = 2"),
+            check_body("let x = 1\nx = 2"),
             Err(vec![CheckError::AssignToConstant("x".to_string())])
         );
     }
@@ -900,7 +1274,7 @@ mod tests {
     #[test]
     fn rejects_use_of_undeclared_name() {
         assert_eq!(
-            check_src("let x = y + 1"),
+            check_body("let x = y + 1"),
             Err(vec![CheckError::Undeclared("y".to_string())])
         );
     }
@@ -908,7 +1282,7 @@ mod tests {
     #[test]
     fn rejects_self_reference_in_declaration() {
         assert_eq!(
-            check_src("var x = x"),
+            check_body("var x = x"),
             Err(vec![CheckError::Undeclared("x".to_string())])
         );
     }
@@ -921,7 +1295,7 @@ mod tests {
             "let x = 1\nvar x = 2",
         ] {
             assert_eq!(
-                check_src(src),
+                check_body(src),
                 Err(vec![CheckError::Redeclared("x".to_string())]),
                 "{src:?}"
             );
@@ -931,20 +1305,20 @@ mod tests {
     #[test]
     fn rejects_arithmetic_on_booleans() {
         assert_eq!(
-            check_src("let x = true + 1"),
+            check_body("let x = true + 1"),
             Err(vec![invalid_operand("+")])
         );
         assert_eq!(
-            check_src("let x = 1 - false"),
+            check_body("let x = 1 - false"),
             Err(vec![invalid_operand("-")])
         );
-        assert_eq!(check_src("let x = -true"), Err(vec![invalid_operand("-")]));
+        assert_eq!(check_body("let x = -true"), Err(vec![invalid_operand("-")]));
         assert_eq!(
-            check_src("let x = 4 / (true)"),
+            check_body("let x = 4 / (true)"),
             Err(vec![invalid_operand("/")])
         );
         assert_eq!(
-            check_src("let b = true\nlet x = b * b"),
+            check_body("let b = true\nlet x = b * b"),
             Err(vec![invalid_operand("*"), invalid_operand("*")])
         );
     }
@@ -952,7 +1326,7 @@ mod tests {
     #[test]
     fn rejects_assignment_of_different_type() {
         assert_eq!(
-            check_src("var x = 1\nx = true"),
+            check_body("var x = 1\nx = true"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "x".to_string(),
                 expected: ty("Int"),
@@ -960,7 +1334,7 @@ mod tests {
             }])
         );
         assert_eq!(
-            check_src("var b = false\nb = 1 + 2"),
+            check_body("var b = false\nb = 1 + 2"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "b".to_string(),
                 expected: ty("Bool"),
@@ -973,11 +1347,11 @@ mod tests {
     fn does_not_cascade_errors() {
         // `x` has no known type, so later uses of it report nothing further.
         assert_eq!(
-            check_src("var x = y\nlet z = x + 1\nx = true"),
+            check_body("var x = y\nlet z = x + 1\nx = true"),
             Err(vec![CheckError::Undeclared("y".to_string())])
         );
         assert_eq!(
-            check_src("let x = -true\nlet y = x + 1"),
+            check_body("let x = -true\nlet y = x + 1"),
             Err(vec![invalid_operand("-")])
         );
     }
@@ -985,7 +1359,7 @@ mod tests {
     #[test]
     fn type_errors_use_type_names() {
         let messages = |src| {
-            check_src(src)
+            check_body(src)
                 .unwrap_err()
                 .iter()
                 .map(ToString::to_string)
@@ -1010,7 +1384,7 @@ mod tests {
     #[test]
     fn accepts_matching_explicit_types() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let x: Int = 3
                 var y: Bool = true
@@ -1026,7 +1400,7 @@ mod tests {
     #[test]
     fn rejects_value_of_wrong_explicit_type() {
         assert_eq!(
-            check_src("let x: Int = true"),
+            check_body("let x: Int = true"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "x".to_string(),
                 expected: ty("Int"),
@@ -1034,7 +1408,7 @@ mod tests {
             }])
         );
         assert_eq!(
-            check_src("var y: Bool = 1 + 2"),
+            check_body("var y: Bool = 1 + 2"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "y".to_string(),
                 expected: ty("Bool"),
@@ -1047,7 +1421,7 @@ mod tests {
     fn rejects_unknown_types() {
         for name in ["Foo", "int", "bool", "x"] {
             assert_eq!(
-                check_src(&format!("let x: {name} = 1")),
+                check_body(&format!("let x: {name} = 1")),
                 Err(vec![CheckError::UnknownType(name.to_string())]),
                 "{name:?}"
             );
@@ -1058,7 +1432,7 @@ mod tests {
     fn explicit_type_is_used_after_a_mismatch() {
         // `x` is an `Int` as written, so only the declaration is an error.
         assert_eq!(
-            check_src("var x: Int = true\nx = 1\nlet y = x + 1"),
+            check_body("var x: Int = true\nx = 1\nlet y = x + 1"),
             Err(vec![CheckError::AssignTypeMismatch {
                 name: "x".to_string(),
                 expected: ty("Int"),
@@ -1070,20 +1444,30 @@ mod tests {
     #[test]
     fn unknown_type_does_not_cascade() {
         assert_eq!(
-            check_src("var x: Foo = 1\nx = true\nlet y = x + 1"),
+            check_body("var x: Foo = 1\nx = true\nlet y = x + 1"),
             Err(vec![CheckError::UnknownType("Foo".to_string())])
         );
     }
 
     #[test]
-    fn std_names_cannot_be_redeclared_at_the_top_level() {
+    fn redeclaring_std_names_makes_them_ambiguous() {
+        // `/main` and `stdlib` are different modules, so both can declare
+        // `Int`, but then it must be qualified.
         assert_eq!(
-            check_src("let Int: Int = 1\nvar Bool = true\nfn Void() {}"),
-            Err(vec![
-                CheckError::Redeclared("Void".to_string()),
-                CheckError::Redeclared("Int".to_string()),
-                CheckError::Redeclared("Bool".to_string()),
-            ])
+            check_top(
+                "
+                struct Int {}
+                let a: Int = 1
+                let b: stdlib.Int = 1
+                fn f(_ x: main.Int) -> stdlib.Bool {
+                    return true
+                }
+                "
+            ),
+            Err(vec![CheckError::Ambiguous {
+                name: "Int".to_string(),
+                modules: vec!["/main".to_string(), "stdlib".to_string()],
+            }])
         );
     }
 
@@ -1091,7 +1475,7 @@ mod tests {
     fn functions_can_reuse_std_names() {
         // Like any other outer name.
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(Int: Int) {
                     let Bool = 1
@@ -1105,7 +1489,7 @@ mod tests {
     #[test]
     fn std_types_are_structs() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct Wrapper {
                     let int: Int
@@ -1128,7 +1512,7 @@ mod tests {
     #[test]
     fn accepts_if_else() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let a = true
                 var x = 0
@@ -1148,16 +1532,16 @@ mod tests {
     #[test]
     fn rejects_non_boolean_condition() {
         assert_eq!(
-            check_src("if 1 + 2 {}"),
+            check_body("if 1 + 2 {}"),
             Err(vec![CheckError::ConditionNotBool(ty("Int"))])
         );
         assert_eq!(
-            check_src("if true {} else if 0 {}"),
+            check_body("if true {} else if 0 {}"),
             Err(vec![CheckError::ConditionNotBool(ty("Int"))])
         );
         // An undeclared condition is only reported once.
         assert_eq!(
-            check_src("if c {}"),
+            check_body("if c {}"),
             Err(vec![CheckError::Undeclared("c".to_string())])
         );
     }
@@ -1165,7 +1549,7 @@ mod tests {
     #[test]
     fn checks_statements_inside_blocks() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let x = 1
                 if true {
@@ -1185,7 +1569,7 @@ mod tests {
     #[test]
     fn blocks_can_use_and_assign_outer_names() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let a = 1
                 var b = 2
@@ -1203,7 +1587,7 @@ mod tests {
     #[test]
     fn block_declarations_are_not_visible_outside() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 if true {
                     let y = 1
@@ -1214,7 +1598,7 @@ mod tests {
             Err(vec![CheckError::Undeclared("y".to_string())])
         );
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 if true {
                     let y = 1
@@ -1230,7 +1614,7 @@ mod tests {
     #[test]
     fn separate_blocks_can_reuse_names() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 if true {
                     let y = 1
@@ -1247,7 +1631,7 @@ mod tests {
     #[test]
     fn rejects_shadowing_outer_names() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let x = 1
                 if true {
@@ -1262,7 +1646,7 @@ mod tests {
     #[test]
     fn reports_every_error() {
         assert_eq!(
-            check_src("let x = 1\nx = 2\ny = z"),
+            check_body("let x = 1\nx = 2\ny = z"),
             Err(vec![
                 CheckError::AssignToConstant("x".to_string()),
                 CheckError::Undeclared("z".to_string()),
@@ -1272,7 +1656,7 @@ mod tests {
     }
 
     fn messages(src: &str) -> Vec<String> {
-        match check_src(src) {
+        match check_body(src) {
             Ok(()) => vec![],
             Err(errs) => errs.iter().map(ToString::to_string).collect(),
         }
@@ -1281,7 +1665,7 @@ mod tests {
     #[test]
     fn accepts_function_definition_and_calls() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn addFive(to value: Int) -> Int {
                     return value + 5
@@ -1298,7 +1682,7 @@ mod tests {
     #[test]
     fn accepts_all_label_forms() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(a: Int, to b: Bool, _ c: Int) -> Bool {
                     return b & !b | b
@@ -1313,7 +1697,7 @@ mod tests {
     #[test]
     fn accepts_function_without_return_type() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn reset() {
                     var count = 1
@@ -1348,7 +1732,7 @@ mod tests {
         );
         // Not even from an enclosing function, or a block around them.
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn outer(x: Int) {
                     let y = 1
@@ -1375,7 +1759,7 @@ mod tests {
     #[test]
     fn functions_can_use_outer_functions_and_types() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn outer() {
                     struct Point {}
@@ -1394,7 +1778,7 @@ mod tests {
     #[test]
     fn functions_can_recurse() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn sum(upTo n: Int, acc: Int) -> Int {
                     return sum(upTo: n - 1, acc: acc + n)
@@ -1408,7 +1792,7 @@ mod tests {
     #[test]
     fn top_level_functions_can_be_used_in_any_order() {
         assert_eq!(
-            check_src(
+            check_top(
                 "
                 let x: Int = f()
                 fn f() -> Int {
@@ -1447,7 +1831,7 @@ mod tests {
             ",
         ] {
             assert_eq!(
-                check_src(src),
+                check_body(src),
                 Err(vec![CheckError::Undeclared("f".to_string())]),
                 "{src:?}"
             );
@@ -1457,7 +1841,7 @@ mod tests {
     #[test]
     fn parameters_are_constants() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(x: Int) {
                     x = 2
@@ -1471,7 +1855,7 @@ mod tests {
     #[test]
     fn function_scope_is_not_visible_outside() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(x: Int) {
                     let y = x
@@ -1490,7 +1874,7 @@ mod tests {
     #[test]
     fn functions_can_reuse_outer_names() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let x = true
                 fn f(x: Int) -> Int {
@@ -1507,11 +1891,11 @@ mod tests {
     #[test]
     fn rejects_redeclaration_within_function() {
         assert_eq!(
-            check_src("fn f(x: Int, x: Int) {}"),
+            check_body("fn f(x: Int, x: Int) {}"),
             Err(vec![CheckError::Redeclared("x".to_string())])
         );
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(x: Int) {
                     let x = 1
@@ -1522,7 +1906,7 @@ mod tests {
         );
         // Blocks inside a function still can't shadow.
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(x: Int) {
                     if true {
@@ -1535,7 +1919,7 @@ mod tests {
         );
         // Functions share names with values.
         assert_eq!(
-            check_src("let f = 1\nfn f() {}"),
+            check_body("let f = 1\nfn f() {}"),
             Err(vec![CheckError::Redeclared("f".to_string())])
         );
     }
@@ -1601,7 +1985,7 @@ mod tests {
     #[test]
     fn checks_arguments_even_when_call_is_wrong() {
         assert_eq!(
-            check_src("fn f() {}\nf(x)\nlet y = 1\ny(z)"),
+            check_body("fn f() {}\nf(x)\nlet y = 1\ny(z)"),
             Err(vec![
                 CheckError::Undeclared("x".to_string()),
                 CheckError::WrongArgumentCount {
@@ -1701,7 +2085,7 @@ mod tests {
     #[test]
     fn explicit_void_is_the_same_as_no_return_type() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn a() -> Void {}
                 fn b() {}
@@ -1721,7 +2105,7 @@ mod tests {
     #[test]
     fn void_functions_can_return_void_values() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn log() {}
                 fn wrapper() -> Void {
@@ -1739,7 +2123,7 @@ mod tests {
     #[test]
     fn void_can_be_used_like_other_types() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn take(_ v: Void) -> Void {
                     return v
@@ -1772,33 +2156,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_return_outside_function() {
-        assert_eq!(
-            messages(
-                "
-                return
-                if true {
-                    return 1
-                }
-                "
-            ),
-            [
-                "`return` can only be used inside a function",
-                "`return` can only be used inside a function",
-            ]
-        );
-    }
-
-    #[test]
     fn requires_return_on_every_path() {
         let missing = |function: &str| CheckError::MissingReturn {
             function: function.to_string(),
             expected: ty("Int"),
         };
 
-        assert_eq!(check_src("fn f() -> Int {}"), Err(vec![missing("f")]));
+        assert_eq!(check_body("fn f() -> Int {}"), Err(vec![missing("f")]));
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(c: Bool) -> Int {
                     if c {
@@ -1810,7 +2176,7 @@ mod tests {
             Err(vec![missing("f")])
         );
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(c: Bool) -> Int {
                     if c {
@@ -1828,7 +2194,7 @@ mod tests {
     #[test]
     fn accepts_return_on_every_path() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f(c: Bool) -> Int {
                     if c {
@@ -1854,7 +2220,7 @@ mod tests {
     #[test]
     fn structs_can_be_used_as_types() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct User {
                     let age: Int
@@ -1881,7 +2247,7 @@ mod tests {
     #[test]
     fn accepts_empty_and_void_structs() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct Empty {}
                 struct Nothing {
@@ -1961,7 +2327,7 @@ mod tests {
     #[test]
     fn rejects_unknown_field_types() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct User {
                     let age: int
@@ -1979,7 +2345,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_fields() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct User {
                     let age: Int
@@ -1994,7 +2360,7 @@ mod tests {
     #[test]
     fn fields_can_reuse_outer_names() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 let age = 1
                 struct A {
@@ -2012,7 +2378,7 @@ mod tests {
     #[test]
     fn top_level_structs_can_be_used_in_any_order() {
         assert_eq!(
-            check_src(
+            check_top(
                 "
                 fn f(_ user: User) -> Post {
                     return f(user)
@@ -2033,7 +2399,7 @@ mod tests {
     #[test]
     fn nested_structs_must_be_declared_before_use() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn outer() {
                     fn f(_ user: User) {}
@@ -2054,7 +2420,7 @@ mod tests {
     #[test]
     fn structs_cannot_contain_themselves() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct Node {
                     let next: Node
@@ -2074,7 +2440,7 @@ mod tests {
         // Every struct in a cycle is reported, but not one that only contains
         // a struct in a cycle.
         assert_eq!(
-            messages(
+            check_top(
                 "
                 struct A {
                     let b: B
@@ -2090,18 +2456,18 @@ mod tests {
                 }
                 "
             ),
-            [
-                "`A` contains itself",
-                "`B` contains itself",
-                "`C` contains itself"
-            ]
+            Err(vec![
+                CheckError::RecursiveStruct("A".to_string()),
+                CheckError::RecursiveStruct("B".to_string()),
+                CheckError::RecursiveStruct("C".to_string()),
+            ])
         );
     }
 
     #[test]
     fn structs_can_contain_the_same_struct_twice() {
         assert_eq!(
-            check_src(
+            check_top(
                 "
                 struct Line {
                     let start: Point
@@ -2117,16 +2483,9 @@ mod tests {
     #[test]
     fn rejects_redeclared_structs() {
         assert_eq!(
-            check_src("struct A {}\nstruct A {}"),
+            check_body("struct A {}\nstruct A {}"),
             Err(vec![CheckError::Redeclared("A".to_string())])
         );
-        for name in ["Int", "Bool", "Void"] {
-            assert_eq!(
-                check_src(&format!("struct {name} {{}}")),
-                Err(vec![CheckError::Redeclared(name.to_string())]),
-                "{name:?}"
-            );
-        }
         // A function can declare its own `Int`, which is a different type,
         // but literals still have the standard library's `Int`.
         assert_eq!(
@@ -2152,7 +2511,7 @@ mod tests {
             "fn f(User: Int) {\nstruct User {}\n}",
         ] {
             assert_eq!(
-                check_src(src),
+                check_body(src),
                 Err(vec![CheckError::Redeclared("User".to_string())]),
                 "{src:?}"
             );
@@ -2199,8 +2558,8 @@ mod tests {
                 "
             ),
             [
-                "`f` is not a type",
                 "`x` is not a type",
+                "`f` is not a type",
                 "`a` is not a type",
                 "`x` is not a type",
                 "`f` is not a type",
@@ -2211,7 +2570,7 @@ mod tests {
     #[test]
     fn structs_are_scoped_like_other_names() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 if true {
                     struct A {}
@@ -2223,7 +2582,7 @@ mod tests {
             Err(vec![CheckError::UnknownType("A".to_string())])
         );
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn f() {
                     struct A {}
@@ -2236,7 +2595,7 @@ mod tests {
         );
         // Separate blocks can reuse names.
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 if true {
                     struct A {}
@@ -2249,7 +2608,7 @@ mod tests {
         );
         // Blocks can't shadow, but functions can.
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 struct A {}
                 if true {
@@ -2267,7 +2626,7 @@ mod tests {
     #[test]
     fn nested_functions_have_their_own_return_type() {
         assert_eq!(
-            check_src(
+            check_body(
                 "
                 fn outer() -> Bool {
                     fn inner() -> Int {
@@ -2284,6 +2643,333 @@ mod tests {
                 expected: ty("Bool"),
                 found: ty("Int"),
             }])
+        );
+    }
+
+    #[test]
+    fn checks_the_standard_library_alone() {
+        assert_eq!(check(&[]), Ok(()));
+    }
+
+    #[test]
+    fn imports_every_top_level_name() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /lib
+                    use ./dir/other
+
+                    let total: Int = limit + 1
+                    fn f(_ p: Point) -> Point {
+                        return identity(p)
+                    }
+                    ",
+                ),
+                ("/lib", "let limit = 10"),
+                (
+                    "/dir/other",
+                    "
+                    struct Point {}
+                    fn identity(_ p: Point) -> Point {
+                        return p
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn relative_paths_start_from_the_current_directory() {
+        assert_eq!(
+            check_files(&[
+                ("/dir/a", "use ./b\nuse ./sub/c\nlet x = b + c"),
+                ("/dir/b", "let b = 1"),
+                ("/dir/sub/c", "let c = 2"),
+                // Not found by `./b`, since `/dir/a` isn't at the root.
+                ("/b", "let b = true"),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[("/dir/a", "use ./dir/b"), ("/dir/b", "")]),
+            ["/dir/a: cannot find module `./dir/b`"]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_modules() {
+        assert_eq!(
+            file_messages(&[("/main", "use /missing\nuse ./missing\nuse other")]),
+            [
+                "/main: cannot find module `/missing`",
+                "/main: cannot find module `./missing`",
+                "/main: cannot find module `other`",
+            ]
+        );
+    }
+
+    #[test]
+    fn names_need_importing() {
+        assert_eq!(
+            file_messages(&[
+                ("/main", "let a = x\nlet b = lib.x\nlet c = /lib.x"),
+                ("/lib", "let x = 1"),
+            ]),
+            [
+                "/main: `x` is not declared",
+                "/main: `lib` is not an imported module",
+                "/main: `/lib` is not an imported module",
+            ]
+        );
+    }
+
+    #[test]
+    fn imports_are_not_transitive() {
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /a\nlet x = y"),
+                ("/a", "use /b"),
+                ("/b", "let y = 1"),
+            ]),
+            ["/main: `y` is not declared"]
+        );
+    }
+
+    #[test]
+    fn importing_twice_or_importing_itself_is_harmless() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /main
+                    use ./main
+                    use /lib
+                    use ./lib
+                    use stdlib
+                    let x: Int = y + 1
+                    let z = x
+                    ",
+                ),
+                ("/lib", "let y = 1"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn names_from_several_modules_must_be_qualified() {
+        let a = "fn f() -> Int {\nreturn 1\n}";
+        let b = "fn f() -> Bool {\nreturn true\n}";
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /a
+                    use /dir/b
+                    let x = f()
+                    let y: Int = a.f()
+                    let z: Bool = b.f()
+                    let w: Bool = /dir/b.f()
+                    ",
+                ),
+                ("/a", a),
+                ("/dir/b", b),
+            ]),
+            ["/main: `f` is declared in `/a` and `/dir/b`, so it must be qualified"]
+        );
+        // Including when the module itself declares the name.
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /a
+                    fn f() -> Bool {
+                        return f()
+                    }
+                    let x: Int = a.f()
+                    let y: Bool = main.f()
+                    ",
+                ),
+                ("/a", a),
+            ]),
+            ["/main: `f` is declared in `/main` and `/a`, so it must be qualified"]
+        );
+    }
+
+    #[test]
+    fn modules_with_the_same_name_need_full_paths() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /a/other
+                    use /b/other
+                    let x = other.value
+                    let y: Int = /a/other.value
+                    let z: Bool = ./b/other.value
+                    ",
+                ),
+                ("/a/other", "let value = 1"),
+                ("/b/other", "let value = true"),
+            ]),
+            ["/main: `other` could be `/a/other` or `/b/other`, so the full path must be used"]
+        );
+    }
+
+    #[test]
+    fn qualified_names_must_exist() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "use /lib\nlet x = lib.missing\nlet y: lib.Missing = 1",
+                ),
+                ("/lib", ""),
+            ]),
+            [
+                "/main: `lib.missing` is not declared",
+                "/main: unknown type `lib.Missing`",
+            ]
+        );
+    }
+
+    #[test]
+    fn std_names_can_be_qualified() {
+        assert_eq!(
+            check_top("let x: stdlib.Int = 1\nlet y: Int = x\nlet z: stdlib.Bool = true"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn modules_can_import_each_other() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/a",
+                    "
+                    use /b
+                    struct A {
+                        let b: B
+                    }
+                    fn f(_ b: B) -> Int {
+                        return g(b)
+                    }
+                    let x = y + 1
+                    ",
+                ),
+                (
+                    "/b",
+                    "
+                    use /a
+                    struct B {}
+                    fn g(_ b: B) -> Int {
+                        return 1
+                    }
+                    let y = 2
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn structs_cannot_contain_themselves_across_modules() {
+        assert_eq!(
+            file_messages(&[
+                ("/a", "use /b\nstruct A {\nlet b: B\n}"),
+                ("/b", "use /a\nstruct B {\nlet a: A\n}"),
+            ]),
+            ["/a: `A` contains itself", "/b: `B` contains itself"]
+        );
+    }
+
+    #[test]
+    fn top_level_values_can_be_used_in_any_order() {
+        assert_eq!(
+            check_top("let a: Int = b + c\nlet b = c * 2\nlet c = 1"),
+            Ok(())
+        );
+        // Their types are known wherever they're used first.
+        assert_eq!(
+            messages_top("let a = b + 1\nlet b = true"),
+            ["operator `+` expects `Int`, found `Bool`"]
+        );
+    }
+
+    #[test]
+    fn rejects_values_that_depend_on_themselves() {
+        assert_eq!(
+            check_top("let a = b\nlet b = a + 1\nvar c: Int = c"),
+            Err(vec![
+                CheckError::CyclicValue("a".to_string()),
+                CheckError::CyclicValue("c".to_string()),
+            ])
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /other\nlet a = b"),
+                ("/other", "use /main\nlet b = a"),
+            ]),
+            ["/main: `a` depends on its own value"]
+        );
+    }
+
+    #[test]
+    fn functions_cannot_use_top_level_values() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /lib
+                    let a = 1
+                    fn f() -> Int {
+                        return a + b + lib.b
+                    }
+                    // So a value can't depend on itself through a function.
+                    let c = g()
+                    fn g() -> Int {
+                        return c
+                    }
+                    ",
+                ),
+                ("/lib", "let b = 2"),
+            ]),
+            [
+                "/main: functions can't use `a`, because it is declared outside the function",
+                "/main: functions can't use `b`, because it is declared outside the function",
+                "/main: functions can't use `lib.b`, because it is declared outside the function",
+                "/main: functions can't use `c`, because it is declared outside the function",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_redeclaration_within_a_module() {
+        assert_eq!(
+            check_top("struct a {}\nfn a() {}\nlet a = 1"),
+            Err(vec![
+                CheckError::Redeclared("a".to_string()),
+                CheckError::Redeclared("a".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn errors_name_their_module() {
+        assert_eq!(
+            file_messages(&[("/main", "let x = 1"), ("/dir/other", "let y = z"),]),
+            ["/dir/other: `z` is not declared"]
         );
     }
 }

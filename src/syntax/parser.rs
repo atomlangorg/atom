@@ -21,7 +21,7 @@ use chumsky::{
 use logos::Logos;
 
 use super::{
-    ast::{Arg, BinOp, Expr, Field, Mutability, Param, Program, Stmt, UnOp},
+    ast::{Arg, BinOp, Expr, Field, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp},
     lexer::Token,
 };
 
@@ -45,6 +45,34 @@ where
 {
     let ident = select! { Token::Ident(name) => name.to_string() }.labelled("identifier");
 
+    // `/dir/other`, `./dir/other` or `other`.
+    let segments = ident
+        .separated_by(just(Token::Slash))
+        .at_least(1)
+        .collect::<Vec<_>>();
+    let module_path = choice((
+        just(Token::Slash)
+            .ignore_then(segments.clone())
+            .map(ModulePath::Absolute),
+        just(Token::Dot)
+            .then(just(Token::Slash))
+            .ignore_then(segments)
+            .map(ModulePath::Relative),
+        ident.map(ModulePath::Named),
+    ))
+    .labelled("module path")
+    .boxed();
+
+    // `f`, `other.f` or `/dir/other.f`. Which module a name comes from is
+    // decided by the checker.
+    let name = module_path
+        .clone()
+        .then_ignore(just(Token::Dot))
+        .or_not()
+        .then(ident)
+        .map(|(module, name)| Name { module, name })
+        .boxed();
+
     let expr = recursive(|expr| {
         let literal = select! {
             Token::Int(n) => Expr::Int(n),
@@ -63,10 +91,13 @@ where
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
         // A name followed by arguments is a call, otherwise it's a variable.
-        let name_or_call = ident.then(args.or_not()).map(|(name, args)| match args {
-            Some(args) => Expr::Call { callee: name, args },
-            None => Expr::Var(name),
-        });
+        let name_or_call = name
+            .clone()
+            .then(args.or_not())
+            .map(|(name, args)| match args {
+                Some(args) => Expr::Call { callee: name, args },
+                None => Expr::Var(name),
+            });
 
         let atom = literal
             .or(name_or_call)
@@ -106,7 +137,8 @@ where
 
         let or_op = just(Token::Pipe).to(BinOp::Or);
         and.clone().foldl(or_op.then(and).repeated(), fold_binary)
-    });
+    })
+    .boxed();
 
     let mutability = select! {
         Token::Let => Mutability::Let,
@@ -114,8 +146,8 @@ where
     };
 
     // Type names are resolved by the checker, not reserved by the lexer.
-    let type_name = select! { Token::Ident(name) => name.to_string() }.labelled("type");
-    let annotation = just(Token::Colon).ignore_then(type_name);
+    let type_name = name.labelled("type");
+    let annotation = just(Token::Colon).ignore_then(type_name.clone());
 
     let decl = mutability
         .then(ident)
@@ -156,7 +188,7 @@ where
     // Like a block, one field per line with blank lines allowed, and the `{`
     // on the same line as `struct`.
     let struct_ = just(Token::Struct)
-        .ignore_then(type_name)
+        .ignore_then(ident)
         .then(
             newlines
                 .clone()
@@ -171,8 +203,15 @@ where
         .map(|(name, fields)| Stmt::Struct { name, fields });
 
     // One statement per line; blank lines are allowed anywhere.
-    let stmts = recursive(|stmts| {
-        let block = stmts.delimited_by(just(Token::LBrace), just(Token::RBrace));
+    let stmt = recursive(|stmt| {
+        let block = newlines
+            .clone()
+            .ignore_then(
+                stmt.separated_by(newlines.clone().at_least(1))
+                    .allow_trailing()
+                    .collect(),
+            )
+            .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
         // The `{` must be on the same line as the `if`, and `else` on the same
         // line as the preceding `}`, so newlines never need disambiguating.
@@ -199,7 +238,7 @@ where
             .or(ident.then(ident).map(|(label, name)| (Some(label), name)))
             .or(ident.map(|name| (Some(name.clone()), name)))
             .then_ignore(just(Token::Colon))
-            .then(type_name)
+            .then(type_name.clone())
             .map(|((label, name), ty)| Param { label, name, ty });
         let params = param
             .separated_by(just(Token::Comma))
@@ -211,9 +250,9 @@ where
             .then(params)
             .then(
                 just(Token::Arrow)
-                    .ignore_then(type_name)
+                    .ignore_then(type_name.clone())
                     .or_not()
-                    .map(|ret| ret.unwrap_or_else(|| "Void".to_string())),
+                    .map(|ret| ret.unwrap_or_else(|| Name::new("Void"))),
             )
             .then(block.clone())
             .map(|(((name, params), ret), body)| Stmt::Fn {
@@ -237,35 +276,66 @@ where
             )),
         });
 
-        let stmt = decl
-            .clone()
-            .or(assign.clone())
+        decl.clone()
+            .or(assign)
             .or(if_)
             .or(fn_)
-            .or(struct_.clone())
+            .or(struct_)
             .or(return_)
-            .or(call);
+            .or(call)
+    });
 
-        newlines.clone().ignore_then(
-            stmt.separated_by(newlines.clone().at_least(1))
+    let use_ = just(Token::Use).ignore_then(module_path).map(Stmt::Use);
+
+    // The top level can only declare things, so a module never runs code
+    // just by being imported. Other statements are parsed only so that they
+    // can be reported clearly.
+    let top_level_stmt = use_.or(stmt.validate(|stmt, e, emitter| {
+        if !matches!(
+            stmt,
+            Stmt::Decl { .. } | Stmt::Fn { .. } | Stmt::Struct { .. }
+        ) {
+            emitter.emit(Rich::custom(
+                e.span(),
+                "only declarations can be used at the top level",
+            ));
+        }
+        stmt
+    }));
+
+    newlines
+        .clone()
+        .ignore_then(
+            top_level_stmt
+                .separated_by(newlines.at_least(1))
                 .allow_trailing()
                 .collect(),
         )
-    });
-
-    stmts.then_ignore(end())
+        .then_ignore(end())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Parses `src` as the body of a function, since statements other than
+    /// declarations aren't allowed at the top level.
+    fn parse_body(src: &str) -> Result<Vec<Stmt>, Vec<String>> {
+        match parse(&format!("fn body() {{\n{src}\n}}")) {
+            Ok(mut program) => match program.remove(0) {
+                Stmt::Fn { body, .. } => Ok(body),
+                stmt => panic!("expected a function, got {stmt:?}"),
+            },
+            Err(errs) => Err(errs.iter().map(ToString::to_string).collect()),
+        }
+    }
+
     fn int(n: i64) -> Box<Expr> {
         Box::new(Expr::Int(n))
     }
 
     fn var(name: &str) -> Box<Expr> {
-        Box::new(Expr::Var(name.to_string()))
+        Box::new(Expr::Var(Name::new(name)))
     }
 
     fn assign(name: &str, value: Expr) -> Stmt {
@@ -293,7 +363,7 @@ mod tests {
     #[test]
     fn parses_assignments() {
         assert_eq!(
-            parse("x = 1 + 2\ny = x - 3"),
+            parse_body("x = 1 + 2\ny = x - 3"),
             Ok(vec![
                 assign("x", Expr::Binary(int(1), BinOp::Add, int(2))),
                 assign("y", Expr::Binary(var("x"), BinOp::Sub, int(3))),
@@ -304,7 +374,7 @@ mod tests {
     #[test]
     fn allows_blank_lines() {
         assert_eq!(
-            parse("\n\nx = 1\n\n\ny = 2\n\n"),
+            parse_body("\n\nx = 1\n\n\ny = 2\n\n"),
             Ok(vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2)),])
         );
     }
@@ -312,7 +382,7 @@ mod tests {
     #[test]
     fn binary_ops_are_left_associative() {
         assert_eq!(
-            parse("x = 1 - 2 + 3"),
+            parse_body("x = 1 - 2 + 3"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(
@@ -327,7 +397,7 @@ mod tests {
     #[test]
     fn parentheses_group() {
         assert_eq!(
-            parse("x = 1 - (2 + 3)"),
+            parse_body("x = 1 - (2 + 3)"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(
@@ -346,7 +416,7 @@ mod tests {
     #[test]
     fn parses_negation() {
         assert_eq!(
-            parse("x = -5\ny = -y\nz = --(1)"),
+            parse_body("x = -5\ny = -y\nz = --(1)"),
             Ok(vec![
                 assign("x", *neg(int(5))),
                 assign("y", *neg(var("y"))),
@@ -358,7 +428,7 @@ mod tests {
     #[test]
     fn subtraction_of_negative() {
         assert_eq!(
-            parse("x = 1 - -2"),
+            parse_body("x = 1 - -2"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(int(1), BinOp::Sub, neg(int(2)))
@@ -369,7 +439,7 @@ mod tests {
     #[test]
     fn multiplication_binds_tighter_than_addition() {
         assert_eq!(
-            parse("x = 1 + 2 * 3 - 4 / 5"),
+            parse_body("x = 1 + 2 * 3 - 4 / 5"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(
@@ -388,7 +458,7 @@ mod tests {
     #[test]
     fn division_is_left_associative() {
         assert_eq!(
-            parse("x = 8 / 4 * 2"),
+            parse_body("x = 8 / 4 * 2"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(
@@ -403,7 +473,7 @@ mod tests {
     #[test]
     fn negation_binds_tighter_than_multiplication() {
         assert_eq!(
-            parse("x = -2 * 3"),
+            parse_body("x = -2 * 3"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(neg(int(2)), BinOp::Mul, int(3))
@@ -414,7 +484,7 @@ mod tests {
     #[test]
     fn parses_declarations() {
         assert_eq!(
-            parse("let x = 1 + 2\nvar y = x\ny = 3\nlet letter = y"),
+            parse_body("let x = 1 + 2\nvar y = x\ny = 3\nlet letter = y"),
             Ok(vec![
                 Stmt::Decl {
                     mutability: Mutability::Let,
@@ -443,7 +513,7 @@ mod tests {
         Stmt::Decl {
             mutability,
             name: name.to_string(),
-            ty: ty.map(str::to_string),
+            ty: ty.map(Name::new),
             value,
         }
     }
@@ -451,7 +521,7 @@ mod tests {
     #[test]
     fn parses_explicit_types() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 let x: Int = 3
                 var y: Bool = true
@@ -472,7 +542,7 @@ mod tests {
     fn parses_unknown_type_names() {
         // Whether a type exists is decided by the checker.
         assert_eq!(
-            parse("let x: Foo = 1"),
+            parse_body("let x: Foo = 1"),
             Ok(vec![decl(Mutability::Let, "x", Some("Foo"), Expr::Int(1))])
         );
     }
@@ -489,7 +559,7 @@ mod tests {
             // Only declarations can have an explicit type.
             "x: Int = 3",
         ] {
-            assert!(parse(src).is_err(), "{src:?} should not parse");
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 
@@ -505,14 +575,14 @@ mod tests {
             "true = 1",
             "let false = 1",
         ] {
-            assert!(parse(src).is_err(), "{src:?} should not parse");
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 
     #[test]
     fn parses_boolean_literals() {
         assert_eq!(
-            parse("x = true\ny = false"),
+            parse_body("x = true\ny = false"),
             Ok(vec![
                 assign("x", Expr::Bool(true)),
                 assign("y", Expr::Bool(false)),
@@ -524,7 +594,7 @@ mod tests {
     fn parses_ill_typed_expressions() {
         // Type errors are caught by the checker, not the parser.
         assert_eq!(
-            parse("x = -true + 1"),
+            parse_body("x = -true + 1"),
             Ok(vec![assign(
                 "x",
                 Expr::Binary(neg(Box::new(Expr::Bool(true))), BinOp::Add, int(1)),
@@ -534,8 +604,8 @@ mod tests {
 
     #[test]
     fn rejects_declaration_without_value() {
-        assert!(parse("let x").is_err());
-        assert!(parse("var x").is_err());
+        assert!(parse_body("let x").is_err());
+        assert!(parse_body("var x").is_err());
     }
 
     fn bin(lhs: Box<Expr>, op: BinOp, rhs: Box<Expr>) -> Box<Expr> {
@@ -547,7 +617,7 @@ mod tests {
     }
 
     fn parse_expr(src: &str) -> Expr {
-        match parse(&format!("x = {src}")).unwrap().remove(0) {
+        match parse_body(&format!("x = {src}")).unwrap().remove(0) {
             Stmt::Assign { value, .. } => value,
             stmt => panic!("expected assignment, got {stmt:?}"),
         }
@@ -610,9 +680,9 @@ mod tests {
 
     #[test]
     fn rejects_doubled_operators() {
-        assert!(parse("x = a && b").is_err());
-        assert!(parse("x = a || b").is_err());
-        assert!(parse("x = a !").is_err());
+        assert!(parse_body("x = a && b").is_err());
+        assert!(parse_body("x = a || b").is_err());
+        assert!(parse_body("x = a !").is_err());
     }
 
     fn if_(cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>) -> Stmt {
@@ -626,7 +696,7 @@ mod tests {
     #[test]
     fn parses_if() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 if c {
                     x = 1
@@ -645,7 +715,7 @@ mod tests {
     #[test]
     fn parses_if_else() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 if c {
                     x = 1
@@ -665,7 +735,7 @@ mod tests {
     #[test]
     fn parses_else_if_chain() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 if a {
                     x = 1
@@ -697,7 +767,7 @@ mod tests {
     #[test]
     fn parses_condition_expression() {
         assert_eq!(
-            parse("if !a & b {}"),
+            parse_body("if !a & b {}"),
             Ok(vec![if_(
                 *bin(not(var("a")), BinOp::And, var("b")),
                 vec![],
@@ -709,20 +779,23 @@ mod tests {
     #[test]
     fn parses_compact_and_empty_blocks() {
         assert_eq!(
-            parse("if c { x = 1 } else {}"),
+            parse_body("if c { x = 1 } else {}"),
             Ok(vec![if_(
                 *var("c"),
                 vec![assign("x", Expr::Int(1))],
                 Some(vec![]),
             )])
         );
-        assert_eq!(parse("if c {\n\n}"), Ok(vec![if_(*var("c"), vec![], None)]));
+        assert_eq!(
+            parse_body("if c {\n\n}"),
+            Ok(vec![if_(*var("c"), vec![], None)])
+        );
     }
 
     #[test]
     fn parses_nested_if_and_surrounding_statements() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 let a = true
                 if a {
@@ -763,7 +836,7 @@ mod tests {
     #[test]
     fn parses_comments() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 // A comment on its own line.
                 let a = true // A comment after code.
@@ -795,9 +868,9 @@ mod tests {
 
     #[test]
     fn parses_program_of_only_comments() {
-        assert_eq!(parse("// one\n// two"), Ok(vec![]));
+        assert_eq!(parse_body("// one\n// two"), Ok(vec![]));
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 if c {
                     // nothing yet
@@ -812,13 +885,13 @@ mod tests {
     fn comments_hide_the_rest_of_the_line() {
         // Everything after `//` is ignored, including what would be an error.
         assert_eq!(
-            parse("x = 1 // y = 2 $ {"),
+            parse_body("x = 1 // y = 2 $ {"),
             Ok(vec![assign("x", Expr::Int(1))])
         );
         // A comment swallows the `{`, so the block is never opened.
-        assert!(parse("if c // {\n}").is_err());
+        assert!(parse_body("if c // {\n}").is_err());
         // `else` must still be on the same line as `}`.
-        assert!(parse("if c {} // comment\nelse {}").is_err());
+        assert!(parse_body("if c {} // comment\nelse {}").is_err());
     }
 
     #[test]
@@ -843,31 +916,31 @@ mod tests {
             // `if` is a keyword.
             "if = 1",
         ] {
-            assert!(parse(src).is_err(), "{src:?} should not parse");
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 
     #[test]
     fn rejects_two_statements_on_one_line() {
-        assert!(parse("x = 1 y = 2").is_err());
+        assert!(parse_body("x = 1 y = 2").is_err());
     }
 
     #[test]
     fn rejects_semicolons() {
-        assert!(parse("x = 1;").is_err());
+        assert!(parse_body("x = 1;").is_err());
     }
 
     #[test]
     fn rejects_invalid_token() {
-        let errs = parse("x = 1 $ 2").unwrap_err();
-        assert_eq!(errs[0].span().into_range(), 6..7);
+        let errs = parse("let x = 1 $ 2").unwrap_err();
+        assert_eq!(errs[0].span().into_range(), 10..11);
     }
 
     fn param(label: Option<&str>, name: &str, ty: &str) -> Param {
         Param {
             label: label.map(str::to_string),
             name: name.to_string(),
-            ty: ty.to_string(),
+            ty: Name::new(ty),
         }
     }
 
@@ -880,7 +953,7 @@ mod tests {
 
     fn call(callee: &str, args: Vec<Arg>) -> Box<Expr> {
         Box::new(Expr::Call {
-            callee: callee.to_string(),
+            callee: Name::new(callee),
             args,
         })
     }
@@ -888,7 +961,7 @@ mod tests {
     #[test]
     fn parses_function() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 fn addFive(to value: Int) -> Int {
                     return value + 5
@@ -898,7 +971,7 @@ mod tests {
             Ok(vec![Stmt::Fn {
                 name: "addFive".to_string(),
                 params: vec![param(Some("to"), "value", "Int")],
-                ret: "Int".to_string(),
+                ret: Name::new("Int"),
                 body: vec![Stmt::Return(Some(Expr::Binary(
                     var("value"),
                     BinOp::Add,
@@ -911,7 +984,7 @@ mod tests {
     #[test]
     fn parses_parameter_label_forms() {
         assert_eq!(
-            parse("fn f(a: Int, to b: Bool, _ c: Int) {}"),
+            parse_body("fn f(a: Int, to b: Bool, _ c: Int) {}"),
             Ok(vec![Stmt::Fn {
                 name: "f".to_string(),
                 params: vec![
@@ -921,7 +994,7 @@ mod tests {
                     // `_` means no label.
                     param(None, "c", "Int"),
                 ],
-                ret: "Void".to_string(),
+                ret: Name::new("Void"),
                 body: vec![],
             }])
         );
@@ -930,7 +1003,7 @@ mod tests {
     #[test]
     fn parses_function_without_parameters_or_return_type() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 fn reset() {
                     count = 0
@@ -941,7 +1014,7 @@ mod tests {
             Ok(vec![Stmt::Fn {
                 name: "reset".to_string(),
                 params: vec![],
-                ret: "Void".to_string(),
+                ret: Name::new("Void"),
                 body: vec![assign("count", Expr::Int(0)), Stmt::Return(None)],
             }])
         );
@@ -987,7 +1060,7 @@ mod tests {
     #[test]
     fn parses_call_statement() {
         assert_eq!(
-            parse("log(message: 1)"),
+            parse_body("log(message: 1)"),
             Ok(vec![Stmt::Expr(*call(
                 "log",
                 vec![arg(Some("message"), *int(1))]
@@ -998,9 +1071,9 @@ mod tests {
     #[test]
     fn rejects_non_call_expression_statements() {
         for src in ["x", "1 + 2", "-f()", "!f() & g()"] {
-            assert!(parse(src).is_err(), "{src:?} should not parse");
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
-        let errs = parse("1 + 2").unwrap_err();
+        let errs = parse_body("1 + 2").unwrap_err();
         assert_eq!(
             errs[0].to_string(),
             "only function calls can be used as statements"
@@ -1009,9 +1082,9 @@ mod tests {
 
     #[test]
     fn parses_return_forms() {
-        assert_eq!(parse("return"), Ok(vec![Stmt::Return(None)]));
+        assert_eq!(parse_body("return"), Ok(vec![Stmt::Return(None)]));
         assert_eq!(
-            parse("return 1 + 2"),
+            parse_body("return 1 + 2"),
             Ok(vec![Stmt::Return(Some(*bin(int(1), BinOp::Add, int(2))))])
         );
     }
@@ -1042,7 +1115,7 @@ mod tests {
             "let fn = 1",
             "let _ = 1",
         ] {
-            assert!(parse(src).is_err(), "{src:?} should not parse");
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 
@@ -1050,7 +1123,7 @@ mod tests {
         Field {
             mutability,
             name: name.to_string(),
-            ty: ty.to_string(),
+            ty: Name::new(ty),
         }
     }
 
@@ -1064,7 +1137,7 @@ mod tests {
     #[test]
     fn parses_struct() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 struct User {
                     let age: Int
@@ -1084,16 +1157,19 @@ mod tests {
 
     #[test]
     fn parses_struct_layouts() {
-        assert_eq!(parse("struct Empty {}"), Ok(vec![struct_("Empty", vec![])]));
         assert_eq!(
-            parse("struct Point { let x: Int }"),
+            parse_body("struct Empty {}"),
+            Ok(vec![struct_("Empty", vec![])])
+        );
+        assert_eq!(
+            parse_body("struct Point { let x: Int }"),
             Ok(vec![struct_(
                 "Point",
                 vec![field(Mutability::Let, "x", "Int")]
             )])
         );
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 struct Post { // A comment.
 
@@ -1117,7 +1193,7 @@ mod tests {
     #[test]
     fn parses_struct_inside_blocks() {
         assert_eq!(
-            parse(
+            parse_body(
                 "
                 fn f() {
                     struct Inner {}
@@ -1127,7 +1203,7 @@ mod tests {
             Ok(vec![Stmt::Fn {
                 name: "f".to_string(),
                 params: vec![],
-                ret: "Void".to_string(),
+                ret: Name::new("Void"),
                 body: vec![struct_("Inner", vec![])],
             }])
         );
@@ -1139,14 +1215,14 @@ mod tests {
             "struct User { let age: Int = 3 }",
             "struct User { var isAdmin: Bool = true }",
         ] {
-            let errs = parse(src).unwrap_err();
+            let errs = parse_body(src).unwrap_err();
             assert_eq!(
                 errs[0].to_string(),
                 "struct fields can't have values",
                 "{src:?}"
             );
         }
-        assert!(parse("struct User { let age = 3 }").is_err());
+        assert!(parse_body("struct User { let age = 3 }").is_err());
     }
 
     #[test]
@@ -1181,7 +1257,7 @@ mod tests {
             "let struct = 1",
             "struct User { let let: Int }",
         ] {
-            assert!(parse(src).is_err(), "{src:?} should not parse");
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 
@@ -1195,6 +1271,125 @@ mod tests {
             "x = f(1,)",
             "x = f(a: b: 1)",
             "x = 1(2)",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_top_level_declarations() {
+        assert_eq!(
+            parse(
+                "
+                use /dir/other
+                use ./dir/other
+                use stdlib
+                let x = 1
+                var y: Int = 2
+                fn f() {}
+                struct S {}
+                "
+            ),
+            Ok(vec![
+                Stmt::Use(ModulePath::Absolute(vec![
+                    "dir".to_string(),
+                    "other".to_string()
+                ])),
+                Stmt::Use(ModulePath::Relative(vec![
+                    "dir".to_string(),
+                    "other".to_string()
+                ])),
+                Stmt::Use(ModulePath::Named("stdlib".to_string())),
+                decl(Mutability::Let, "x", None, Expr::Int(1)),
+                decl(Mutability::Var, "y", Some("Int"), Expr::Int(2)),
+                Stmt::Fn {
+                    name: "f".to_string(),
+                    params: vec![],
+                    ret: Name::new("Void"),
+                    body: vec![],
+                },
+                struct_("S", vec![]),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_other_statements_at_the_top_level() {
+        for src in ["x = 1", "f()", "if c {}", "return", "return 1"] {
+            let errs = parse(src).unwrap_err();
+            assert_eq!(
+                errs[0].to_string(),
+                "only declarations can be used at the top level",
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_use_outside_the_top_level() {
+        assert!(parse_body("use /lib").is_err());
+        assert!(parse("if c {\nuse /lib\n}").is_err());
+    }
+
+    fn qualified(module: ModulePath, name: &str) -> Name {
+        Name {
+            module: Some(module),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn parses_qualified_names() {
+        let other = || ModulePath::Named("other".to_string());
+        let path = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_expr("other.x"), Expr::Var(qualified(other(), "x")));
+        assert_eq!(
+            parse_expr("/dir/other.f() / ./other.y"),
+            Expr::Binary(
+                Box::new(Expr::Call {
+                    callee: qualified(ModulePath::Absolute(path(&["dir", "other"])), "f"),
+                    args: vec![],
+                }),
+                BinOp::Div,
+                Box::new(Expr::Var(qualified(
+                    ModulePath::Relative(path(&["other"])),
+                    "y"
+                ))),
+            )
+        );
+        assert_eq!(
+            parse_body("let x: stdlib.Int = 1"),
+            Ok(vec![Stmt::Decl {
+                mutability: Mutability::Let,
+                name: "x".to_string(),
+                ty: Some(qualified(ModulePath::Named("stdlib".to_string()), "Int")),
+                value: Expr::Int(1),
+            }])
+        );
+        // Division still works without spaces.
+        assert_eq!(parse_expr("a/b"), *bin(var("a"), BinOp::Div, var("b")));
+    }
+
+    #[test]
+    fn rejects_malformed_modules() {
+        for src in [
+            "use",
+            "use /",
+            "use ./",
+            "use /a/",
+            "use a/b",
+            "use .a",
+            "use ../a",
+            "use /a.b",
+            "use /a\n/b",
+            "use /a use /b",
+            "let x = a.",
+            "let x = .a",
+            "let x = a.b.c",
+            "let x = a..b",
+            "let x: a. = 1",
+            // Assignments can't be qualified.
+            "fn f() {\na.x = 1\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
