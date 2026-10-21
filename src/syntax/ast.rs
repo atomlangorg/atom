@@ -112,6 +112,8 @@ pub enum Stmt {
         ret: String,
         body: Block,
     },
+    /// `struct Name { let field: Type ... }`
+    Struct { name: String, fields: Vec<Field> },
     /// `return` or `return value`
     Return(Option<Expr>),
     /// An expression on its own line. Only function calls are allowed.
@@ -128,6 +130,15 @@ pub struct Param {
     pub label: Option<String>,
     pub name: String,
     /// The name of the parameter's type.
+    pub ty: String,
+}
+
+/// A struct field, such as `let age: Int`. Fields can't have values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub mutability: Mutability,
+    pub name: String,
+    /// The name of the field's type.
     pub ty: String,
 }
 

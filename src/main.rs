@@ -48,6 +48,16 @@ fn main() {
         }
 
         bump(by: 2, true)
+
+        // Fields have types but no values.
+        struct User {
+            let age: Int
+            var isAdmin: Bool
+        }
+
+        fn pick(_ user: User, or other: User) -> User {
+            return user
+        }
     ";
 
     let program = match syntax::parse(src) {

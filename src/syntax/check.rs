@@ -15,23 +15,33 @@
  */
 
 //! Checks that names are declared before use, that only `var`s are
-//! reassigned, that functions are called and return correctly, and that every
-//! expression is well typed.
+//! reassigned, that functions are called and return correctly, that structs
+//! are well formed, and that every expression is well typed.
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use super::ast::{Arg, BinOp, Expr, Mutability, Program, Stmt, UnOp};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
     Bool,
     /// The return type of a function that doesn't return anything useful.
     /// Functions without an explicit return type return `Void`.
     Void,
+    /// A struct declared with `struct`. Structs in different scopes can share
+    /// a name, so they're told apart by `id`.
+    Struct {
+        id: usize,
+        name: String,
+    },
 }
 
 impl Type {
+    /// The built-in type called `name`, if there is one.
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "Int" => Some(Self::Int),
@@ -48,6 +58,7 @@ impl fmt::Display for Type {
             Self::Int => write!(f, "Int"),
             Self::Bool => write!(f, "Bool"),
             Self::Void => write!(f, "Void"),
+            Self::Struct { name, .. } => write!(f, "{name}"),
         }
     }
 }
@@ -230,7 +241,7 @@ struct ParamSignature<'a> {
     ty: Option<Type>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Binding {
     Value {
         mutability: Mutability,
@@ -243,7 +254,7 @@ enum Binding {
 }
 
 /// The function whose body is being checked.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct FnContext<'a> {
     name: &'a str,
     /// `None` if the return type is unknown.
@@ -251,14 +262,23 @@ struct FnContext<'a> {
 }
 
 #[derive(Default)]
+struct Scope<'a> {
+    values: HashMap<&'a str, Binding>,
+    /// Types are named separately from values, so `let Int: Int` is allowed.
+    types: HashMap<&'a str, Type>,
+}
+
+#[derive(Default)]
 struct Checker<'a> {
     /// One scope per enclosing block, innermost last.
-    scopes: Vec<HashMap<&'a str, Binding>>,
+    scopes: Vec<Scope<'a>>,
     /// The index in `scopes` of the current function's outermost scope, or 0
     /// outside of a function. Names can't be redeclared from here inwards.
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
+    /// The `id` to give the next struct.
+    next_struct_id: usize,
     errors: Vec<CheckError>,
 }
 
@@ -267,8 +287,8 @@ impl<'a> Checker<'a> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name))
-            .copied()
+            .find_map(|scope| scope.values.get(name))
+            .cloned()
     }
 
     fn declare(&mut self, name: &'a str, binding: Binding) {
@@ -276,17 +296,38 @@ impl<'a> Checker<'a> {
         // outer block. A function's own scope can reuse names from outside it.
         if self.scopes[self.fn_scope_start..]
             .iter()
-            .any(|scope| scope.contains_key(name))
+            .any(|scope| scope.values.contains_key(name))
         {
             self.errors.push(CheckError::Redeclared(name.to_string()));
         }
 
         let scope = self.scopes.last_mut().expect("always in a scope");
-        scope.insert(name, binding);
+        scope.values.insert(name, binding);
+    }
+
+    /// Declares a type, following the same rules as `declare`. Built-in types
+    /// can never be redeclared.
+    fn declare_type(&mut self, name: &'a str, ty: Type) {
+        if Type::from_name(name).is_some()
+            || self.scopes[self.fn_scope_start..]
+                .iter()
+                .any(|scope| scope.types.contains_key(name))
+        {
+            self.errors.push(CheckError::Redeclared(name.to_string()));
+        }
+
+        let scope = self.scopes.last_mut().expect("always in a scope");
+        scope.types.insert(name, ty);
     }
 
     fn resolve_type(&mut self, name: &str) -> Option<Type> {
-        let ty = Type::from_name(name);
+        let ty = Type::from_name(name).or_else(|| {
+            self.scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.types.get(name))
+                .cloned()
+        });
         if ty.is_none() {
             self.errors.push(CheckError::UnknownType(name.to_string()));
         }
@@ -296,7 +337,7 @@ impl<'a> Checker<'a> {
     /// Checks `stmts` in a new scope, so their declarations aren't visible
     /// afterwards.
     fn block(&mut self, stmts: &'a [Stmt]) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(Scope::default());
         for stmt in stmts {
             self.stmt(stmt);
         }
@@ -319,7 +360,7 @@ impl<'a> Checker<'a> {
                 let ty = match type_name {
                     Some(type_name) => {
                         let expected = self.resolve_type(type_name);
-                        self.check_assignable(name, expected, found);
+                        self.check_assignable(name, expected.clone(), found);
                         expected
                     }
                     None => found,
@@ -385,7 +426,7 @@ impl<'a> Checker<'a> {
                 // Declared before the body is checked, so it can call itself.
                 self.functions.push(Signature {
                     params: params.clone(),
-                    returns,
+                    returns: returns.clone(),
                 });
                 self.declare(name, Binding::Function(self.functions.len() - 1));
 
@@ -393,8 +434,11 @@ impl<'a> Checker<'a> {
                 // new function scope holding the parameters.
                 let outer_scope_start =
                     std::mem::replace(&mut self.fn_scope_start, self.scopes.len());
-                let outer_fn = self.current_fn.replace(FnContext { name, returns });
-                self.scopes.push(HashMap::new());
+                let outer_fn = self.current_fn.replace(FnContext {
+                    name,
+                    returns: returns.clone(),
+                });
+                self.scopes.push(Scope::default());
 
                 for param in params {
                     let binding = Binding::Value {
@@ -422,9 +466,28 @@ impl<'a> Checker<'a> {
                     });
                 }
             }
+            Stmt::Struct { name, fields } => {
+                // Field names only need to be unique within their struct.
+                let mut field_names = HashSet::new();
+                for field in fields {
+                    if !field_names.insert(&field.name) {
+                        self.errors.push(CheckError::Redeclared(field.name.clone()));
+                    }
+                    self.resolve_type(&field.ty);
+                }
+
+                // Declared after its fields are resolved, so a struct can't
+                // contain itself, which would make it infinitely large.
+                let ty = Type::Struct {
+                    id: self.next_struct_id,
+                    name: name.clone(),
+                };
+                self.next_struct_id += 1;
+                self.declare_type(name, ty);
+            }
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
-                let Some(FnContext { name, returns }) = self.current_fn else {
+                let Some(FnContext { name, returns }) = self.current_fn.clone() else {
                     self.errors.push(CheckError::ReturnOutsideFunction);
                     return;
                 };
@@ -479,13 +542,13 @@ impl<'a> Checker<'a> {
             // is invalid, so one bad operand doesn't cause further errors.
             Expr::Unary(op, operand) => {
                 let ty = unary_type(op);
-                self.operand(op.symbol(), operand, ty);
+                self.operand(op.symbol(), operand, ty.clone());
                 Some(ty)
             }
             Expr::Binary(lhs, op, rhs) => {
                 let ty = binary_type(op);
-                self.operand(op.symbol(), lhs, ty);
-                self.operand(op.symbol(), rhs, ty);
+                self.operand(op.symbol(), lhs, ty.clone());
+                self.operand(op.symbol(), rhs, ty.clone());
                 Some(ty)
             }
             Expr::Call { callee, args } => self.call(callee, args),
@@ -528,13 +591,13 @@ impl<'a> Checker<'a> {
                     expected: param.label.map(str::to_string),
                     found: arg.label.clone(),
                 });
-            } else if let (Some(expected), Some(found)) = (param.ty, found)
-                && expected != found
+            } else if let (Some(expected), Some(found)) = (&param.ty, found)
+                && *expected != found
             {
                 self.errors.push(CheckError::ArgumentTypeMismatch {
                     function: callee.to_string(),
                     param: param.label.unwrap_or(param.name).to_string(),
-                    expected,
+                    expected: expected.clone(),
                     found,
                 });
             }
@@ -1545,6 +1608,296 @@ mod tests {
                 "
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn structs_can_be_used_as_types() {
+        assert_eq!(
+            check_src(
+                "
+                struct User {
+                    let age: Int
+                    var isAdmin: Bool
+                }
+                struct Post {
+                    let author: User
+                }
+                fn first(_ a: User, _ b: User) -> User {
+                    let user: User = a
+                    var other = b
+                    other = user
+                    return other
+                }
+                fn repost(_ post: Post) -> Post {
+                    return repost(post)
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_empty_and_void_structs() {
+        assert_eq!(
+            check_src(
+                "
+                struct Empty {}
+                struct Nothing {
+                    let value: Void
+                    let empty: Empty
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn type_errors_use_struct_names() {
+        assert_eq!(
+            messages(
+                "
+                struct User {}
+                fn f(_ user: User) -> User {
+                    let x: Int = user
+                    let y = user + 1
+                    if user {}
+                    f(1)
+                    return true
+                }
+                "
+            ),
+            [
+                "cannot assign `User` to `x`, which has type `Int`",
+                "operator `+` expects `Int`, found `User`",
+                "`if` condition must be `Bool`, found `User`",
+                "argument `user` of `f` expects `User`, found `Int`",
+                "`f` must return `User`, found `Bool`",
+            ]
+        );
+    }
+
+    #[test]
+    fn different_structs_are_different_types() {
+        assert_eq!(
+            messages(
+                "
+                struct A {
+                    let x: Int
+                }
+                struct B {
+                    let x: Int
+                }
+                fn f(_ a: A) -> B {
+                    return a
+                }
+                "
+            ),
+            ["`f` must return `B`, found `A`"]
+        );
+    }
+
+    #[test]
+    fn structs_with_the_same_name_are_different_types() {
+        // The inner `A` is a different struct, even though it has the same
+        // name and fields.
+        assert_eq!(
+            messages(
+                "
+                struct A {}
+                fn f(_ a: A) {
+                    struct A {}
+                    fn g(_ b: A) {}
+                    g(a)
+                }
+                "
+            ),
+            ["argument `b` of `g` expects `A`, found `A`"]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field_types() {
+        assert_eq!(
+            check_src(
+                "
+                struct User {
+                    let age: int
+                    var friend: Person
+                }
+                "
+            ),
+            Err(vec![
+                CheckError::UnknownType("int".to_string()),
+                CheckError::UnknownType("Person".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_fields() {
+        assert_eq!(
+            check_src(
+                "
+                struct User {
+                    let age: Int
+                    var age: Bool
+                }
+                "
+            ),
+            Err(vec![CheckError::Redeclared("age".to_string())])
+        );
+    }
+
+    #[test]
+    fn fields_can_reuse_outer_names() {
+        assert_eq!(
+            check_src(
+                "
+                let age = 1
+                struct A {
+                    let age: Int
+                }
+                struct B {
+                    let age: Int
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn structs_must_be_declared_before_use() {
+        assert_eq!(
+            check_src(
+                "
+                fn f(_ user: User) {}
+                struct Post {
+                    let author: User
+                }
+                struct User {}
+                "
+            ),
+            Err(vec![
+                CheckError::UnknownType("User".to_string()),
+                CheckError::UnknownType("User".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn structs_cannot_contain_themselves() {
+        assert_eq!(
+            check_src(
+                "
+                struct Node {
+                    let next: Node
+                }
+                "
+            ),
+            Err(vec![CheckError::UnknownType("Node".to_string())])
+        );
+    }
+
+    #[test]
+    fn rejects_redeclared_structs() {
+        assert_eq!(
+            check_src("struct A {}\nstruct A {}"),
+            Err(vec![CheckError::Redeclared("A".to_string())])
+        );
+        for name in ["Int", "Bool", "Void"] {
+            assert_eq!(
+                check_src(&format!("struct {name} {{}}")),
+                Err(vec![CheckError::Redeclared(name.to_string())]),
+                "{name:?}"
+            );
+        }
+        // Built-in types can't be redeclared inside functions either.
+        assert_eq!(
+            check_src(
+                "
+                fn f() {
+                    struct Int {}
+                    let x: Int = 1
+                }
+                "
+            ),
+            Err(vec![CheckError::Redeclared("Int".to_string())])
+        );
+    }
+
+    #[test]
+    fn structs_do_not_share_names_with_values() {
+        assert_eq!(
+            check_src(
+                "
+                struct User {}
+                let User = 1
+                fn Post(_ user: User) {}
+                struct Post {}
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn structs_are_scoped_like_other_names() {
+        assert_eq!(
+            check_src(
+                "
+                if true {
+                    struct A {}
+                    fn f(_ a: A) {}
+                }
+                fn g(_ a: A) {}
+                "
+            ),
+            Err(vec![CheckError::UnknownType("A".to_string())])
+        );
+        assert_eq!(
+            check_src(
+                "
+                fn f() {
+                    struct A {}
+                    fn g(_ a: A) {}
+                }
+                fn h(_ a: A) {}
+                "
+            ),
+            Err(vec![CheckError::UnknownType("A".to_string())])
+        );
+        // Separate blocks can reuse names.
+        assert_eq!(
+            check_src(
+                "
+                if true {
+                    struct A {}
+                } else {
+                    struct A {}
+                }
+                struct A {}
+                "
+            ),
+            Ok(())
+        );
+        // Blocks can't shadow, but functions can.
+        assert_eq!(
+            check_src(
+                "
+                struct A {}
+                if true {
+                    struct A {}
+                }
+                fn f() {
+                    struct A {}
+                }
+                "
+            ),
+            Err(vec![CheckError::Redeclared("A".to_string())])
         );
     }
 

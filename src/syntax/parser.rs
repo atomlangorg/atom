@@ -21,7 +21,7 @@ use chumsky::{
 use logos::Logos;
 
 use super::{
-    ast::{Arg, BinOp, Expr, Mutability, Param, Program, Stmt, UnOp},
+    ast::{Arg, BinOp, Expr, Field, Mutability, Param, Program, Stmt, UnOp},
     lexer::Token,
 };
 
@@ -119,7 +119,7 @@ where
 
     let decl = mutability
         .then(ident)
-        .then(annotation.or_not())
+        .then(annotation.clone().or_not())
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
         .map(|(((mutability, name), ty), value)| Stmt::Decl {
@@ -135,6 +135,40 @@ where
         .map(|(name, value)| Stmt::Assign { name, value });
 
     let newlines = just(Token::Newline).repeated();
+
+    // `let name: Type` or `var name: Type`. A value is parsed only so that it
+    // can be reported clearly.
+    let field = mutability
+        .then(ident)
+        .then(annotation)
+        .then(just(Token::Eq).ignore_then(expr.clone()).or_not())
+        .validate(|(((mutability, name), ty), value), e, emitter| {
+            if value.is_some() {
+                emitter.emit(Rich::custom(e.span(), "struct fields can't have values"));
+            }
+            Field {
+                mutability,
+                name,
+                ty,
+            }
+        });
+
+    // Like a block, one field per line with blank lines allowed, and the `{`
+    // on the same line as `struct`.
+    let struct_ = just(Token::Struct)
+        .ignore_then(type_name)
+        .then(
+            newlines
+                .clone()
+                .ignore_then(
+                    field
+                        .separated_by(newlines.clone().at_least(1))
+                        .allow_trailing()
+                        .collect(),
+                )
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(name, fields)| Stmt::Struct { name, fields });
 
     // One statement per line; blank lines are allowed anywhere.
     let stmts = recursive(|stmts| {
@@ -208,6 +242,7 @@ where
             .or(assign.clone())
             .or(if_)
             .or(fn_)
+            .or(struct_.clone())
             .or(return_)
             .or(call);
 
@@ -1006,6 +1041,145 @@ mod tests {
             "fn return() {}",
             "let fn = 1",
             "let _ = 1",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    fn field(mutability: Mutability, name: &str, ty: &str) -> Field {
+        Field {
+            mutability,
+            name: name.to_string(),
+            ty: ty.to_string(),
+        }
+    }
+
+    fn struct_(name: &str, fields: Vec<Field>) -> Stmt {
+        Stmt::Struct {
+            name: name.to_string(),
+            fields,
+        }
+    }
+
+    #[test]
+    fn parses_struct() {
+        assert_eq!(
+            parse(
+                "
+                struct User {
+                    let age: Int
+                    var isAdmin: Bool
+                }
+                "
+            ),
+            Ok(vec![struct_(
+                "User",
+                vec![
+                    field(Mutability::Let, "age", "Int"),
+                    field(Mutability::Var, "isAdmin", "Bool"),
+                ],
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_struct_layouts() {
+        assert_eq!(parse("struct Empty {}"), Ok(vec![struct_("Empty", vec![])]));
+        assert_eq!(
+            parse("struct Point { let x: Int }"),
+            Ok(vec![struct_(
+                "Point",
+                vec![field(Mutability::Let, "x", "Int")]
+            )])
+        );
+        assert_eq!(
+            parse(
+                "
+                struct Post { // A comment.
+
+                    // Another comment.
+                    let author: User
+
+                    var likes : Int
+                }
+                "
+            ),
+            Ok(vec![struct_(
+                "Post",
+                vec![
+                    field(Mutability::Let, "author", "User"),
+                    field(Mutability::Var, "likes", "Int"),
+                ],
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_struct_inside_blocks() {
+        assert_eq!(
+            parse(
+                "
+                fn f() {
+                    struct Inner {}
+                }
+                "
+            ),
+            Ok(vec![Stmt::Fn {
+                name: "f".to_string(),
+                params: vec![],
+                ret: "Void".to_string(),
+                body: vec![struct_("Inner", vec![])],
+            }])
+        );
+    }
+
+    #[test]
+    fn rejects_struct_field_values() {
+        for src in [
+            "struct User { let age: Int = 3 }",
+            "struct User { var isAdmin: Bool = true }",
+        ] {
+            let errs = parse(src).unwrap_err();
+            assert_eq!(
+                errs[0].to_string(),
+                "struct fields can't have values",
+                "{src:?}"
+            );
+        }
+        assert!(parse("struct User { let age = 3 }").is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_structs() {
+        for src in [
+            // Missing parts.
+            "struct {}",
+            "struct User",
+            "struct User {",
+            "struct User { let }",
+            "struct User { let age }",
+            "struct User { let age: }",
+            // Fields need `let` or `var`.
+            "struct User { age: Int }",
+            // Only fields are allowed.
+            "struct User { x = 1 }",
+            "struct User { f() }",
+            "struct User { return }",
+            "struct User { if c {} }",
+            "struct User { fn f() {} }",
+            "struct User { struct Inner {} }",
+            // Separators.
+            "struct User { let a: Int var b: Int }",
+            "struct User { let a: Int, var b: Int }",
+            "struct User { let a: Int; }",
+            // `{` must be on the same line.
+            "struct User\n{}",
+            // Statements after `}` need their own line.
+            "struct User {} x = 1",
+            // Keywords.
+            "struct struct {}",
+            "let struct = 1",
+            "struct User { let let: Int }",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }

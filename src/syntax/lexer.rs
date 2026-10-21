@@ -47,6 +47,8 @@ pub enum Token<'src> {
     Fn,
     #[token("return")]
     Return,
+    #[token("struct")]
+    Struct,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
@@ -102,6 +104,7 @@ impl fmt::Display for Token<'_> {
             Self::Else => write!(f, "else"),
             Self::Fn => write!(f, "fn"),
             Self::Return => write!(f, "return"),
+            Self::Struct => write!(f, "struct"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
@@ -236,6 +239,23 @@ mod tests {
     }
 
     #[test]
+    fn lexes_struct() {
+        assert_eq!(
+            lex("struct User { let age: Int }"),
+            vec![
+                Token::Struct,
+                Token::Ident("User"),
+                Token::LBrace,
+                Token::Let,
+                Token::Ident("age"),
+                Token::Colon,
+                Token::Ident("Int"),
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
     fn underscore_alone_is_not_an_identifier() {
         assert_eq!(
             lex("_ _a a_ __"),
@@ -262,8 +282,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            lex("fnord returned"),
-            vec![Token::Ident("fnord"), Token::Ident("returned")]
+            lex("fnord returned structure"),
+            vec![
+                Token::Ident("fnord"),
+                Token::Ident("returned"),
+                Token::Ident("structure"),
+            ]
         );
     }
 
