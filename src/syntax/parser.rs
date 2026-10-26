@@ -123,6 +123,11 @@ where
         Token::Bool(b) => Expr::Bool(b),
     };
 
+    // Newlines inside the brackets of a call or constructor, which can be
+    // split over several lines after the opening bracket, after each comma,
+    // and before the closing bracket.
+    let line_breaks = just(Token::Newline).repeated();
+
     // `label: value` or just `value`.
     let arg = ident
         .then_ignore(just(Token::Colon))
@@ -130,9 +135,12 @@ where
         .then(expr.clone())
         .map(|(label, value)| Arg { label, value });
     let args = arg
-        .separated_by(just(Token::Comma))
+        .separated_by(just(Token::Comma).then(line_breaks.clone()))
         .collect()
-        .delimited_by(just(Token::LParen), just(Token::RParen));
+        .delimited_by(
+            just(Token::LParen).then(line_breaks.clone()),
+            line_breaks.clone().then(just(Token::RParen)),
+        );
 
     // A name followed by arguments is a call, otherwise it's a variable.
     let name_or_call = name
@@ -147,14 +155,11 @@ where
         .clone()
         .delimited_by(just(Token::LParen), just(Token::RParen));
 
-    // `Type { field: value, ... }`. Every field must be labelled. Fields can
-    // be split over several lines, with newlines after the `{`, after each
-    // comma, and before the `}`.
+    // `Type { field: value, ... }`. Every field must be labelled.
     let field_value = ident
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
         .map(|(name, value)| FieldValue { name, value });
-    let line_breaks = just(Token::Newline).repeated();
     let construct = name
         .clone()
         .then(
@@ -1734,6 +1739,130 @@ mod tests {
             {
                 age: 42
             }
+            ",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_multiline_calls() {
+        let expected = || {
+            *call(
+                "bump",
+                vec![
+                    arg(None, *var("y")),
+                    arg(Some("by"), Expr::Int(2)),
+                    arg(Some("twice"), Expr::Bool(true)),
+                ],
+            )
+        };
+        for src in [
+            "
+            bump(
+                y,
+                by: 2,
+                twice: true
+            )
+            ",
+            "
+            bump(y,
+                by: 2, twice: true)
+            ",
+            "
+            bump(
+
+                // The value to bump.
+                y, /* By how much. */ by: 2,
+
+                twice: true
+            )
+            ",
+        ] {
+            assert_eq!(parse_body(src), Ok(vec![Stmt::Expr(expected())]), "{src:?}");
+        }
+        assert_eq!(parse_expr("f(\n\n)"), *call("f", vec![]));
+    }
+
+    #[test]
+    fn parses_nested_multiline_calls() {
+        assert_eq!(
+            parse_body(
+                "
+                let x = f(
+                    a: g(
+                        1
+                    ),
+                    b: User {
+                        age: h(
+                            c: 2
+                        )
+                    }
+                ) + 1
+                "
+            ),
+            Ok(vec![decl(
+                Mutability::Let,
+                "x",
+                None,
+                *bin(
+                    call(
+                        "f",
+                        vec![
+                            arg(Some("a"), *call("g", vec![arg(None, Expr::Int(1))])),
+                            arg(
+                                Some("b"),
+                                construct(
+                                    Name::new("User"),
+                                    vec![field_value(
+                                        "age",
+                                        *call("h", vec![arg(Some("c"), Expr::Int(2))]),
+                                    )],
+                                ),
+                            ),
+                        ],
+                    ),
+                    BinOp::Add,
+                    int(1),
+                ),
+            )])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_multiline_calls() {
+        for src in [
+            // Arguments still need commas between them.
+            "
+            f(
+                a: 1
+                b: 2
+            )
+            ",
+            // The comma must come straight after the value.
+            "
+            f(
+                a: 1
+                , b: 2
+            )
+            ",
+            // No trailing commas.
+            "
+            f(
+                a: 1,
+            )
+            ",
+            // An argument can't be split across lines.
+            "
+            f(
+                a:
+                    1
+            )
+            ",
+            // The `(` must be on the same line as the function's name.
+            "
+            f
+            (a: 1)
             ",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");

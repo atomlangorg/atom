@@ -30,7 +30,11 @@ fn run() {
     let owner = User { age: y, isAdmin: false }
     let manager = User { age: 30, isAdmin: true }
     let crew = Team {
-        lead: choose(owner, or: manager, preferringFirst: done),
+        lead: choose(
+            owner,
+            or: manager,
+            preferringFirst: done
+        ),
         size: 3
     }
     y = describeBoth(team: crew, user: owner)
