@@ -33,9 +33,9 @@ fn run() {
         lead: choose(
             owner,
             or: manager,
-            preferringFirst: done
+            preferringFirst: done,
         ),
-        size: 3
+        size: 3,
     }
     y = describeBoth(team: crew, user: owner)
 }

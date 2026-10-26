@@ -33,7 +33,12 @@ fn main() {
     let mut modules = vec![];
     let mut parsed = true;
     for (path, src) in &files {
-        match syntax::parse(src) {
+        let (result, warnings) = syntax::parse_with_warnings(src);
+        for warning in warnings {
+            let range = warning.span.into_range();
+            eprintln!("warning in /{} at {range:?}: {warning}", path.join("/"));
+        }
+        match result {
             Ok(program) => modules.push(Module {
                 path: path.clone(),
                 program,

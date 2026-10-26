@@ -1240,7 +1240,7 @@ fn binary_type(op: &BinOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::parse;
+    use crate::syntax::parser::parse;
 
     /// The standard library type called `name`.
     fn ty(name: &str) -> Type {

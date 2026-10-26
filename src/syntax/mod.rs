@@ -22,4 +22,4 @@ pub mod lexer;
 pub mod parser;
 
 pub use check::{Module, check};
-pub use parser::parse;
+pub use parser::parse_with_warnings;

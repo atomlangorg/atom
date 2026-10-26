@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
+use std::fmt;
+
 use chumsky::{
     input::{Stream, ValueInput},
+    inspector::TruncateState,
     prelude::*,
 };
 use logos::Logos;
@@ -30,19 +33,116 @@ use super::{
 
 pub type ParseError<'src> = Rich<'src, Token<'src>>;
 
+/// A problem that doesn't stop a program from compiling, such as a matter of
+/// style. Unlike errors, warnings never stop parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Warning {
+    pub span: SimpleSpan,
+    pub kind: WarningKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarningKind {
+    /// A list whose closing bracket is on the same line as its last item ends
+    /// with a comma. The span is the comma.
+    RedundantTrailingComma,
+    /// A list whose closing bracket is on its own line doesn't end with a
+    /// comma. The span is empty, just after the last item.
+    MissingTrailingComma,
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.kind {
+            WarningKind::RedundantTrailingComma => {
+                write!(f, "redundant trailing comma in a list on one line")
+            }
+            WarningKind::MissingTrailingComma => {
+                write!(f, "missing trailing comma in a list over several lines")
+            }
+        }
+    }
+}
+
+/// Parser state that collects warnings. Warnings from parsers that are
+/// backtracked out of are dropped.
+type Extra<'tok, 'src> = extra::Full<Rich<'tok, Token<'src>>, TruncateState<Warning>, ()>;
+
 /// Lexes and parses `src` into a program.
 pub fn parse(src: &str) -> Result<Program, Vec<ParseError<'_>>> {
+    parse_with_warnings(src).0
+}
+
+/// Lexes and parses `src` into a program, also returning any warnings,
+/// which are found even if parsing fails.
+pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, Vec<Warning>) {
     let tokens = Token::lexer(src).spanned().map(|(tok, span)| match tok {
         Ok(tok) => (tok, span.into()),
         Err(()) => (Token::Error, span.into()),
     });
     let stream = Stream::from_iter(tokens).map((src.len()..src.len()).into(), |(t, s)| (t, s));
 
-    program_parser().parse(stream).into_result()
+    let mut warnings = TruncateState(vec![]);
+    let result = program_parser()
+        .parse_with_state(stream, &mut warnings)
+        .into_result();
+    (result, warnings.0)
 }
 
-fn program_parser<'tok, 'src: 'tok, I>()
--> impl Parser<'tok, I, Program, extra::Err<Rich<'tok, Token<'src>>>>
+/// A comma-separated list of `item`s between `open` and `close`, as in a call
+/// or constructor. It can be split over several lines after `open`, after
+/// each comma, and before `close`.
+///
+/// A list whose `close` is on its own line should end with a comma, so that
+/// adding an item only changes one line. Otherwise it shouldn't. Either way,
+/// this is a warning rather than an error.
+fn comma_list<'tok, 'src: 'tok, I, T>(
+    item: impl Parser<'tok, I, T, Extra<'tok, 'src>> + Clone,
+    open: Token<'src>,
+    close: Token<'src>,
+) -> impl Parser<'tok, I, Vec<T>, Extra<'tok, 'src>> + Clone
+where
+    I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+{
+    let line_breaks = just(Token::Newline).repeated();
+    let item = item.map_with(|item, e| (item, e.span()));
+    let trailing_comma = just(Token::Comma).map_with(|_, e| e.span());
+
+    just(open)
+        .then(line_breaks.clone())
+        .ignore_then(
+            item.separated_by(just(Token::Comma).then(line_breaks.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .then(trailing_comma.or_not())
+        .then(line_breaks.count())
+        .then_ignore(just(close))
+        .validate(|((items, comma), newlines_before_close), e, emitter| {
+            let close_on_own_line = newlines_before_close > 0;
+            let last = items.last().map(|(_, span): &(T, SimpleSpan)| *span);
+            let warning = match (last, comma) {
+                (None, Some(comma)) => {
+                    emitter.emit(Rich::custom(comma, "expected a value before `,`"));
+                    None
+                }
+                (Some(_), Some(comma)) if !close_on_own_line => Some(Warning {
+                    span: comma,
+                    kind: WarningKind::RedundantTrailingComma,
+                }),
+                (Some(last), None) if close_on_own_line => Some(Warning {
+                    span: (last.end..last.end).into(),
+                    kind: WarningKind::MissingTrailingComma,
+                }),
+                _ => None,
+            };
+            if let Some(warning) = warning {
+                e.state().0.push(warning);
+            }
+            items.into_iter().map(|(item, _)| item).collect()
+        })
+}
+
+fn program_parser<'tok, 'src: 'tok, I>() -> impl Parser<'tok, I, Program, Extra<'tok, 'src>>
 where
     I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
 {
@@ -78,7 +178,7 @@ where
 
     // Unary and binary operators applied to `atom`, which is the tightest
     // binding part of an expression.
-    let operators = |atom: Boxed<'tok, 'tok, I, Expr, extra::Err<Rich<'tok, Token<'src>>>>| {
+    let operators = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
         let unary_op = select! {
             Token::Minus => UnOp::Neg,
             Token::Bang => UnOp::Not,
@@ -123,24 +223,13 @@ where
         Token::Bool(b) => Expr::Bool(b),
     };
 
-    // Newlines inside the brackets of a call or constructor, which can be
-    // split over several lines after the opening bracket, after each comma,
-    // and before the closing bracket.
-    let line_breaks = just(Token::Newline).repeated();
-
     // `label: value` or just `value`.
     let arg = ident
         .then_ignore(just(Token::Colon))
         .or_not()
         .then(expr.clone())
         .map(|(label, value)| Arg { label, value });
-    let args = arg
-        .separated_by(just(Token::Comma).then(line_breaks.clone()))
-        .collect()
-        .delimited_by(
-            just(Token::LParen).then(line_breaks.clone()),
-            line_breaks.clone().then(just(Token::RParen)),
-        );
+    let args = comma_list(arg, Token::LParen, Token::RParen);
 
     // A name followed by arguments is a call, otherwise it's a variable.
     let name_or_call = name
@@ -162,15 +251,7 @@ where
         .map(|(name, value)| FieldValue { name, value });
     let construct = name
         .clone()
-        .then(
-            field_value
-                .separated_by(just(Token::Comma).then(line_breaks.clone()))
-                .collect()
-                .delimited_by(
-                    just(Token::LBrace).then(line_breaks.clone()),
-                    line_breaks.then(just(Token::RBrace)),
-                ),
-        )
+        .then(comma_list(field_value, Token::LBrace, Token::RBrace))
         .map(|(ty, fields)| Expr::Construct { ty, fields });
 
     expr.define(operators(
@@ -1369,7 +1450,9 @@ mod tests {
             "x = f(a b)",
             "x = f(a:)",
             "x = f(_: 1)",
-            "x = f(1,)",
+            "x = f(,)",
+            "x = f(1,,)",
+            "x = f(1, ,)",
             "x = f(a: b: 1)",
             "x = 1(2)",
         ] {
@@ -1604,7 +1687,7 @@ mod tests {
             "x = User { age: }",
             "x = User { 42 }",
             "x = User { age = 42 }",
-            "x = User { age: 1, }",
+            "x = User { age: 1,, }",
             "x = User { age: 1 isAdmin: true }",
             "x = User { , }",
             "x = User { _: 1 }",
@@ -1717,13 +1800,6 @@ mod tests {
             x = User {
                 age: 42
                 , isAdmin: true
-            }
-            ",
-            // No trailing commas, like calls.
-            "
-            x = User {
-                age: 42,
-                isAdmin: true,
             }
             ",
             // A field can't be split across lines.
@@ -1846,12 +1922,6 @@ mod tests {
                 , b: 2
             )
             ",
-            // No trailing commas.
-            "
-            f(
-                a: 1,
-            )
-            ",
             // An argument can't be split across lines.
             "
             f(
@@ -1867,5 +1937,164 @@ mod tests {
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
+    }
+
+    /// The kinds of warnings from parsing `src` as the body of a function.
+    fn warnings(src: &str) -> Vec<WarningKind> {
+        let src = format!("fn body() {{\n{src}\n}}");
+        let (result, warnings) = parse_with_warnings(&src);
+        assert!(result.is_ok(), "{src:?} should parse");
+        warnings.into_iter().map(|warning| warning.kind).collect()
+    }
+
+    #[test]
+    fn allows_trailing_commas() {
+        assert_eq!(parse_expr("f(a: 1,)"), parse_expr("f(a: 1)"));
+        assert_eq!(
+            parse_expr("User { age: 1, }"),
+            parse_expr("User { age: 1 }")
+        );
+        assert_eq!(
+            parse_body(
+                "
+                f(
+                    a: 1,
+                    b: 2,
+                )
+                "
+            ),
+            parse_body("f(a: 1, b: 2)")
+        );
+    }
+
+    #[test]
+    fn warns_about_trailing_commas_on_one_line() {
+        assert_eq!(
+            warnings("f(a: 1,)\nx = User { age: 1, }"),
+            [
+                WarningKind::RedundantTrailingComma,
+                WarningKind::RedundantTrailingComma,
+            ]
+        );
+        // The closing bracket is on the same line as the last item.
+        assert_eq!(
+            warnings(
+                "
+                f(a: 1,
+                    b: 2,)
+                "
+            ),
+            [WarningKind::RedundantTrailingComma]
+        );
+    }
+
+    #[test]
+    fn warns_about_missing_trailing_commas_over_several_lines() {
+        assert_eq!(
+            warnings(
+                "
+                f(
+                    a: 1,
+                    b: 2
+                )
+                x = User {
+                    age: 1
+                }
+                "
+            ),
+            [
+                WarningKind::MissingTrailingComma,
+                WarningKind::MissingTrailingComma,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_warn_about_conventional_commas() {
+        assert_eq!(
+            warnings(
+                "
+                f(a: 1, b: 2)
+                f(
+                    a: 1,
+                    b: 2, // A comment after the comma.
+                )
+                f(a: 1,
+                    b: 2)
+                x = User {
+                    age: 1,
+
+                }
+                f()
+                f(
+                )
+                x = Empty {}
+                "
+            ),
+            []
+        );
+    }
+
+    #[test]
+    fn warns_about_each_nested_list() {
+        // Only the lists whose own layout is wrong.
+        assert_eq!(
+            warnings(
+                "
+                f(a: g(
+                    b: 1
+                ), c: h(d: 2,))
+                "
+            ),
+            [
+                WarningKind::MissingTrailingComma,
+                WarningKind::RedundantTrailingComma,
+            ]
+        );
+    }
+
+    #[test]
+    fn warning_spans_point_at_the_comma() {
+        let (_, warnings) = parse_with_warnings("let x = f(a: 1,)");
+        assert_eq!(
+            warnings,
+            [Warning {
+                span: (14..15).into(),
+                kind: WarningKind::RedundantTrailingComma,
+            }]
+        );
+        let (_, warnings) = parse_with_warnings("let x = f(\na: 1\n)");
+        assert_eq!(
+            warnings,
+            [Warning {
+                span: (15..15).into(),
+                kind: WarningKind::MissingTrailingComma,
+            }]
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "missing trailing comma in a list over several lines"
+        );
+    }
+
+    #[test]
+    fn warnings_from_abandoned_parses_are_dropped() {
+        // `f(b: 1,)` is parsed while trying to read a constructor, which then
+        // fails at `c`, so its warning is dropped along with it.
+        let (result, warnings) = parse_with_warnings("let x = User { a: f(b: 1,), c }");
+        assert!(result.is_err());
+        assert_eq!(warnings, []);
+    }
+
+    #[test]
+    fn warns_even_when_parsing_fails() {
+        let (result, warnings) = parse_with_warnings("let x = f(a: 1,)\nlet y =");
+        assert!(result.is_err());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn function_parameters_still_reject_trailing_commas() {
+        assert!(parse("fn f(a: Int,) {}").is_err());
     }
 }
