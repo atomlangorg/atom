@@ -89,9 +89,9 @@ pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, 
     (result, warnings.0)
 }
 
-/// A comma-separated list of `item`s between `open` and `close`, as in a call
-/// or constructor. It can be split over several lines after `open`, after
-/// each comma, and before `close`.
+/// A comma-separated list of `item`s between `open` and `close`, as in a
+/// call, constructor or function's parameters. It can be split over several
+/// lines after `open`, after each comma, and before `close`.
 ///
 /// A list whose `close` is on its own line should end with a comma, so that
 /// adding an item only changes one line. Otherwise it shouldn't. Either way,
@@ -374,10 +374,7 @@ where
             .then_ignore(just(Token::Colon))
             .then(type_name.clone())
             .map(|((label, name), ty)| Param { label, name, ty });
-        let params = param
-            .separated_by(just(Token::Comma))
-            .collect()
-            .delimited_by(just(Token::LParen), just(Token::RParen));
+        let params = comma_list(param, Token::LParen, Token::RParen);
 
         let fn_ = just(Token::Fn)
             .ignore_then(ident)
@@ -1288,7 +1285,8 @@ mod tests {
             "fn f(x _: Int) {}",
             // Separators.
             "fn f(a: Int b: Int) {}",
-            "fn f(a: Int,) {}",
+            "fn f(,) {}",
+            "fn f(a: Int,,) {}",
             // `{` must be on the same line.
             "fn f()\n{}",
             // Keywords.
@@ -2094,7 +2092,104 @@ mod tests {
     }
 
     #[test]
-    fn function_parameters_still_reject_trailing_commas() {
-        assert!(parse("fn f(a: Int,) {}").is_err());
+    fn parses_multiline_parameters() {
+        let expected = parse("fn bump(_ value: Int, by amount: Int, twice: Bool) {}");
+        for src in [
+            "
+            fn bump(
+                _ value: Int,
+                by amount: Int,
+                twice: Bool,
+            ) {}
+            ",
+            "
+            fn bump(_ value: Int,
+                by amount: Int, twice: Bool) {}
+            ",
+            "
+            fn bump(
+
+                // The value to bump.
+                _ value: Int, /* By how much. */ by amount: Int,
+
+                twice: Bool,
+            ) {}
+            ",
+            "fn bump(_ value: Int, by amount: Int, twice: Bool,) {}",
+        ] {
+            assert_eq!(parse(src), expected, "{src:?}");
+        }
+        assert_eq!(parse("fn f(\n\n) {}"), parse("fn f() {}"));
+    }
+
+    #[test]
+    fn warns_about_trailing_commas_in_parameters() {
+        assert_eq!(
+            warnings(
+                "
+                fn a(x: Int,) {}
+                fn b(
+                    x: Int
+                ) -> Int {
+                    return x
+                }
+                fn c(
+                    x: Int,
+                ) {}
+                fn d(x: Int) {}
+                "
+            ),
+            [
+                WarningKind::RedundantTrailingComma,
+                WarningKind::MissingTrailingComma,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_multiline_parameters() {
+        for src in [
+            // Parameters still need commas between them.
+            "
+            fn f(
+                a: Int
+                b: Int,
+            ) {}
+            ",
+            // The comma must come straight after the parameter.
+            "
+            fn f(
+                a: Int
+                , b: Int,
+            ) {}
+            ",
+            // A parameter can't be split across lines.
+            "
+            fn f(
+                a:
+                    Int,
+            ) {}
+            ",
+            "
+            fn f(
+                to
+                    value: Int,
+            ) {}
+            ",
+            // The `(` must be on the same line as the function's name.
+            "
+            fn f
+            (a: Int) {}
+            ",
+            // The `{` must be on the same line as the `)`, or return type.
+            "
+            fn f(
+                a: Int,
+            )
+            {}
+            ",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 }

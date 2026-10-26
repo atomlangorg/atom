@@ -54,7 +54,11 @@ fn bump(_ value: Int, by amount: Int, twice: Bool) -> Int {
     return result
 }
 
-fn choose(_ first: User, or second: User, preferringFirst: Bool) -> User {
+fn choose(
+    _ first: User,
+    or second: User,
+    preferringFirst: Bool,
+) -> User {
     if preferringFirst {
         return first
     }
