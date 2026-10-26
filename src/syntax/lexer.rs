@@ -72,6 +72,9 @@ pub enum Token<'src> {
     Pipe,
     #[token(":")]
     Colon,
+    /// Separates a module from a name declared in it, as in `other::f`.
+    #[token("::")]
+    ColonColon,
     #[token(",")]
     Comma,
     #[token(".")]
@@ -158,6 +161,7 @@ impl fmt::Display for Token<'_> {
             Self::Amp => write!(f, "&"),
             Self::Pipe => write!(f, "|"),
             Self::Colon => write!(f, ":"),
+            Self::ColonColon => write!(f, "::"),
             Self::Comma => write!(f, ","),
             Self::Dot => write!(f, "."),
             Self::Arrow => write!(f, "->"),
@@ -322,10 +326,10 @@ mod tests {
     #[test]
     fn lexes_qualified_names() {
         assert_eq!(
-            lex("other.f() /dir/other.Int"),
+            lex("other::f() /dir/other::Int"),
             vec![
                 Token::Ident("other"),
-                Token::Dot,
+                Token::ColonColon,
                 Token::Ident("f"),
                 Token::LParen,
                 Token::RParen,
@@ -333,8 +337,19 @@ mod tests {
                 Token::Ident("dir"),
                 Token::Slash,
                 Token::Ident("other"),
-                Token::Dot,
+                Token::ColonColon,
                 Token::Ident("Int"),
+            ]
+        );
+        // A label followed by a space and a colon is not `::`.
+        assert_eq!(
+            lex("a: :b::"),
+            vec![
+                Token::Ident("a"),
+                Token::Colon,
+                Token::Colon,
+                Token::Ident("b"),
+                Token::ColonColon,
             ]
         );
     }

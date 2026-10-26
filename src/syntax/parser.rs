@@ -166,11 +166,11 @@ where
     .labelled("module path")
     .boxed();
 
-    // `f`, `other.f` or `/dir/other.f`. Which module a name comes from is
+    // `f`, `other::f` or `/dir/other::f`. Which module a name comes from is
     // decided by the checker.
     let name = module_path
         .clone()
-        .then_ignore(just(Token::Dot))
+        .then_ignore(just(Token::ColonColon))
         .or_not()
         .then(ident)
         .map(|(module, name)| Name { module, name })
@@ -1524,9 +1524,9 @@ mod tests {
     fn parses_qualified_names() {
         let other = || ModulePath::Named("other".to_string());
         let path = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
-        assert_eq!(parse_expr("other.x"), Expr::Var(qualified(other(), "x")));
+        assert_eq!(parse_expr("other::x"), Expr::Var(qualified(other(), "x")));
         assert_eq!(
-            parse_expr("/dir/other.f() / ./other.y"),
+            parse_expr("/dir/other::f() / ./other::y"),
             Expr::Binary(
                 Box::new(Expr::Call {
                     callee: qualified(ModulePath::Absolute(path(&["dir", "other"])), "f"),
@@ -1540,7 +1540,7 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_body("let x: stdlib.Int = 1"),
+            parse_body("let x: stdlib::Int = 1"),
             Ok(vec![Stmt::Decl {
                 mutability: Mutability::Let,
                 name: "x".to_string(),
@@ -1562,16 +1562,24 @@ mod tests {
             "use a/b",
             "use .a",
             "use ../a",
-            "use /a.b",
+            "use /a::b",
             "use /a\n/b",
             "use /a use /b",
-            "let x = a.",
-            "let x = .a",
-            "let x = a.b.c",
-            "let x = a..b",
-            "let x: a. = 1",
+            "use a::b",
+            "let x = a::",
+            "let x = ::a",
+            "let x = a::b::c",
+            "let x = a:::b",
+            "let x = a: :b",
+            "let x: a:: = 1",
+            "let x = /a::",
+            "let x = ./a/::b",
+            // `.` no longer qualifies names.
+            "let x = a.b",
+            "let x = /a.b",
+            "let x: a.B = 1",
             // Assignments can't be qualified.
-            "fn f() {\na.x = 1\n}",
+            "fn f() {\na::x = 1\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
@@ -1605,7 +1613,7 @@ mod tests {
             construct(Name::new("Empty"), vec![])
         );
         assert_eq!(
-            parse_expr("user.User {age:1+2,isAdmin:f()}"),
+            parse_expr("user::User {age:1+2,isAdmin:f()}"),
             construct(
                 qualified(ModulePath::Named("user".to_string()), "User"),
                 vec![

@@ -40,7 +40,7 @@ impl fmt::Display for ModulePath {
 }
 
 /// A name, optionally qualified by the module it's declared in, as in `f`,
-/// `other.f` or `/dir/other.f`.
+/// `other::f` or `/dir/other::f`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Name {
     pub module: Option<ModulePath>,
@@ -60,7 +60,7 @@ impl Name {
 impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.module {
-            Some(module) => write!(f, "{module}.{}", self.name),
+            Some(module) => write!(f, "{module}::{}", self.name),
             None => write!(f, "{}", self.name),
         }
     }

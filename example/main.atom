@@ -74,5 +74,5 @@ fn unused() -> Int {
 // `describe` is declared in both /users/user and /teams/team, so it has to
 // be qualified with the file it comes from.
 fn describeBoth(team t: Team, user u: User) -> Int {
-    return team.describe(team: t) + user.describe(user: u)
+    return team::describe(team: t) + user::describe(user: u)
 }

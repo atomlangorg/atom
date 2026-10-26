@@ -44,7 +44,7 @@ use super::{
 };
 
 /// The name of the standard library, which is how it's imported and
-/// qualified, as in `stdlib.Int`.
+/// qualified, as in `stdlib::Int`.
 const STDLIB_NAME: &str = "stdlib";
 
 static STDLIB: LazyLock<Program> = LazyLock::new(|| {
@@ -102,6 +102,8 @@ pub enum CheckError {
     UnknownModule(String),
     /// A qualified name's module isn't the current module or one it imports.
     NotImported(String),
+    /// `::` was used after a name that's declared, but isn't a module.
+    NotAModule(String),
     /// A qualified name's module matched more than one module by name, so
     /// its full path is needed.
     AmbiguousModule { name: String, modules: Vec<String> },
@@ -218,6 +220,10 @@ impl fmt::Display for CheckError {
             ),
             Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
             Self::NotImported(path) => write!(f, "`{path}` is not an imported module"),
+            Self::NotAModule(name) => write!(
+                f,
+                "`{name}` is not a module, so it can't be followed by `::`"
+            ),
             Self::AmbiguousModule { name, modules } => write!(
                 f,
                 "`{name}` could be {}, so the full path must be used",
@@ -418,7 +424,7 @@ struct ModuleInfo<'a> {
     /// library.
     path: &'a [String],
     /// The name used to qualify the module's names, such as `other` in
-    /// `other.f`.
+    /// `other::f`.
     name: &'a str,
     program: &'a Program,
     /// The names declared at the module's top level.
@@ -627,6 +633,9 @@ impl<'a> Checker<'a> {
                 .filter(|&module| self.modules[module].name == name)
                 .collect();
             return match matches[..] {
+                // Modules aren't identifiers, so a name can be both. If it's
+                // only an identifier, that's probably the mistake.
+                [] if self.is_declared(name) => Err(CheckError::NotAModule(name.clone())),
                 [] => Err(CheckError::NotImported(name.clone())),
                 [module] => Ok(module),
                 _ => Err(CheckError::AmbiguousModule {
@@ -642,6 +651,15 @@ impl<'a> Checker<'a> {
         self.resolve_path(path)
             .filter(|module| self.visible_modules().any(|visible| visible == *module))
             .ok_or_else(|| CheckError::NotImported(path.to_string()))
+    }
+
+    /// Whether `name` is declared anywhere the current code could see it,
+    /// even if it's a value that a function can't use.
+    fn is_declared(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.contains_key(name))
+            || self
+                .visible_modules()
+                .any(|module| self.modules[module].scope.contains_key(name))
     }
 
     /// A type from the standard library, such as `Int` for integer literals.
@@ -1563,8 +1581,8 @@ mod tests {
                 "
                 struct Int {}
                 let a: Int = 1
-                let b: stdlib.Int = 1
-                fn f(x: main.Int) -> stdlib.Bool {
+                let b: stdlib::Int = 1
+                fn f(x: main::Int) -> stdlib::Bool {
                     return true
                 }
                 "
@@ -2821,7 +2839,7 @@ mod tests {
     fn names_need_importing() {
         assert_eq!(
             file_messages(&[
-                ("/main", "let a = x\nlet b = lib.x\nlet c = /lib.x"),
+                ("/main", "let a = x\nlet b = lib::x\nlet c = /lib::x"),
                 ("/lib", "let x = 1"),
             ]),
             [
@@ -2878,9 +2896,9 @@ mod tests {
                     use /a
                     use /dir/b
                     let x = f()
-                    let y: Int = a.f()
-                    let z: Bool = b.f()
-                    let w: Bool = /dir/b.f()
+                    let y: Int = a::f()
+                    let z: Bool = b::f()
+                    let w: Bool = /dir/b::f()
                     ",
                 ),
                 ("/a", a),
@@ -2898,8 +2916,8 @@ mod tests {
                     fn f() -> Bool {
                         return f()
                     }
-                    let x: Int = a.f()
-                    let y: Bool = main.f()
+                    let x: Int = a::f()
+                    let y: Bool = main::f()
                     ",
                 ),
                 ("/a", a),
@@ -2917,9 +2935,9 @@ mod tests {
                     "
                     use /a/other
                     use /b/other
-                    let x = other.value
-                    let y: Int = /a/other.value
-                    let z: Bool = ./b/other.value
+                    let x = other::value
+                    let y: Int = /a/other::value
+                    let z: Bool = ./b/other::value
                     ",
                 ),
                 ("/a/other", "let value = 1"),
@@ -2935,13 +2953,13 @@ mod tests {
             file_messages(&[
                 (
                     "/main",
-                    "use /lib\nlet x = lib.missing\nlet y: lib.Missing = 1",
+                    "use /lib\nlet x = lib::missing\nlet y: lib::Missing = 1",
                 ),
                 ("/lib", ""),
             ]),
             [
-                "/main: `lib.missing` is not declared",
-                "/main: unknown type `lib.Missing`",
+                "/main: `lib::missing` is not declared",
+                "/main: unknown type `lib::Missing`",
             ]
         );
     }
@@ -2949,7 +2967,7 @@ mod tests {
     #[test]
     fn std_names_can_be_qualified() {
         assert_eq!(
-            check_top("let x: stdlib.Int = 1\nlet y: Int = x\nlet z: stdlib.Bool = true"),
+            check_top("let x: stdlib::Int = 1\nlet y: Int = x\nlet z: stdlib::Bool = true"),
             Ok(())
         );
     }
@@ -3039,7 +3057,7 @@ mod tests {
                     use /lib
                     let a = 1
                     fn f() -> Int {
-                        return a + b + lib.b
+                        return a + b + lib::b
                     }
                     // So a value can't depend on itself through a function.
                     let c = g()
@@ -3053,7 +3071,7 @@ mod tests {
             [
                 "/main: functions can't use `a`, because it is declared outside the function",
                 "/main: functions can't use `b`, because it is declared outside the function",
-                "/main: functions can't use `lib.b`, because it is declared outside the function",
+                "/main: functions can't use `lib::b`, because it is declared outside the function",
                 "/main: functions can't use `c`, because it is declared outside the function",
             ]
         );
@@ -3232,9 +3250,9 @@ mod tests {
                     "
                     use ./users/user
                     let a: User = User { age: 1, isAdmin: true }
-                    let b: user.User = user.User { age: 2, isAdmin: false }
+                    let b: user::User = user::User { age: 2, isAdmin: false }
                     fn f() -> User {
-                        return /users/user.User { age: 3, isAdmin: true }
+                        return /users/user::User { age: 3, isAdmin: true }
                     }
                     ",
                 ),
@@ -3247,7 +3265,7 @@ mod tests {
     #[test]
     fn std_types_can_be_constructed() {
         assert_eq!(
-            check_body("let v: Void = Void {}\nlet b: stdlib.Bool = stdlib.Bool {}"),
+            check_body("let v: Void = Void {}\nlet b: stdlib::Bool = stdlib::Bool {}"),
             Ok(())
         );
     }
@@ -3274,6 +3292,63 @@ mod tests {
                 "/main: functions can't use `age`, because it is declared outside the function",
                 "/main: `b` depends on its own value",
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_qualifying_with_identifiers() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /lib
+                    struct Point {}
+                    let x = 1
+                    let a = x::y
+                    let b = Point::origin
+                    let c = helper::y
+                    let d = missing::y
+                    fn f(user: Int) -> Int {
+                        let local = 1
+                        return local::y + user::y + x::y
+                    }
+                    ",
+                ),
+                ("/lib", "fn helper() {}"),
+            ]),
+            [
+                "/main: `x` is not a module, so it can't be followed by `::`",
+                "/main: `Point` is not a module, so it can't be followed by `::`",
+                "/main: `helper` is not a module, so it can't be followed by `::`",
+                "/main: `missing` is not an imported module",
+                "/main: `local` is not a module, so it can't be followed by `::`",
+                "/main: `user` is not a module, so it can't be followed by `::`",
+                // Even though functions can't use `x`, it's still declared.
+                "/main: `x` is not a module, so it can't be followed by `::`",
+            ]
+        );
+    }
+
+    #[test]
+    fn modules_and_identifiers_can_share_names() {
+        // `::` always follows a module, so `user::age` is the module even
+        // where `user` is also a value.
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /user
+                    let user = 1
+                    fn f(user: Int) -> Int {
+                        return user::age() + user
+                    }
+                    ",
+                ),
+                ("/user", "fn age() -> Int {\nreturn 2\n}"),
+            ]),
+            Ok(())
         );
     }
 }
