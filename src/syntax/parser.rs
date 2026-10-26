@@ -147,18 +147,24 @@ where
         .clone()
         .delimited_by(just(Token::LParen), just(Token::RParen));
 
-    // `Type { field: value, ... }`. Every field must be labelled.
+    // `Type { field: value, ... }`. Every field must be labelled. Fields can
+    // be split over several lines, with newlines after the `{`, after each
+    // comma, and before the `}`.
     let field_value = ident
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
         .map(|(name, value)| FieldValue { name, value });
+    let line_breaks = just(Token::Newline).repeated();
     let construct = name
         .clone()
         .then(
             field_value
-                .separated_by(just(Token::Comma))
+                .separated_by(just(Token::Comma).then(line_breaks.clone()))
                 .collect()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+                .delimited_by(
+                    just(Token::LBrace).then(line_breaks.clone()),
+                    line_breaks.then(just(Token::RBrace)),
+                ),
         )
         .map(|(ty, fields)| Expr::Construct { ty, fields });
 
@@ -1598,9 +1604,137 @@ mod tests {
             "x = User { , }",
             "x = User { _: 1 }",
             "x = User\n{}",
-            "x = User {\nage: 1\n}",
             "x = 1 {}",
             "x = (User) {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_multiline_constructors() {
+        let user = || {
+            construct(
+                Name::new("User"),
+                vec![
+                    field_value("age", Expr::Int(42)),
+                    field_value("isAdmin", Expr::Bool(true)),
+                ],
+            )
+        };
+        assert_eq!(
+            parse_body(
+                "
+                let a = User {
+                    age: 42,
+                    isAdmin: true
+                }
+                let b = User { age: 42,
+                    isAdmin: true }
+                let c = User {
+
+                    // The age in years.
+                    age: 42, /* Never negative. */
+
+                    isAdmin: true
+                }
+                "
+            ),
+            Ok(vec![
+                decl(Mutability::Let, "a", None, user()),
+                decl(Mutability::Let, "b", None, user()),
+                decl(Mutability::Let, "c", None, user()),
+            ])
+        );
+        assert_eq!(
+            parse_expr("Empty {\n\n}"),
+            construct(Name::new("Empty"), vec![])
+        );
+    }
+
+    #[test]
+    fn parses_nested_multiline_constructors() {
+        assert_eq!(
+            parse_body(
+                "
+                let t = Team {
+                    lead: User {
+                        age: 30
+                    },
+                    size: f(x: Point {
+                        x: 1
+                    })
+                }
+                "
+            ),
+            Ok(vec![decl(
+                Mutability::Let,
+                "t",
+                None,
+                construct(
+                    Name::new("Team"),
+                    vec![
+                        field_value(
+                            "lead",
+                            construct(Name::new("User"), vec![field_value("age", Expr::Int(30))]),
+                        ),
+                        field_value(
+                            "size",
+                            *call(
+                                "f",
+                                vec![arg(
+                                    Some("x"),
+                                    construct(
+                                        Name::new("Point"),
+                                        vec![field_value("x", Expr::Int(1))]
+                                    ),
+                                )],
+                            ),
+                        ),
+                    ],
+                ),
+            )])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_multiline_constructors() {
+        for src in [
+            // Fields still need commas between them.
+            "
+            x = User {
+                age: 42
+                isAdmin: true
+            }
+            ",
+            // The comma must come straight after the value.
+            "
+            x = User {
+                age: 42
+                , isAdmin: true
+            }
+            ",
+            // No trailing commas, like calls.
+            "
+            x = User {
+                age: 42,
+                isAdmin: true,
+            }
+            ",
+            // A field can't be split across lines.
+            "
+            x = User {
+                age:
+                    42
+            }
+            ",
+            // The `{` must be on the same line as the type.
+            "
+            x = User
+            {
+                age: 42
+            }
+            ",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
