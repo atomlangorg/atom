@@ -21,7 +21,10 @@ use chumsky::{
 use logos::Logos;
 
 use super::{
-    ast::{Arg, BinOp, Expr, Field, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp},
+    ast::{
+        Arg, BinOp, Expr, Field, FieldValue, ModulePath, Mutability, Name, Param, Program, Stmt,
+        UnOp,
+    },
     lexer::Token,
 };
 
@@ -73,37 +76,9 @@ where
         .map(|(module, name)| Name { module, name })
         .boxed();
 
-    let expr = recursive(|expr| {
-        let literal = select! {
-            Token::Int(n) => Expr::Int(n),
-            Token::Bool(b) => Expr::Bool(b),
-        };
-
-        // `label: value` or just `value`.
-        let arg = ident
-            .then_ignore(just(Token::Colon))
-            .or_not()
-            .then(expr.clone())
-            .map(|(label, value)| Arg { label, value });
-        let args = arg
-            .separated_by(just(Token::Comma))
-            .collect()
-            .delimited_by(just(Token::LParen), just(Token::RParen));
-
-        // A name followed by arguments is a call, otherwise it's a variable.
-        let name_or_call = name
-            .clone()
-            .then(args.or_not())
-            .map(|(name, args)| match args {
-                Some(args) => Expr::Call { callee: name, args },
-                None => Expr::Var(name),
-            });
-
-        let atom = literal
-            .or(name_or_call)
-            .or(expr.delimited_by(just(Token::LParen), just(Token::RParen)))
-            .labelled("expression");
-
+    // Unary and binary operators applied to `atom`, which is the tightest
+    // binding part of an expression.
+    let operators = |atom: Boxed<'tok, 'tok, I, Expr, extra::Err<Rich<'tok, Token<'src>>>>| {
         let unary_op = select! {
             Token::Minus => UnOp::Neg,
             Token::Bang => UnOp::Not,
@@ -136,9 +111,76 @@ where
         let and = sum.clone().foldl(and_op.then(sum).repeated(), fold_binary);
 
         let or_op = just(Token::Pipe).to(BinOp::Or);
-        and.clone().foldl(or_op.then(and).repeated(), fold_binary)
-    })
-    .boxed();
+        and.clone()
+            .foldl(or_op.then(and).repeated(), fold_binary)
+            .boxed()
+    };
+
+    let mut expr = Recursive::declare();
+
+    let literal = select! {
+        Token::Int(n) => Expr::Int(n),
+        Token::Bool(b) => Expr::Bool(b),
+    };
+
+    // `label: value` or just `value`.
+    let arg = ident
+        .then_ignore(just(Token::Colon))
+        .or_not()
+        .then(expr.clone())
+        .map(|(label, value)| Arg { label, value });
+    let args = arg
+        .separated_by(just(Token::Comma))
+        .collect()
+        .delimited_by(just(Token::LParen), just(Token::RParen));
+
+    // A name followed by arguments is a call, otherwise it's a variable.
+    let name_or_call = name
+        .clone()
+        .then(args.or_not())
+        .map(|(name, args)| match args {
+            Some(args) => Expr::Call { callee: name, args },
+            None => Expr::Var(name),
+        });
+
+    let parenthesised = expr
+        .clone()
+        .delimited_by(just(Token::LParen), just(Token::RParen));
+
+    // `Type { field: value, ... }`. Every field must be labelled.
+    let field_value = ident
+        .then_ignore(just(Token::Colon))
+        .then(expr.clone())
+        .map(|(name, value)| FieldValue { name, value });
+    let construct = name
+        .clone()
+        .then(
+            field_value
+                .separated_by(just(Token::Comma))
+                .collect()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(ty, fields)| Expr::Construct { ty, fields });
+
+    expr.define(operators(
+        literal
+            .or(construct)
+            .or(name_or_call.clone())
+            .or(parenthesised.clone())
+            .labelled("expression")
+            .boxed(),
+    ));
+
+    // An `if` condition can't construct a struct outside of parentheses or
+    // arguments, since in `if done { ... }`, the `{` starts the `if`'s block
+    // rather than constructing `done`.
+    let condition = operators(
+        literal
+            .or(name_or_call)
+            .or(parenthesised)
+            .labelled("expression")
+            .boxed(),
+    );
 
     let mutability = select! {
         Token::Let => Mutability::Let,
@@ -220,7 +262,7 @@ where
                 just(Token::Else).ignore_then(block.clone().or(if_.map(|stmt| vec![stmt])));
 
             just(Token::If)
-                .ignore_then(expr.clone())
+                .ignore_then(condition.clone())
                 .then(block.clone())
                 .then(else_block.or_not())
                 .map(|((cond, then_block), else_block)| Stmt::If {
@@ -1440,6 +1482,127 @@ mod tests {
             "fn f() {\na.x = 1\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    fn field_value(name: &str, value: Expr) -> FieldValue {
+        FieldValue {
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    fn construct(ty: Name, fields: Vec<FieldValue>) -> Expr {
+        Expr::Construct { ty, fields }
+    }
+
+    #[test]
+    fn parses_constructors() {
+        assert_eq!(
+            parse_expr("User { age: 42, isAdmin: true }"),
+            construct(
+                Name::new("User"),
+                vec![
+                    field_value("age", Expr::Int(42)),
+                    field_value("isAdmin", Expr::Bool(true)),
+                ],
+            )
+        );
+        assert_eq!(
+            parse_expr("Empty {}"),
+            construct(Name::new("Empty"), vec![])
+        );
+        assert_eq!(
+            parse_expr("user.User {age:1+2,isAdmin:f()}"),
+            construct(
+                qualified(ModulePath::Named("user".to_string()), "User"),
+                vec![
+                    field_value("age", *bin(int(1), BinOp::Add, int(2))),
+                    field_value("isAdmin", *call("f", vec![])),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn constructors_nest_and_bind_tightest() {
+        assert_eq!(
+            parse_expr("-Team { lead: User { age: 1 } } * 2"),
+            *bin(
+                neg(Box::new(construct(
+                    Name::new("Team"),
+                    vec![field_value(
+                        "lead",
+                        construct(Name::new("User"), vec![field_value("age", Expr::Int(1))]),
+                    )],
+                ))),
+                BinOp::Mul,
+                int(2),
+            )
+        );
+        assert_eq!(
+            parse_expr("f(user: User {})"),
+            *call(
+                "f",
+                vec![arg(Some("user"), construct(Name::new("User"), vec![]))]
+            )
+        );
+    }
+
+    #[test]
+    fn if_conditions_need_parentheses_to_construct() {
+        // The `{` starts the block, not a constructor.
+        assert_eq!(
+            parse_body("if done {}"),
+            Ok(vec![if_(*var("done"), vec![], None)])
+        );
+        assert_eq!(
+            parse_body("if (Flag {}) {}"),
+            Ok(vec![if_(
+                construct(Name::new("Flag"), vec![]),
+                vec![],
+                None
+            )])
+        );
+        assert_eq!(
+            parse_body("if f(flag: Flag {}) {}"),
+            Ok(vec![if_(
+                *call(
+                    "f",
+                    vec![arg(Some("flag"), construct(Name::new("Flag"), vec![]))]
+                ),
+                vec![],
+                None,
+            )])
+        );
+        assert!(parse_body("if Flag { on: true } {}").is_err());
+    }
+
+    #[test]
+    fn rejects_constructor_statements() {
+        // Only calls can be statements.
+        assert!(parse_body("User {}").is_err());
+        assert!(parse_body("User { age: 1 }").is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_constructors() {
+        for src in [
+            "x = User {",
+            "x = User { age }",
+            "x = User { age: }",
+            "x = User { 42 }",
+            "x = User { age = 42 }",
+            "x = User { age: 1, }",
+            "x = User { age: 1 isAdmin: true }",
+            "x = User { , }",
+            "x = User { _: 1 }",
+            "x = User\n{}",
+            "x = User {\nage: 1\n}",
+            "x = 1 {}",
+            "x = (User) {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 }

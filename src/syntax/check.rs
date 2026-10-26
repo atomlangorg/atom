@@ -36,7 +36,10 @@ use std::{
 };
 
 use super::{
-    ast::{Arg, BinOp, Expr, Field, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp},
+    ast::{
+        Arg, BinOp, Expr, Field, FieldValue, ModulePath, Mutability, Name, Param, Program, Stmt,
+        UnOp,
+    },
     parser::parse,
 };
 
@@ -149,6 +152,26 @@ pub enum CheckError {
         expected: Option<String>,
         found: Option<String>,
     },
+    /// A struct was constructed with the wrong number of fields.
+    WrongFieldCount {
+        ty: String,
+        expected: usize,
+        found: usize,
+    },
+    /// A struct was constructed with a field that isn't the next one it
+    /// declares, either because the name is wrong or it's out of order.
+    WrongField {
+        ty: String,
+        expected: String,
+        found: String,
+    },
+    /// A struct was constructed with a field value of the wrong type.
+    FieldTypeMismatch {
+        ty: String,
+        field: String,
+        expected: Type,
+        found: Type,
+    },
     /// An argument had the wrong type.
     ArgumentTypeMismatch {
         function: String,
@@ -260,6 +283,28 @@ impl fmt::Display for CheckError {
                 ),
                 (None, None) => write!(f, "argument to `{function}` has the wrong label"),
             },
+            Self::WrongFieldCount {
+                ty,
+                expected,
+                found,
+            } => {
+                let s = if *expected == 1 { "" } else { "s" };
+                write!(f, "`{ty}` has {expected} field{s}, found {found}")
+            }
+            Self::WrongField {
+                ty,
+                expected,
+                found,
+            } => write!(f, "expected field `{expected}` of `{ty}`, found `{found}`"),
+            Self::FieldTypeMismatch {
+                ty,
+                field,
+                expected,
+                found,
+            } => write!(
+                f,
+                "field `{field}` of `{ty}` expects `{expected}`, found `{found}`"
+            ),
             Self::ArgumentTypeMismatch {
                 function,
                 param,
@@ -315,6 +360,13 @@ struct ParamSignature<'a> {
     label: Option<&'a str>,
     name: &'a str,
     /// `None` if the parameter's type is unknown.
+    ty: Option<Type>,
+}
+
+#[derive(Debug, Clone)]
+struct FieldSignature<'a> {
+    name: &'a str,
+    /// `None` if the field's type is unknown.
     ty: Option<Type>,
 }
 
@@ -412,9 +464,9 @@ struct Checker<'a> {
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
     globals: Vec<Global<'a>>,
-    /// For each struct, indexed by `id`, the `id`s of the structs its fields
-    /// have as types.
-    struct_fields: Vec<Vec<usize>>,
+    /// For each struct, indexed by `id`, its fields in the order they're
+    /// declared.
+    struct_fields: Vec<Vec<FieldSignature<'a>>>,
     errors: Vec<ModuleError>,
 }
 
@@ -833,31 +885,41 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolves the fields of the struct with `id`.
-    fn define_struct(&mut self, id: usize, fields: &[Field]) {
+    fn define_struct(&mut self, id: usize, fields: &'a [Field]) {
         // Field names only need to be unique within their struct.
         let mut field_names = HashSet::new();
         for field in fields {
             if !field_names.insert(&field.name) {
                 self.error(CheckError::Redeclared(field.name.clone()));
             }
-            if let Some(ty) = self.resolve_type(&field.ty) {
-                self.struct_fields[id].push(ty.id);
-            }
+            let ty = self.resolve_type(&field.ty);
+            self.struct_fields[id].push(FieldSignature {
+                name: &field.name,
+                ty,
+            });
         }
+    }
+
+    /// The `id`s of the structs that the fields of the struct with `id` have
+    /// as types.
+    fn contained_structs(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
+        self.struct_fields[id]
+            .iter()
+            .filter_map(|field| field.ty.as_ref().map(|ty| ty.id))
     }
 
     /// Reports an error if the struct with `id` contains itself, which would
     /// make it infinitely large.
     fn check_not_recursive(&mut self, id: usize, name: &str) {
         let mut seen = HashSet::new();
-        let mut unvisited = self.struct_fields[id].clone();
+        let mut unvisited: Vec<_> = self.contained_structs(id).collect();
         while let Some(next) = unvisited.pop() {
             if next == id {
                 self.error(CheckError::RecursiveStruct(name.to_string()));
                 return;
             }
             if seen.insert(next) {
-                unvisited.extend(&self.struct_fields[next]);
+                unvisited.extend(self.contained_structs(next));
             }
         }
     }
@@ -1019,7 +1081,50 @@ impl<'a> Checker<'a> {
                 Some(ty)
             }
             Expr::Call { callee, args } => self.call(callee, args),
+            Expr::Construct { ty, fields } => self.construct(ty, fields),
         }
+    }
+
+    /// Checks the construction of a struct, returning its type, or `None` if
+    /// it can't be determined.
+    fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Option<Type> {
+        // Values are checked first, so their errors come before the struct's.
+        let found: Vec<_> = values.iter().map(|field| self.expr(&field.value)).collect();
+
+        let ty = self.resolve_type(type_name)?;
+        let fields = self.struct_fields[ty.id].clone();
+        let name = type_name.to_string();
+
+        // Every field must be given, in the order the struct declares them.
+        if values.len() != fields.len() {
+            self.error(CheckError::WrongFieldCount {
+                ty: name,
+                expected: fields.len(),
+                found: values.len(),
+            });
+            return Some(ty);
+        }
+
+        for ((value, found), field) in values.iter().zip(found).zip(&fields) {
+            if value.name != field.name {
+                self.error(CheckError::WrongField {
+                    ty: name.clone(),
+                    expected: field.name.to_string(),
+                    found: value.name.clone(),
+                });
+            } else if let (Some(expected), Some(found)) = (&field.ty, found)
+                && *expected != found
+            {
+                self.error(CheckError::FieldTypeMismatch {
+                    ty: name.clone(),
+                    field: field.name.to_string(),
+                    expected: expected.clone(),
+                    found,
+                });
+            }
+        }
+
+        Some(ty)
     }
 
     /// Checks a call, returning the function's return type, or `None` if it
@@ -2970,6 +3075,205 @@ mod tests {
         assert_eq!(
             file_messages(&[("/main", "let x = 1"), ("/dir/other", "let y = z"),]),
             ["/dir/other: `z` is not declared"]
+        );
+    }
+
+    const USER: &str = "
+        struct User {
+            let age: Int
+            var isAdmin: Bool
+        }
+    ";
+
+    #[test]
+    fn constructs_structs() {
+        assert_eq!(
+            check_top(&format!(
+                "
+                {USER}
+                struct Team {{
+                    let lead: User
+                    let size: Int
+                }}
+                struct Empty {{}}
+
+                let admin: User = User {{ age: 42, isAdmin: true }}
+                let team = Team {{ lead: User {{ age: 30, isAdmin: false }}, size: 1 + 2 }}
+                let empty = Empty {{}}
+
+                fn promote(user: User) -> User {{
+                    return User {{ age: 18, isAdmin: true }}
+                }}
+                fn newTeam() -> Team {{
+                    let lead = promote(user: User {{ age: 20, isAdmin: false }})
+                    return Team {{ lead: lead, size: 1 }}
+                }}
+                "
+            )),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn constructors_give_the_struct_type() {
+        assert_eq!(
+            messages(&format!(
+                "
+                {USER}
+                let x: Int = User {{ age: 1, isAdmin: true }}
+                let y = User {{ age: 1, isAdmin: true }} + 1
+                "
+            )),
+            [
+                "cannot assign `User` to `x`, which has type `Int`",
+                "operator `+` expects `Int`, found `User`",
+            ]
+        );
+    }
+
+    #[test]
+    fn constructors_need_every_field() {
+        assert_eq!(
+            messages(&format!(
+                "
+                {USER}
+                let a = User {{ age: 1 }}
+                let b = User {{ age: 1, isAdmin: true, extra: 2 }}
+                let c = User {{}}
+                "
+            )),
+            [
+                "`User` has 2 fields, found 1",
+                "`User` has 2 fields, found 3",
+                "`User` has 2 fields, found 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn constructor_fields_must_be_in_order() {
+        assert_eq!(
+            messages(&format!(
+                "
+                {USER}
+                let a = User {{ isAdmin: true, age: 1 }}
+                let b = User {{ age: 1, admin: true }}
+                "
+            )),
+            [
+                "expected field `age` of `User`, found `isAdmin`",
+                "expected field `isAdmin` of `User`, found `age`",
+                "expected field `isAdmin` of `User`, found `admin`",
+            ]
+        );
+    }
+
+    #[test]
+    fn constructor_fields_are_type_checked() {
+        assert_eq!(
+            messages(&format!(
+                "
+                {USER}
+                let a = User {{ age: true, isAdmin: 1 }}
+                let b = User {{ age: -true, isAdmin: false }}
+                "
+            )),
+            [
+                "field `age` of `User` expects `Int`, found `Bool`",
+                "field `isAdmin` of `User` expects `Bool`, found `Int`",
+                // The `-` makes `age` an `Int`, so it's only reported once.
+                "operator `-` expects `Int`, found `Bool`",
+            ]
+        );
+    }
+
+    #[test]
+    fn constructors_need_a_struct() {
+        assert_eq!(
+            messages(
+                "
+                let x = 1
+                fn f() {}
+                let a = Missing { value: y }
+                let b = x {}
+                let c = f {}
+                "
+            ),
+            [
+                "`y` is not declared",
+                "unknown type `Missing`",
+                "`x` is not a type",
+                "`f` is not a type",
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_field_types_accept_any_value() {
+        assert_eq!(
+            messages(
+                "
+                struct Box {
+                    let value: Missing
+                }
+                let b = Box { value: 1 }
+                "
+            ),
+            ["unknown type `Missing`"]
+        );
+    }
+
+    #[test]
+    fn constructors_work_across_modules() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use ./users/user
+                    let a: User = User { age: 1, isAdmin: true }
+                    let b: user.User = user.User { age: 2, isAdmin: false }
+                    fn f() -> User {
+                        return /users/user.User { age: 3, isAdmin: true }
+                    }
+                    ",
+                ),
+                ("/users/user", USER),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn std_types_can_be_constructed() {
+        assert_eq!(
+            check_body("let v: Void = Void {}\nlet b: stdlib.Bool = stdlib.Bool {}"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn constructor_values_follow_capture_rules() {
+        assert_eq!(
+            file_messages(&[(
+                "/main",
+                &format!(
+                    "
+                    {USER}
+                    let age = 1
+                    let a = User {{ age: age, isAdmin: true }}
+                    fn f() -> User {{
+                        return User {{ age: age, isAdmin: true }}
+                    }}
+                    // A value can't contain itself.
+                    let b: User = User {{ age: b, isAdmin: true }}
+                    "
+                ),
+            )]),
+            [
+                "/main: functions can't use `age`, because it is declared outside the function",
+                "/main: `b` depends on its own value",
+            ]
         );
     }
 }

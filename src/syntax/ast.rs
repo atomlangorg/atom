@@ -116,6 +116,19 @@ pub enum Expr {
         callee: Name,
         args: Vec<Arg>,
     },
+    /// `Type { field: value, ... }`: constructs a struct, giving every field
+    /// a value in the order they're declared.
+    Construct {
+        ty: Name,
+        fields: Vec<FieldValue>,
+    },
+}
+
+/// A field's value when constructing a struct, such as `age: 42`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldValue {
+    pub name: String,
+    pub value: Expr,
 }
 
 /// An argument in a function call, such as `to: 3` or `3`.
