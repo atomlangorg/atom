@@ -25,8 +25,8 @@ use logos::Logos;
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, ModulePath, Mutability, Name, Param, Program, Stmt,
-        UnOp,
+        Arg, BinOp, Expr, Field, FieldValue, Function, ModulePath, Mutability, Name, Param,
+        Program, Stmt, UnOp,
     },
     lexer::Token,
 };
@@ -234,7 +234,7 @@ where
     // A name followed by arguments is a call, otherwise it's a variable.
     let name_or_call = name
         .clone()
-        .then(args.or_not())
+        .then(args.clone().or_not())
         .map(|(name, args)| match args {
             Some(args) => Expr::Call { callee: name, args },
             None => Expr::Var(name),
@@ -254,25 +254,44 @@ where
         .then(comma_list(field_value, Token::LBrace, Token::RBrace))
         .map(|(ty, fields)| Expr::Construct { ty, fields });
 
-    expr.define(operators(
+    let self_value = just(Token::SelfValue).to(Expr::SelfValue);
+
+    // `.method(args)` after any atom, which binds tighter than any operator,
+    // so `-a.f()` is `-(a.f())`. Calls can be chained, as in `a.f().g()`.
+    let method_call = just(Token::Dot).ignore_then(ident).then(args);
+    let with_method_calls = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
+        atom.foldl(
+            method_call.clone().repeated(),
+            |receiver, (method, args)| Expr::MethodCall {
+                receiver: Box::new(receiver),
+                method,
+                args,
+            },
+        )
+        .boxed()
+    };
+
+    expr.define(operators(with_method_calls(
         literal
+            .or(self_value.clone())
             .or(construct)
             .or(name_or_call.clone())
             .or(parenthesised.clone())
             .labelled("expression")
             .boxed(),
-    ));
+    )));
 
     // An `if` condition can't construct a struct outside of parentheses or
     // arguments, since in `if done { ... }`, the `{` starts the `if`'s block
     // rather than constructing `done`.
-    let condition = operators(
+    let condition = operators(with_method_calls(
         literal
+            .or(self_value)
             .or(name_or_call)
             .or(parenthesised)
             .labelled("expression")
             .boxed(),
-    );
+    ));
 
     let mutability = select! {
         Token::Let => Mutability::Let,
@@ -337,11 +356,13 @@ where
         .map(|(name, fields)| Stmt::Struct { name, fields });
 
     // One statement per line; blank lines are allowed anywhere.
-    let stmt = recursive(|stmt| {
+    let mut stmt = Recursive::declare();
+    let function = {
         let block = newlines
             .clone()
             .ignore_then(
-                stmt.separated_by(newlines.clone().at_least(1))
+                stmt.clone()
+                    .separated_by(newlines.clone().at_least(1))
                     .allow_trailing()
                     .collect(),
             )
@@ -376,7 +397,7 @@ where
             .map(|((label, name), ty)| Param { label, name, ty });
         let params = comma_list(param, Token::LParen, Token::RParen);
 
-        let fn_ = just(Token::Fn)
+        let function = just(Token::Fn)
             .ignore_then(ident)
             .then(params)
             .then(
@@ -385,13 +406,14 @@ where
                     .or_not()
                     .map(|ret| ret.unwrap_or_else(|| Name::new("Void"))),
             )
-            .then(block.clone())
-            .map(|(((name, params), ret), body)| Stmt::Fn {
+            .then(block)
+            .map(|(((name, params), ret), body)| Function {
                 name,
                 params,
                 ret,
                 body,
-            });
+            })
+            .boxed();
 
         let return_ = just(Token::Return)
             .ignore_then(expr.clone().or_not())
@@ -400,32 +422,48 @@ where
         // Only calls are useful on their own, since any other expression's
         // value would be thrown away.
         let call = expr.clone().try_map(|expr, span| match expr {
-            Expr::Call { .. } => Ok(Stmt::Expr(expr)),
+            Expr::Call { .. } | Expr::MethodCall { .. } => Ok(Stmt::Expr(expr)),
             _ => Err(Rich::custom(
                 span,
                 "only function calls can be used as statements",
             )),
         });
 
-        decl.clone()
-            .or(assign)
-            .or(if_)
-            .or(fn_)
-            .or(struct_)
-            .or(return_)
-            .or(call)
-    });
+        stmt.define(
+            decl.clone()
+                .or(assign)
+                .or(if_)
+                .or(function.clone().map(Stmt::Fn))
+                .or(struct_)
+                .or(return_)
+                .or(call),
+        );
+        function
+    };
 
     let use_ = just(Token::Use).ignore_then(module_path).map(Stmt::Use);
+
+    // `impl Type { fn ... }`, with one function per line, like a block.
+    let impl_ = just(Token::Impl)
+        .ignore_then(type_name.clone())
+        .then(
+            newlines
+                .clone()
+                .ignore_then(
+                    function
+                        .separated_by(newlines.clone().at_least(1))
+                        .allow_trailing()
+                        .collect(),
+                )
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(ty, methods)| Stmt::Impl { ty, methods });
 
     // The top level can only declare things, so a module never runs code
     // just by being imported. Other statements are parsed only so that they
     // can be reported clearly.
-    let top_level_stmt = use_.or(stmt.validate(|stmt, e, emitter| {
-        if !matches!(
-            stmt,
-            Stmt::Decl { .. } | Stmt::Fn { .. } | Stmt::Struct { .. }
-        ) {
+    let top_level_stmt = use_.or(impl_).or(stmt.validate(|stmt, e, emitter| {
+        if !matches!(stmt, Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Struct { .. }) {
             emitter.emit(Rich::custom(
                 e.span(),
                 "only declarations can be used at the top level",
@@ -454,7 +492,7 @@ mod tests {
     fn parse_body(src: &str) -> Result<Vec<Stmt>, Vec<String>> {
         match parse(&format!("fn body() {{\n{src}\n}}")) {
             Ok(mut program) => match program.remove(0) {
-                Stmt::Fn { body, .. } => Ok(body),
+                Stmt::Fn(Function { body, .. }) => Ok(body),
                 stmt => panic!("expected a function, got {stmt:?}"),
             },
             Err(errs) => Err(errs.iter().map(ToString::to_string).collect()),
@@ -1147,7 +1185,7 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn {
+            Ok(vec![Stmt::Fn(Function {
                 name: "addFive".to_string(),
                 params: vec![param(Some("to"), "value", "Int")],
                 ret: Name::new("Int"),
@@ -1156,7 +1194,7 @@ mod tests {
                     BinOp::Add,
                     int(5),
                 )))],
-            }])
+            })])
         );
     }
 
@@ -1164,7 +1202,7 @@ mod tests {
     fn parses_parameter_label_forms() {
         assert_eq!(
             parse_body("fn f(a: Int, to b: Bool, _ c: Int) {}"),
-            Ok(vec![Stmt::Fn {
+            Ok(vec![Stmt::Fn(Function {
                 name: "f".to_string(),
                 params: vec![
                     // A single name is both the label and the parameter name.
@@ -1175,7 +1213,7 @@ mod tests {
                 ],
                 ret: Name::new("Void"),
                 body: vec![],
-            }])
+            })])
         );
     }
 
@@ -1190,12 +1228,12 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn {
+            Ok(vec![Stmt::Fn(Function {
                 name: "reset".to_string(),
                 params: vec![],
                 ret: Name::new("Void"),
                 body: vec![assign("count", Expr::Int(0)), Stmt::Return(None)],
-            }])
+            })])
         );
     }
 
@@ -1380,12 +1418,12 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn {
+            Ok(vec![Stmt::Fn(Function {
                 name: "f".to_string(),
                 params: vec![],
                 ret: Name::new("Void"),
                 body: vec![struct_("Inner", vec![])],
-            }])
+            })])
         );
     }
 
@@ -1484,12 +1522,12 @@ mod tests {
                 Stmt::Use(ModulePath::Named("stdlib".to_string())),
                 decl(Mutability::Let, "x", None, Expr::Int(1)),
                 decl(Mutability::Var, "y", Some("Int"), Expr::Int(2)),
-                Stmt::Fn {
+                Stmt::Fn(Function {
                     name: "f".to_string(),
                     params: vec![],
                     ret: Name::new("Void"),
                     body: vec![],
-                },
+                }),
                 struct_("S", vec![]),
             ])
         );
@@ -2198,6 +2236,178 @@ mod tests {
             ",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    fn method_call(receiver: Expr, method: &str, args: Vec<Arg>) -> Expr {
+        Expr::MethodCall {
+            receiver: Box::new(receiver),
+            method: method.to_string(),
+            args,
+        }
+    }
+
+    #[test]
+    fn parses_impl() {
+        assert_eq!(
+            parse(
+                "
+                impl User {
+                    fn score() -> Int {
+                        return self.base()
+                    }
+
+                    // Another method.
+                    fn rename(to name: Int) {}
+                }
+                impl user::User {}
+                "
+            ),
+            Ok(vec![
+                Stmt::Impl {
+                    ty: Name::new("User"),
+                    methods: vec![
+                        Function {
+                            name: "score".to_string(),
+                            params: vec![],
+                            ret: Name::new("Int"),
+                            body: vec![Stmt::Return(Some(method_call(
+                                Expr::SelfValue,
+                                "base",
+                                vec![],
+                            )))],
+                        },
+                        Function {
+                            name: "rename".to_string(),
+                            params: vec![param(Some("to"), "name", "Int")],
+                            ret: Name::new("Void"),
+                            body: vec![],
+                        },
+                    ],
+                },
+                Stmt::Impl {
+                    ty: qualified(ModulePath::Named("user".to_string()), "User"),
+                    methods: vec![],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_method_calls() {
+        assert_eq!(
+            parse_expr("a.f(x: 1).g()"),
+            method_call(
+                method_call(*var("a"), "f", vec![arg(Some("x"), Expr::Int(1))]),
+                "g",
+                vec![],
+            )
+        );
+        assert_eq!(
+            parse_expr("f().g() + (1 + 2).h() + 3.i()"),
+            *bin(
+                bin(
+                    Box::new(method_call(*call("f", vec![]), "g", vec![])),
+                    BinOp::Add,
+                    Box::new(method_call(*bin(int(1), BinOp::Add, int(2)), "h", vec![])),
+                ),
+                BinOp::Add,
+                Box::new(method_call(Expr::Int(3), "i", vec![])),
+            )
+        );
+        assert_eq!(
+            parse_expr("User {}.f()"),
+            method_call(construct(Name::new("User"), vec![]), "f", vec![])
+        );
+        assert_eq!(
+            parse_expr(
+                "other::x.f(
+                    a: 1,
+                )"
+            ),
+            method_call(
+                Expr::Var(qualified(ModulePath::Named("other".to_string()), "x")),
+                "f",
+                vec![arg(Some("a"), Expr::Int(1))],
+            )
+        );
+    }
+
+    #[test]
+    fn method_calls_bind_tightest() {
+        assert_eq!(
+            parse_expr("-a.f() * 2"),
+            *bin(
+                neg(Box::new(method_call(*var("a"), "f", vec![]))),
+                BinOp::Mul,
+                int(2),
+            )
+        );
+    }
+
+    #[test]
+    fn parses_method_call_statements_and_conditions() {
+        assert_eq!(
+            parse_body("user.promote()\nif user.isAdmin() {}"),
+            Ok(vec![
+                Stmt::Expr(method_call(*var("user"), "promote", vec![])),
+                if_(method_call(*var("user"), "isAdmin", vec![]), vec![], None),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_impls() {
+        for src in [
+            "impl {}",
+            "impl User",
+            "impl User\n{}",
+            "impl 1 {}",
+            "impl User { fn f() {} fn g() {} }",
+            // Only functions are allowed inside.
+            "impl User {\nlet x = 1\n}",
+            "impl User {\nstruct S {}\n}",
+            "impl User {\nimpl User {}\n}",
+            "impl User {\nuse /lib\n}",
+            "impl User {\nf()\n}",
+            // Only at the top level.
+            "fn f() {\nimpl User {}\n}",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_method_calls() {
+        for src in [
+            // Fields can't be accessed yet.
+            "x = a.f",
+            "x = a.",
+            "x = .f()",
+            "x = a.1()",
+            "x = a..f()",
+            "x = a.f\n()",
+            "x = a.self()",
+            "x = a.f().",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn self_is_a_keyword() {
+        assert_eq!(parse_expr("self"), Expr::SelfValue);
+        for src in [
+            "let self = 1",
+            "self = 1",
+            "fn self() {}",
+            "fn f(self: Int) {}",
+            "fn f(_ self: Int) {}",
+            "f(self: 1)",
+            "x = self::f()",
+            "struct self {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 }

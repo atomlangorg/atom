@@ -9,3 +9,21 @@ let maxAge = 120
 fn describe(user: User) -> Int {
     return 1
 }
+
+impl User {
+    // Methods can only reach each other through `self`.
+    fn score() -> Int {
+        return self.base().doubled()
+    }
+
+    fn base() -> Int {
+        return describe(user: self)
+    }
+}
+
+// Any type can be extended, including those from the standard library.
+impl Int {
+    fn doubled() -> Int {
+        return self * 2
+    }
+}

@@ -52,6 +52,11 @@ pub enum Token<'src> {
     Struct,
     #[token("use")]
     Use,
+    #[token("impl")]
+    Impl,
+    /// The value a method was called on, inside an `impl`.
+    #[token("self")]
+    SelfValue,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
@@ -152,6 +157,8 @@ impl fmt::Display for Token<'_> {
             Self::Return => write!(f, "return"),
             Self::Struct => write!(f, "struct"),
             Self::Use => write!(f, "use"),
+            Self::Impl => write!(f, "impl"),
+            Self::SelfValue => write!(f, "self"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
@@ -300,6 +307,26 @@ mod tests {
                 Token::Colon,
                 Token::Ident("Int"),
                 Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_impl() {
+        assert_eq!(
+            lex("impl User { self.f() } implement selfish"),
+            vec![
+                Token::Impl,
+                Token::Ident("User"),
+                Token::LBrace,
+                Token::SelfValue,
+                Token::Dot,
+                Token::Ident("f"),
+                Token::LParen,
+                Token::RParen,
+                Token::RBrace,
+                Token::Ident("implement"),
+                Token::Ident("selfish"),
             ]
         );
     }

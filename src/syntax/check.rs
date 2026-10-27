@@ -37,8 +37,8 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, ModulePath, Mutability, Name, Param, Program, Stmt,
-        UnOp,
+        Arg, BinOp, Expr, Field, FieldValue, Function, ModulePath, Mutability, Name, Param,
+        Program, Stmt, UnOp,
     },
     parser::parse,
 };
@@ -192,6 +192,12 @@ pub enum CheckError {
     },
     /// A function that doesn't return `Void` can finish without returning.
     MissingReturn { function: String, expected: Type },
+    /// A method was called that no `impl` of the receiver's type declares.
+    NoMethod { ty: Type, method: String },
+    /// Two `impl`s of the same type declared methods with the same name.
+    MethodRedeclared { ty: Type, method: String },
+    /// `self` was used outside the methods of an `impl`.
+    SelfOutsideImpl,
 }
 
 /// Formats `items` as "`a`", "`a` and `b`", or "`a`, `b` and `c`", using
@@ -332,6 +338,11 @@ impl fmt::Display for CheckError {
                 f,
                 "`{function}` must return a value of type `{expected}` on every path"
             ),
+            Self::NoMethod { ty, method } => write!(f, "`{ty}` has no method `{method}`"),
+            Self::MethodRedeclared { ty, method } => {
+                write!(f, "`{ty}` already has a method `{method}`")
+            }
+            Self::SelfOutsideImpl => write!(f, "`self` can only be used inside an `impl`"),
         }
     }
 }
@@ -451,6 +462,8 @@ enum Pending<'a> {
         index: usize,
         name: &'a str,
         body: &'a [Stmt],
+        /// For a method, the type of `self`, which is `None` if it's unknown.
+        self_ty: Option<Option<Type>>,
     },
 }
 
@@ -469,6 +482,10 @@ struct Checker<'a> {
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
+    /// For each type `id`, the indexes into `functions` of its methods, by
+    /// name. Methods aren't names in any scope, and are only found through
+    /// the type of the value they're called on, wherever it's used.
+    methods: HashMap<usize, HashMap<&'a str, usize>>,
     globals: Vec<Global<'a>>,
     /// For each struct, indexed by `id`, its fields in the order they're
     /// declared.
@@ -532,21 +549,40 @@ impl<'a> Checker<'a> {
             self.check_not_recursive(id, name);
         }
 
-        // Functions and values come after structs, since their types can be
-        // structs.
+        // Functions, methods and values come after structs, since their types
+        // can be structs.
         let mut pending = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
                 match stmt {
-                    Stmt::Fn {
-                        name,
-                        params,
-                        ret,
-                        body,
-                    } => {
-                        let index = self.declare_fn(name, params, ret);
-                        pending.push((module, Pending::Fn { index, name, body }));
+                    Stmt::Fn(function) => {
+                        let index =
+                            self.declare_fn(&function.name, &function.params, &function.ret);
+                        pending.push((
+                            module,
+                            Pending::Fn {
+                                index,
+                                name: &function.name,
+                                body: &function.body,
+                                self_ty: None,
+                            },
+                        ));
+                    }
+                    Stmt::Impl { ty, methods } => {
+                        let self_ty = self.resolve_type(ty);
+                        for method in methods {
+                            let index = self.declare_method(self_ty.as_ref(), method);
+                            pending.push((
+                                module,
+                                Pending::Fn {
+                                    index,
+                                    name: &method.name,
+                                    body: &method.body,
+                                    self_ty: Some(self_ty.clone()),
+                                },
+                            ));
+                        }
                     }
                     Stmt::Decl {
                         name, ty, value, ..
@@ -574,7 +610,12 @@ impl<'a> Checker<'a> {
                 Pending::Global(index) => {
                     self.global_type(index);
                 }
-                Pending::Fn { index, name, body } => self.fn_body(index, name, body),
+                Pending::Fn {
+                    index,
+                    name,
+                    body,
+                    self_ty,
+                } => self.fn_body(index, name, body, self_ty),
             }
         }
     }
@@ -834,6 +875,32 @@ impl<'a> Checker<'a> {
 
     /// Declares a function, returning its index into `functions`.
     fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &Name) -> usize {
+        let index = self.signature(params, ret);
+        self.declare(name, Binding::Function(index));
+        index
+    }
+
+    /// Declares a method of `self_ty`, which is `None` if it's unknown,
+    /// returning its index into `functions`.
+    fn declare_method(&mut self, self_ty: Option<&Type>, method: &'a Function) -> usize {
+        let index = self.signature(&method.params, &method.ret);
+        if let Some(self_ty) = self_ty {
+            let methods = self.methods.entry(self_ty.id).or_default();
+            if methods.contains_key(method.name.as_str()) {
+                self.error(CheckError::MethodRedeclared {
+                    ty: self_ty.clone(),
+                    method: method.name.clone(),
+                });
+            } else {
+                methods.insert(&method.name, index);
+            }
+        }
+        index
+    }
+
+    /// Resolves a function's parameter and return types, returning its index
+    /// into `functions`.
+    fn signature(&mut self, params: &'a [Param], ret: &Name) -> usize {
         let params = params
             .iter()
             .map(|param| ParamSignature {
@@ -845,13 +912,19 @@ impl<'a> Checker<'a> {
         let returns = self.resolve_type(ret);
 
         self.functions.push(Signature { params, returns });
-        let index = self.functions.len() - 1;
-        self.declare(name, Binding::Function(index));
-        index
+        self.functions.len() - 1
     }
 
-    /// Checks the body of the function at `index` in `functions`.
-    fn fn_body(&mut self, index: usize, name: &'a str, body: &'a [Stmt]) {
+    /// Checks the body of the function at `index` in `functions`. For a
+    /// method, `self_ty` is the type of `self`, which is `None` if it's
+    /// unknown.
+    fn fn_body(
+        &mut self,
+        index: usize,
+        name: &'a str,
+        body: &'a [Stmt],
+        self_ty: Option<Option<Type>>,
+    ) {
         let Signature { params, returns } = self.functions[index].clone();
 
         // The body starts a new function scope holding the parameters. It can
@@ -863,6 +936,15 @@ impl<'a> Checker<'a> {
         });
         self.scopes.push(HashMap::new());
 
+        // `self` is a keyword, so it can't clash with a parameter. Like any
+        // other value, functions nested in the method can't use it.
+        if let Some(ty) = self_ty {
+            let binding = Binding::Value {
+                mutability: Mutability::Let,
+                ty,
+            };
+            self.declare("self", binding);
+        }
         for param in params {
             let binding = Binding::Value {
                 mutability: Mutability::Let,
@@ -955,7 +1037,9 @@ impl<'a> Checker<'a> {
     /// Checks a statement inside a function.
     fn stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
-            Stmt::Use(_) => unreachable!("the parser only allows `use` at the top level"),
+            Stmt::Use(_) | Stmt::Impl { .. } => {
+                unreachable!("the parser only allows `use` and `impl` at the top level")
+            }
             Stmt::Decl {
                 mutability,
                 name,
@@ -1013,15 +1097,10 @@ impl<'a> Checker<'a> {
             }
             // Inside functions, functions and structs are only visible after
             // they're declared.
-            Stmt::Fn {
-                name,
-                params,
-                ret,
-                body,
-            } => {
+            Stmt::Fn(function) => {
                 // Declared before the body is checked, so it can call itself.
-                let index = self.declare_fn(name, params, ret);
-                self.fn_body(index, name, body);
+                let index = self.declare_fn(&function.name, &function.params, &function.ret);
+                self.fn_body(index, &function.name, &function.body, None);
             }
             Stmt::Struct { name, fields } => {
                 let id = self.declare_struct(name);
@@ -1100,7 +1179,52 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::Construct { ty, fields } => self.construct(ty, fields),
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => self.method_call(receiver, method, args),
+            Expr::SelfValue => {
+                let name = Name::new("self");
+                match self.lookup(&name) {
+                    Ok(Binding::Value { ty, .. }) => ty,
+                    Ok(_) => unreachable!("only methods declare `self`, as a value"),
+                    Err(LookupError::Undeclared) => {
+                        self.error(CheckError::SelfOutsideImpl);
+                        None
+                    }
+                    Err(error) => {
+                        self.lookup_error(&name, error);
+                        None
+                    }
+                }
+            }
         }
+    }
+
+    /// Checks a method call, returning the method's return type, or `None` if
+    /// it can't be determined.
+    fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Option<Type> {
+        // The receiver and arguments are checked first, so their errors come
+        // before the call's.
+        let receiver_ty = self.expr(receiver);
+        let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
+        let ty = receiver_ty?;
+
+        let index = self
+            .methods
+            .get(&ty.id)
+            .and_then(|methods| methods.get(method))
+            .copied();
+        let Some(index) = index else {
+            self.error(CheckError::NoMethod {
+                ty,
+                method: method.to_string(),
+            });
+            return None;
+        };
+        let signature = self.functions[index].clone();
+        self.check_args(format!("{ty}.{method}"), args, found, signature)
     }
 
     /// Checks the construction of a struct, returning its type, or `None` if
@@ -1163,8 +1287,18 @@ impl<'a> Checker<'a> {
             }
         };
         let signature = self.functions[index].clone();
-        let function = callee.to_string();
+        self.check_args(callee.to_string(), args, found, signature)
+    }
 
+    /// Checks a call's arguments, whose types are `found`, against the
+    /// signature of `function`, returning its return type.
+    fn check_args(
+        &mut self,
+        function: String,
+        args: &[Arg],
+        found: Vec<Option<Type>>,
+        signature: Signature,
+    ) -> Option<Type> {
         if args.len() != signature.params.len() {
             self.error(CheckError::WrongArgumentCount {
                 function,
@@ -3348,6 +3482,347 @@ mod tests {
                 ),
                 ("/user", "fn age() -> Int {\nreturn 2\n}"),
             ]),
+            Ok(())
+        );
+    }
+
+    const COUNTER: &str = "
+        struct Counter {}
+        impl Counter {
+            fn me() -> Counter {
+                return self
+            }
+            fn once() -> Int {
+                return 1
+            }
+            fn twice() -> Int {
+                return self.once() + self.once()
+            }
+            fn add(amount: Int) -> Int {
+                return self.once() + amount
+            }
+        }
+    ";
+
+    #[test]
+    fn calls_methods() {
+        assert_eq!(
+            check_top(&format!(
+                "
+                {COUNTER}
+                let counter = Counter {{}}
+                let a: Int = counter.twice() + counter.add(amount: 2)
+                let b: Counter = Counter {{}}.me().me()
+                fn f(counter: Counter) -> Int {{
+                    counter.once()
+                    return counter.me().twice()
+                }}
+                "
+            )),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn methods_call_each_other_through_self() {
+        assert_eq!(
+            messages_top(
+                "
+                struct Counter {}
+                impl Counter {
+                    fn once() -> Int {
+                        return 1
+                    }
+                    fn twice() -> Int {
+                        return once() + once()
+                    }
+                }
+                "
+            ),
+            ["`once` is not declared", "`once` is not declared"]
+        );
+        // A bare name finds a function outside the `impl` instead.
+        assert_eq!(
+            messages_top(
+                "
+                fn once() -> Bool {
+                    return true
+                }
+                struct Counter {}
+                impl Counter {
+                    fn once() -> Int {
+                        return 1
+                    }
+                    fn twice() -> Int {
+                        return once() + self.once()
+                    }
+                }
+                "
+            ),
+            ["operator `+` expects `Int`, found `Bool`"]
+        );
+    }
+
+    #[test]
+    fn self_is_only_available_in_methods() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {COUNTER}
+                let x = self
+                fn f() -> Int {{
+                    return self.once()
+                }}
+                impl Counter {{
+                    fn nested() {{
+                        fn inner() -> Counter {{
+                            return self
+                        }}
+                    }}
+                }}
+                "
+            )),
+            [
+                "`self` can only be used inside an `impl`",
+                "`self` can only be used inside an `impl`",
+                "functions can't use `self`, because it is declared outside the function",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_methods() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {COUNTER}
+                let a = Counter {{}}.missing()
+                let b = 1.double()
+                // Unknown receivers aren't reported again.
+                let c = missing.f(x: y)
+                "
+            )),
+            [
+                "`Counter` has no method `missing`",
+                "`Int` has no method `double`",
+                "`missing` is not declared",
+                "`y` is not declared",
+            ]
+        );
+    }
+
+    #[test]
+    fn checks_method_arguments() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {COUNTER}
+                let c = Counter {{}}
+                let a = c.add()
+                let b = c.add(by: 1)
+                let d = c.add(amount: true)
+                let e: Bool = c.add(amount: 1)
+                "
+            )),
+            [
+                "`Counter.add` takes 1 argument, found 0",
+                "argument to `Counter.add` should be labelled `amount`, found `by`",
+                "argument `amount` of `Counter.add` expects `Int`, found `Bool`",
+                "cannot assign `Int` to `e`, which has type `Bool`",
+            ]
+        );
+    }
+
+    #[test]
+    fn checks_method_bodies() {
+        assert_eq!(
+            messages_top(
+                "
+                struct Counter {}
+                impl Counter {
+                    fn a() -> Int {
+                        return true
+                    }
+                    fn b() -> Int {}
+                    fn c(x: Missing) {}
+                }
+                "
+            ),
+            [
+                "unknown type `Missing`",
+                "`a` must return `Int`, found `Bool`",
+                "`b` must return a value of type `Int` on every path",
+            ]
+        );
+    }
+
+    #[test]
+    fn impls_can_extend_std_types() {
+        assert_eq!(
+            check_top(
+                "
+                impl Int {
+                    fn doubled() -> Int {
+                        return self * 2
+                    }
+                }
+                impl stdlib::Bool {
+                    fn flipped() -> Bool {
+                        return !self
+                    }
+                }
+                let x: Int = 21.doubled().doubled()
+                let y: Bool = true.flipped()
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn types_can_have_several_impls() {
+        assert_eq!(
+            check_top(&format!(
+                "
+                {COUNTER}
+                impl Counter {{
+                    fn thrice() -> Int {{
+                        return self.twice() + self.once()
+                    }}
+                }}
+                let x = Counter {{}}.thrice()
+                "
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {COUNTER}
+                impl Counter {{
+                    fn once() -> Int {{
+                        return 2
+                    }}
+                }}
+                "
+            )),
+            ["`Counter` already has a method `once`"]
+        );
+    }
+
+    #[test]
+    fn methods_can_share_names_with_other_declarations() {
+        assert_eq!(
+            check_top(
+                "
+                struct Counter {}
+                fn count() {}
+                let total = 1
+                impl Counter {
+                    fn count() {}
+                    fn total() {}
+                    fn Counter() {}
+                }
+                struct Other {}
+                impl Other {
+                    fn count() {}
+                }
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn impls_work_across_modules() {
+        // Methods are found through their type, so the module with the
+        // `impl` doesn't need importing to call them.
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /users/user
+                    let score: Int = User {}.score()
+                    ",
+                ),
+                ("/users/user", "struct User {}"),
+                (
+                    "/users/score",
+                    "
+                    use ./user
+                    impl User {
+                        fn score() -> Int {
+                            return 1
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/main", "struct User {}\nimpl User {\nfn f() {}\n}"),
+                ("/other", "use /main\nimpl main::User {\nfn f() {}\n}"),
+            ]),
+            ["/other: `User` already has a method `f`"]
+        );
+    }
+
+    #[test]
+    fn impls_need_a_type() {
+        assert_eq!(
+            messages_top(
+                "
+                let x = 1
+                impl x {}
+                impl Missing {
+                    // `self` has an unknown type, so this isn't reported.
+                    fn f() -> Int {
+                        return self
+                    }
+                }
+                "
+            ),
+            ["`x` is not a type", "unknown type `Missing`"]
+        );
+    }
+
+    #[test]
+    fn methods_are_hoisted() {
+        assert_eq!(
+            check_top(
+                "
+                let x: Int = Counter {}.once()
+                impl Counter {
+                    fn once() -> Int {
+                        return 1
+                    }
+                }
+                struct Counter {}
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn self_is_immutable_and_not_a_name() {
+        // `self` isn't declared like other names, so it doesn't clash with a
+        // struct's methods or the program's names.
+        assert_eq!(
+            check_top(
+                "
+                struct Box {}
+                impl Box {
+                    fn same(as other: Box) -> Box {
+                        let copy: Box = self
+                        return other
+                    }
+                }
+                "
+            ),
             Ok(())
         );
     }

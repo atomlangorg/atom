@@ -122,6 +122,15 @@ pub enum Expr {
         ty: Name,
         fields: Vec<FieldValue>,
     },
+    /// `receiver.method(label: value, ...)`: calls a function from an `impl`
+    /// of the receiver's type.
+    MethodCall {
+        receiver: Box<Expr>,
+        method: String,
+        args: Vec<Arg>,
+    },
+    /// `self`: the value a method was called on.
+    SelfValue,
 }
 
 /// A field's value when constructing a struct, such as `age: 42`.
@@ -162,7 +171,10 @@ pub enum Stmt {
         value: Expr,
     },
     /// `name = value`: reassigns an existing `var`.
-    Assign { name: String, value: Expr },
+    Assign {
+        name: String,
+        value: Expr,
+    },
     /// `if cond { ... } else { ... }`
     ///
     /// `else if` is represented as an `else` block containing a single `If`.
@@ -171,21 +183,33 @@ pub enum Stmt {
         then_block: Block,
         else_block: Option<Block>,
     },
-    /// `fn name(label param: Type, ...) -> Type { ... }`
-    Fn {
-        name: String,
-        params: Vec<Param>,
-        /// The name of the return type. `fn f()` is the same as
-        /// `fn f() -> Void`, so this is `Void` when no type is written.
-        ret: Name,
-        body: Block,
+    Fn(Function),
+    /// `impl Type { fn ... }`: adds methods to a type. Only allowed at the top
+    /// level.
+    Impl {
+        ty: Name,
+        methods: Vec<Function>,
     },
     /// `struct Name { let field: Type ... }`
-    Struct { name: String, fields: Vec<Field> },
+    Struct {
+        name: String,
+        fields: Vec<Field>,
+    },
     /// `return` or `return value`
     Return(Option<Expr>),
     /// An expression on its own line. Only function calls are allowed.
     Expr(Expr),
+}
+
+/// `fn name(label param: Type, ...) -> Type { ... }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    pub name: String,
+    pub params: Vec<Param>,
+    /// The name of the return type. `fn f()` is the same as `fn f() -> Void`,
+    /// so this is `Void` when no type is written.
+    pub ret: Name,
+    pub body: Block,
 }
 
 /// A function parameter, such as `to value: Int`.
