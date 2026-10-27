@@ -189,11 +189,11 @@ pub enum Stmt {
         else_block: Option<Block>,
     },
     Fn(Function),
-    /// `impl Type { fn ... }`: adds methods to a type. Only allowed at the top
-    /// level.
+    /// `impl Type { fn ... }`: adds methods and static functions to a type.
+    /// Only allowed at the top level.
     Impl {
         ty: Name,
-        methods: Vec<Function>,
+        functions: Vec<ImplFunction>,
     },
     /// `group Name { let field: Type ... }`
     Group {
@@ -215,6 +215,15 @@ pub struct Function {
     /// so this is `Void` when no type is written.
     pub ret: Name,
     pub body: Block,
+}
+
+/// A function in an `impl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplFunction {
+    /// Whether it's a `static fn`, which is called on the type itself, as in
+    /// `Int.zero()`, rather than a method, which is called on a value.
+    pub is_static: bool,
+    pub function: Function,
 }
 
 /// A function parameter, such as `to value: Int`.

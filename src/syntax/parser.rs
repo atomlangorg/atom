@@ -25,8 +25,8 @@ use logos::Logos;
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, Function, ModulePath, Mutability, Name, Param,
-        Program, Stmt, UnOp,
+        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, ModulePath, Mutability, Name,
+        Param, Program, Stmt, UnOp,
     },
     lexer::Token,
 };
@@ -450,21 +450,29 @@ where
 
     let use_ = just(Token::Use).ignore_then(module_path).map(Stmt::Use);
 
-    // `impl Type { fn ... }`, with one function per line, like a block.
+    // `impl Type { fn ... }`, with one function per line, like a block. Each
+    // can be a method, or a `static fn`.
+    let impl_function = just(Token::Static)
+        .or_not()
+        .then(function)
+        .map(|(is_static, function)| ImplFunction {
+            is_static: is_static.is_some(),
+            function,
+        });
     let impl_ = just(Token::Impl)
         .ignore_then(type_name.clone())
         .then(
             newlines
                 .clone()
                 .ignore_then(
-                    function
+                    impl_function
                         .separated_by(newlines.clone().at_least(1))
                         .allow_trailing()
                         .collect(),
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(ty, methods)| Stmt::Impl { ty, methods });
+        .map(|(ty, functions)| Stmt::Impl { ty, functions });
 
     // The top level can only declare things, so a module never runs code
     // just by being imported. Other statements are parsed only so that they
@@ -2266,6 +2274,10 @@ mod tests {
 
                     // Another method.
                     fn rename(to name: Int) {}
+
+                    static fn make() -> User {
+                        return User.make()
+                    }
                 }
                 impl user::User {}
                 "
@@ -2273,28 +2285,47 @@ mod tests {
             Ok(vec![
                 Stmt::Impl {
                     ty: Name::new("User"),
-                    methods: vec![
-                        Function {
-                            name: "score".to_string(),
-                            params: vec![],
-                            ret: Name::new("Int"),
-                            body: vec![Stmt::Return(Some(method_call(
-                                Expr::SelfValue,
-                                "base",
-                                vec![],
-                            )))],
+                    functions: vec![
+                        ImplFunction {
+                            is_static: false,
+                            function: Function {
+                                name: "score".to_string(),
+                                params: vec![],
+                                ret: Name::new("Int"),
+                                body: vec![Stmt::Return(Some(method_call(
+                                    Expr::SelfValue,
+                                    "base",
+                                    vec![],
+                                )))],
+                            },
                         },
-                        Function {
-                            name: "rename".to_string(),
-                            params: vec![param(Some("to"), "name", "Int")],
-                            ret: Name::new("Void"),
-                            body: vec![],
+                        ImplFunction {
+                            is_static: false,
+                            function: Function {
+                                name: "rename".to_string(),
+                                params: vec![param(Some("to"), "name", "Int")],
+                                ret: Name::new("Void"),
+                                body: vec![],
+                            },
+                        },
+                        ImplFunction {
+                            is_static: true,
+                            function: Function {
+                                name: "make".to_string(),
+                                params: vec![],
+                                ret: Name::new("User"),
+                                body: vec![Stmt::Return(Some(method_call(
+                                    *var("User"),
+                                    "make",
+                                    vec![],
+                                )))],
+                            },
                         },
                     ],
                 },
                 Stmt::Impl {
                     ty: qualified(ModulePath::Named("user".to_string()), "User"),
-                    methods: vec![],
+                    functions: vec![],
                 },
             ])
         );
@@ -2491,6 +2522,21 @@ mod tests {
             "x = a.b\n.c",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_static_outside_impls() {
+        for src in [
+            "static fn f() {}",
+            "fn f() {\nstatic fn g() {}\n}",
+            "impl Int {\nstatic\n}",
+            "impl Int {\nstatic static fn f() {}\n}",
+            "impl Int {\nstatic let x = 1\n}",
+            "impl Int {\nfn static() {}\n}",
+            "let static = 1",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
         }
     }
 }

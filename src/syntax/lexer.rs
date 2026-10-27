@@ -54,6 +54,8 @@ pub enum Token<'src> {
     Use,
     #[token("impl")]
     Impl,
+    #[token("static")]
+    Static,
     /// The value a method was called on, inside an `impl`.
     #[token("self")]
     SelfValue,
@@ -158,6 +160,7 @@ impl fmt::Display for Token<'_> {
             Self::Group => write!(f, "group"),
             Self::Use => write!(f, "use"),
             Self::Impl => write!(f, "impl"),
+            Self::Static => write!(f, "static"),
             Self::SelfValue => write!(f, "self"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),

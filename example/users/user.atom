@@ -27,4 +27,9 @@ impl Int {
     fn doubled() -> Int {
         return self * 2
     }
+
+    // Static functions are called on the type, as in `Int.zero()`.
+    static fn zero() -> Int {
+        return 0
+    }
 }

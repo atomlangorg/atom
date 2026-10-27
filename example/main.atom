@@ -21,7 +21,7 @@ fn run() {
         y = y + 1
         done = true
     } else {
-        let fallback = -1
+        let fallback = Int.zero() - 1
         y = fallback
     }
 

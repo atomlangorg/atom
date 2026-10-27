@@ -37,8 +37,8 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, Function, ModulePath, Mutability, Name, Param,
-        Program, Stmt, UnOp,
+        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, ModulePath, Mutability, Name,
+        Param, Program, Stmt, UnOp,
     },
     parser::parse,
 };
@@ -194,17 +194,31 @@ pub enum CheckError {
     MissingReturn { function: String, expected: Type },
     /// A field or method was used that the receiver's type doesn't have.
     NoMember { ty: Type, member: String },
+    /// A static function was used that the type doesn't have.
+    NoStaticFunction { ty: Type, function: String },
     /// A field was called like a method.
     FieldNotMethod { ty: Type, field: String },
-    /// A method was used without calling it.
-    MethodNotValue { ty: Type, method: String },
+    /// A method or static function was used without calling it.
+    MemberNotValue {
+        ty: Type,
+        member: String,
+        kind: MemberKind,
+    },
+    /// A static function was used on a value, rather than its type.
+    StaticOnValue { ty: Type, function: String },
+    /// A field or method was used on a type, rather than a value of it.
+    NeedsValue {
+        ty: Type,
+        member: String,
+        kind: MemberKind,
+    },
     /// `.` was used after a module's name, where `::` was probably meant.
     ModuleNotValue { module: String, member: String },
-    /// A method was called from a module that doesn't import the module
-    /// declaring it.
-    MethodNotImported {
+    /// A method or static function was called from a module that doesn't
+    /// import the module declaring it.
+    MemberNotImported {
         ty: Type,
-        method: String,
+        member: String,
         module: String,
     },
     /// A field or method was declared with the same name as another field or
@@ -216,6 +230,8 @@ pub enum CheckError {
     },
     /// `self` was used outside the methods of an `impl`.
     SelfOutsideImpl,
+    /// `self` was used in a static function, which isn't called on a value.
+    SelfInStatic,
 }
 
 /// Whether a member of a type is a field or a method.
@@ -223,6 +239,7 @@ pub enum CheckError {
 pub enum MemberKind {
     Field,
     Method,
+    StaticFunction,
 }
 
 impl fmt::Display for MemberKind {
@@ -230,6 +247,7 @@ impl fmt::Display for MemberKind {
         match self {
             Self::Field => write!(f, "field"),
             Self::Method => write!(f, "method"),
+            Self::StaticFunction => write!(f, "static function"),
         }
     }
 }
@@ -372,22 +390,33 @@ impl fmt::Display for CheckError {
                 f,
                 "`{function}` must return a value of type `{expected}` on every path"
             ),
+            Self::NoStaticFunction { ty, function } => {
+                write!(f, "`{ty}` has no static function `{function}`")
+            }
             Self::NoMember { ty, member } => {
                 write!(f, "`{ty}` has no field or method `{member}`")
             }
             Self::FieldNotMethod { ty, field } => {
                 write!(f, "`{ty}.{field}` is a field, not a method")
             }
-            Self::MethodNotValue { ty, method } => {
-                write!(f, "`{ty}.{method}` is a method, not a value")
+            Self::MemberNotValue { ty, member, kind } => {
+                write!(f, "`{ty}.{member}` is a {kind}, not a value")
             }
+            Self::StaticOnValue { ty, function } => write!(
+                f,
+                "`{ty}.{function}` is a static function, so it must be used on `{ty}` itself rather than a value"
+            ),
+            Self::NeedsValue { ty, member, kind } => write!(
+                f,
+                "`{ty}.{member}` is a {kind}, so it must be used on a value of `{ty}` rather than `{ty}` itself"
+            ),
             Self::ModuleNotValue { module, member } => write!(
                 f,
                 "`{module}` is a module, not a value, so use `{module}::{member}` to refer to a name in it"
             ),
-            Self::MethodNotImported { ty, method, module } => write!(
+            Self::MemberNotImported { ty, member, module } => write!(
                 f,
-                "`{ty}.{method}` is declared in `{module}`, which is not imported"
+                "`{ty}.{member}` is declared in `{module}`, which is not imported"
             ),
             Self::MemberRedeclared {
                 ty,
@@ -395,6 +424,7 @@ impl fmt::Display for CheckError {
                 existing,
             } => write!(f, "`{ty}` already has a {existing} `{member}`"),
             Self::SelfOutsideImpl => write!(f, "`self` can only be used inside an `impl`"),
+            Self::SelfInStatic => write!(f, "`self` can't be used in a static function"),
         }
     }
 }
@@ -478,6 +508,26 @@ struct FnContext<'a> {
     name: &'a str,
     /// `None` if the return type is unknown.
     returns: Option<Type>,
+    /// Whether it's a `static fn`, which has no `self`.
+    is_static: bool,
+}
+
+/// What kind of function a body belongs to, which decides whether it has
+/// `self`.
+#[derive(Debug, Clone)]
+enum FnKind {
+    Function,
+    /// A method, with the type of `self`, which is `None` if it's unknown.
+    Method(Option<Type>),
+    Static,
+}
+
+/// What `.member` is used on.
+enum Receiver {
+    /// A value of the type, for its fields and methods.
+    Value(Type),
+    /// The type itself, for its static functions.
+    Type(Type),
 }
 
 struct ModuleInfo<'a> {
@@ -506,14 +556,16 @@ enum LookupError {
     Module(CheckError),
 }
 
-/// A field or method of a type, which are found with `.name`. Whether it's
-/// called is decided by the brackets after it, not by which kind it is.
+/// A field or method of a type, which are found with `.name` on a value.
+/// Whether it's called is decided by the brackets after it, not by which kind
+/// it is.
 enum Member {
     /// `None` if the field's type is unknown.
     Field(Option<Type>),
     Method(Method),
 }
 
+/// A method or static function from an `impl`.
 #[derive(Debug, Clone, Copy)]
 struct Method {
     /// The index in `Checker::modules` of the module whose `impl` declares it.
@@ -530,8 +582,7 @@ enum Pending<'a> {
         index: usize,
         name: &'a str,
         body: &'a [Stmt],
-        /// For a method, the type of `self`, which is `None` if it's unknown.
-        self_ty: Option<Option<Type>>,
+        kind: FnKind,
     },
 }
 
@@ -555,6 +606,10 @@ struct Checker<'a> {
     /// on, in the modules that can see the module declaring them. They share
     /// names with the type's fields.
     methods: HashMap<usize, HashMap<&'a str, Method>>,
+    /// For each type `id`, its static functions by name, which are found like
+    /// methods but on the type itself. They have their own names, separate
+    /// from the type's fields and methods.
+    statics: HashMap<usize, HashMap<&'a str, Method>>,
     globals: Vec<Global<'a>>,
     /// For each group, indexed by `id`, its fields in the order they're
     /// declared.
@@ -634,21 +689,30 @@ impl<'a> Checker<'a> {
                                 index,
                                 name: &function.name,
                                 body: &function.body,
-                                self_ty: None,
+                                kind: FnKind::Function,
                             },
                         ));
                     }
-                    Stmt::Impl { ty, methods } => {
+                    Stmt::Impl { ty, functions } => {
                         let self_ty = self.resolve_type(ty);
-                        for method in methods {
-                            let index = self.declare_method(self_ty.as_ref(), method);
+                        for ImplFunction {
+                            is_static,
+                            function,
+                        } in functions
+                        {
+                            let index = self.declare_method(self_ty.as_ref(), function, *is_static);
+                            let kind = if *is_static {
+                                FnKind::Static
+                            } else {
+                                FnKind::Method(self_ty.clone())
+                            };
                             pending.push((
                                 module,
                                 Pending::Fn {
                                     index,
-                                    name: &method.name,
-                                    body: &method.body,
-                                    self_ty: Some(self_ty.clone()),
+                                    name: &function.name,
+                                    body: &function.body,
+                                    kind,
                                 },
                             ));
                         }
@@ -683,8 +747,8 @@ impl<'a> Checker<'a> {
                     index,
                     name,
                     body,
-                    self_ty,
-                } => self.fn_body(index, name, body, self_ty),
+                    kind,
+                } => self.fn_body(index, name, body, kind),
             }
         }
     }
@@ -949,18 +1013,28 @@ impl<'a> Checker<'a> {
         index
     }
 
-    /// Declares a method of `self_ty`, which is `None` if it's unknown,
-    /// returning its index into `functions`.
-    fn declare_method(&mut self, self_ty: Option<&Type>, method: &'a Function) -> usize {
+    /// Declares a method or static function of `self_ty`, which is `None` if
+    /// it's unknown, returning its index into `functions`.
+    fn declare_method(
+        &mut self,
+        self_ty: Option<&Type>,
+        method: &'a Function,
+        is_static: bool,
+    ) -> usize {
         let index = self.signature(&method.params, &method.ret);
         if let Some(self_ty) = self_ty {
             // Methods must be unique across every module, even ones that
             // can't see each other, since a call can't say which module's
             // method it means.
-            let existing = match self.member(self_ty, &method.name) {
-                Some(Member::Field(_)) => Some(MemberKind::Field),
-                Some(Member::Method(_)) => Some(MemberKind::Method),
-                None => None,
+            let existing = if is_static {
+                self.static_function(self_ty, &method.name)
+                    .map(|_| MemberKind::StaticFunction)
+            } else {
+                match self.member(self_ty, &method.name) {
+                    Some(Member::Field(_)) => Some(MemberKind::Field),
+                    Some(Member::Method(_)) => Some(MemberKind::Method),
+                    None => None,
+                }
             };
             if let Some(existing) = existing {
                 self.error(CheckError::MemberRedeclared {
@@ -969,14 +1043,19 @@ impl<'a> Checker<'a> {
                     existing,
                 });
             } else {
-                let module = self.module;
-                self.methods.entry(self_ty.id).or_default().insert(
-                    &method.name,
-                    Method {
-                        module,
-                        function: index,
-                    },
-                );
+                let found = Method {
+                    module: self.module,
+                    function: index,
+                };
+                let table = if is_static {
+                    &mut self.statics
+                } else {
+                    &mut self.methods
+                };
+                table
+                    .entry(self_ty.id)
+                    .or_default()
+                    .insert(&method.name, found);
             }
         }
         index
@@ -999,16 +1078,8 @@ impl<'a> Checker<'a> {
         self.functions.len() - 1
     }
 
-    /// Checks the body of the function at `index` in `functions`. For a
-    /// method, `self_ty` is the type of `self`, which is `None` if it's
-    /// unknown.
-    fn fn_body(
-        &mut self,
-        index: usize,
-        name: &'a str,
-        body: &'a [Stmt],
-        self_ty: Option<Option<Type>>,
-    ) {
+    /// Checks the body of the function at `index` in `functions`.
+    fn fn_body(&mut self, index: usize, name: &'a str, body: &'a [Stmt], kind: FnKind) {
         let Signature { params, returns } = self.functions[index].clone();
 
         // The body starts a new function scope holding the parameters. It can
@@ -1017,12 +1088,13 @@ impl<'a> Checker<'a> {
         let outer_fn = self.current_fn.replace(FnContext {
             name,
             returns: returns.clone(),
+            is_static: matches!(kind, FnKind::Static),
         });
         self.scopes.push(HashMap::new());
 
         // `self` is a keyword, so it can't clash with a parameter. Like any
         // other value, functions nested in the method can't use it.
-        if let Some(ty) = self_ty {
+        if let FnKind::Method(ty) = kind {
             let binding = Binding::Value {
                 mutability: Mutability::Let,
                 ty,
@@ -1191,7 +1263,7 @@ impl<'a> Checker<'a> {
             Stmt::Fn(function) => {
                 // Declared before the body is checked, so it can call itself.
                 let index = self.declare_fn(&function.name, &function.params, &function.ret);
-                self.fn_body(index, &function.name, &function.body, None);
+                self.fn_body(index, &function.name, &function.body, FnKind::Function);
             }
             Stmt::Group { name, fields } => {
                 let id = self.declare_group(name);
@@ -1200,7 +1272,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
-                let FnContext { name, returns } = self
+                let FnContext { name, returns, .. } = self
                     .current_fn
                     .clone()
                     .expect("statements are only checked inside functions");
@@ -1282,7 +1354,12 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Value { ty, .. }) => ty,
                     Ok(_) => unreachable!("only methods declare `self`, as a value"),
                     Err(LookupError::Undeclared) => {
-                        self.error(CheckError::SelfOutsideImpl);
+                        let in_static = self.current_fn.as_ref().is_some_and(|f| f.is_static);
+                        self.error(if in_static {
+                            CheckError::SelfInStatic
+                        } else {
+                            CheckError::SelfOutsideImpl
+                        });
                         None
                     }
                     Err(error) => {
@@ -1295,23 +1372,29 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks the receiver of a field access or method call, which is followed
-    /// by `.member`. A module's name gets its own error, since `::` was
-    /// probably meant.
-    fn receiver(&mut self, receiver: &Expr, member: &str) -> Option<Type> {
-        if let Expr::Var(name) = receiver
-            && name.module.is_none()
-            && matches!(self.lookup(name), Err(LookupError::Undeclared))
-            && self
-                .visible_modules()
-                .any(|module| self.modules[module].name == name.name)
-        {
-            self.error(CheckError::ModuleNotValue {
-                module: name.name.clone(),
-                member: member.to_string(),
-            });
-            return None;
+    /// by `.member`. A type's name is the type itself, for its static
+    /// functions. A module's name gets its own error, since `::` was probably
+    /// meant.
+    fn receiver(&mut self, receiver: &Expr, member: &str) -> Option<Receiver> {
+        if let Expr::Var(name) = receiver {
+            match self.lookup(name) {
+                Ok(Binding::Type(ty)) => return Some(Receiver::Type(ty)),
+                Err(LookupError::Undeclared)
+                    if name.module.is_none()
+                        && self
+                            .visible_modules()
+                            .any(|module| self.modules[module].name == name.name) =>
+                {
+                    self.error(CheckError::ModuleNotValue {
+                        module: name.name.clone(),
+                        member: member.to_string(),
+                    });
+                    return None;
+                }
+                _ => {}
+            }
         }
-        self.expr(receiver)
+        self.expr(receiver).map(Receiver::Value)
     }
 
     /// Finds the field or method of `ty` called `name`.
@@ -1328,65 +1411,112 @@ impl<'a> Checker<'a> {
             .map(|method| Member::Method(*method))
     }
 
-    /// Checks a field access, returning the field's type, or `None` if it
-    /// can't be determined.
-    fn field(&mut self, receiver: &Expr, field: &str) -> Option<Type> {
-        let ty = self.receiver(receiver, field)?;
-        match self.member(&ty, field) {
-            Some(Member::Field(field_ty)) => field_ty,
-            Some(Member::Method(_)) => {
-                self.error(CheckError::MethodNotValue {
-                    ty,
-                    method: field.to_string(),
-                });
-                None
-            }
-            None => {
-                self.error(CheckError::NoMember {
-                    ty,
-                    member: field.to_string(),
-                });
-                None
-            }
+    /// Finds the static function of `ty` called `name`.
+    fn static_function(&self, ty: &Type, name: &str) -> Option<Method> {
+        self.statics
+            .get(&ty.id)
+            .and_then(|statics| statics.get(name))
+            .copied()
+    }
+
+    /// The error for `name` not being a field or method of `ty`, which points
+    /// out a static function with that name.
+    fn no_member(&self, ty: Type, name: &str) -> CheckError {
+        let name = name.to_string();
+        match self.static_function(&ty, &name) {
+            Some(_) => CheckError::StaticOnValue { ty, function: name },
+            None => CheckError::NoMember { ty, member: name },
         }
     }
 
-    /// Checks a method call, returning the method's return type, or `None` if
-    /// it can't be determined.
+    /// The error for `name` not being a static function of `ty`, which points
+    /// out a field or method with that name.
+    fn no_static_function(&self, ty: Type, name: &str) -> CheckError {
+        let kind = match self.member(&ty, name) {
+            Some(Member::Field(_)) => MemberKind::Field,
+            Some(Member::Method(_)) => MemberKind::Method,
+            None => {
+                return CheckError::NoStaticFunction {
+                    ty,
+                    function: name.to_string(),
+                };
+            }
+        };
+        CheckError::NeedsValue {
+            ty,
+            member: name.to_string(),
+            kind,
+        }
+    }
+
+    /// Checks a field access, returning the field's type, or `None` if it
+    /// can't be determined.
+    fn field(&mut self, receiver: &Expr, field: &str) -> Option<Type> {
+        let error = match self.receiver(receiver, field)? {
+            Receiver::Value(ty) => match self.member(&ty, field) {
+                Some(Member::Field(field_ty)) => return field_ty,
+                Some(Member::Method(_)) => CheckError::MemberNotValue {
+                    ty,
+                    member: field.to_string(),
+                    kind: MemberKind::Method,
+                },
+                None => self.no_member(ty, field),
+            },
+            Receiver::Type(ty) => match self.static_function(&ty, field) {
+                Some(_) => CheckError::MemberNotValue {
+                    ty,
+                    member: field.to_string(),
+                    kind: MemberKind::StaticFunction,
+                },
+                None => self.no_static_function(ty, field),
+            },
+        };
+        self.error(error);
+        None
+    }
+
+    /// Checks a call to a method on a value, or a static function on a type,
+    /// returning its return type, or `None` if it can't be determined.
     fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Option<Type> {
         // The receiver and arguments are checked first, so their errors come
         // before the call's.
-        let receiver_ty = self.receiver(receiver, method);
+        let receiver = self.receiver(receiver, method);
         let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
-        let ty = receiver_ty?;
 
-        let found_method = match self.member(&ty, method) {
-            Some(Member::Method(found_method)) => found_method,
-            Some(Member::Field(_)) => {
-                self.error(CheckError::FieldNotMethod {
-                    ty,
-                    field: method.to_string(),
-                });
-                return None;
-            }
-            None => {
-                self.error(CheckError::NoMember {
-                    ty,
-                    member: method.to_string(),
-                });
-                return None;
-            }
+        let (ty, found_method) = match receiver? {
+            Receiver::Value(ty) => match self.member(&ty, method) {
+                Some(Member::Method(found_method)) => (ty, found_method),
+                Some(Member::Field(_)) => {
+                    let field = method.to_string();
+                    self.error(CheckError::FieldNotMethod { ty, field });
+                    return None;
+                }
+                None => {
+                    let error = self.no_member(ty, method);
+                    self.error(error);
+                    return None;
+                }
+            },
+            Receiver::Type(ty) => match self.static_function(&ty, method) {
+                Some(found_method) => (ty, found_method),
+                None => {
+                    let error = self.no_static_function(ty, method);
+                    self.error(error);
+                    return None;
+                }
+            },
         };
+        let member = method.to_string();
 
-        // Like functions, methods can only be used from their own module or
-        // one that imports it.
+        // Like functions, methods and static functions can only be used from
+        // their own module or one that imports it.
         if !self
             .visible_modules()
             .any(|module| module == found_method.module)
         {
-            self.error(CheckError::MethodNotImported {
+            self.error(CheckError::MemberNotImported {
                 ty,
-                method: method.to_string(),
+                member,
                 module: self.modules[found_method.module].display.clone(),
             });
             return None;
@@ -4317,6 +4447,278 @@ mod tests {
                 "/main: `user` is a module, not a value, so use `user::make` to refer to a name in it",
                 "/main: `Int` has no field or method `age`",
             ]
+        );
+    }
+
+    const POINT: &str = "
+        group Point {
+            let x: Int
+        }
+        impl Int {
+            static fn zero() -> Int {
+                return 0
+            }
+        }
+        impl Point {
+            static fn origin() -> Point {
+                return Point { x: Int.zero() }
+            }
+            static fn at(x: Int) -> Point {
+                return Point { x: x }
+            }
+            fn moved(by amount: Int) -> Point {
+                return Point.at(x: self.x + amount)
+            }
+        }
+    ";
+
+    #[test]
+    fn calls_static_functions_on_types() {
+        assert_eq!(
+            check_top(&format!(
+                "
+                {POINT}
+                let zero: Int = Int.zero()
+                let alsoZero: Int = stdlib::Int.zero()
+                let origin: Point = Point.origin()
+                let moved: Point = Point.at(x: 1).moved(by: 2)
+                fn f() -> Int {{
+                    Point.origin()
+                    return main::Point.origin().x
+                }}
+                "
+            )),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn static_functions_on_types_from_other_modules() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /geometry
+                    let a: Point = geometry::Point.origin()
+                    let b: Point = Point.origin()
+                    ",
+                ),
+                (
+                    "/geometry",
+                    "
+                    group Point {}
+                    impl Point {
+                        static fn origin() -> Point {
+                            return Point {}
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn static_functions_have_no_self() {
+        assert_eq!(
+            messages_top(
+                "
+                impl Int {
+                    static fn zero() -> Int {
+                        return self
+                    }
+                    static fn one() -> Int {
+                        fn nested() -> Int {
+                            return self
+                        }
+                        return 1
+                    }
+                }
+                "
+            ),
+            [
+                "`self` can't be used in a static function",
+                "`self` can only be used inside an `impl`",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_functions_are_used_on_types_not_values() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {POINT}
+                let a = 1.zero()
+                let b = Point.origin().origin()
+                let c = 1.zero
+                "
+            )),
+            [
+                "`Int.zero` is a static function, so it must be used on `Int` itself rather than a value",
+                "`Point.origin` is a static function, so it must be used on `Point` itself rather than a value",
+                "`Int.zero` is a static function, so it must be used on `Int` itself rather than a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn methods_and_fields_are_used_on_values_not_types() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {POINT}
+                let a = Point.moved(by: 1)
+                let b = Point.x
+                let c = Point.x()
+                "
+            )),
+            [
+                "`Point.moved` is a method, so it must be used on a value of `Point` rather than `Point` itself",
+                "`Point.x` is a field, so it must be used on a value of `Point` rather than `Point` itself",
+                "`Point.x` is a field, so it must be used on a value of `Point` rather than `Point` itself",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_functions_must_be_called() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {POINT}
+                let a = Int.zero
+                // A type on its own is still not a value.
+                let b = Int
+                "
+            )),
+            [
+                "`Int.zero` is a static function, not a value",
+                "`Int` is a type, not a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn checks_static_function_calls() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {POINT}
+                let a = Int.zero(1)
+                let b = Point.at(y: 1)
+                let c = Point.at(x: true)
+                let d: Bool = Int.zero()
+                let e = Int.missing()
+                "
+            )),
+            [
+                "`Int.zero` takes 0 arguments, found 1",
+                "argument to `Point.at` should be labelled `x`, found `y`",
+                "argument `x` of `Point.at` expects `Int`, found `Bool`",
+                "cannot assign `Int` to `d`, which has type `Bool`",
+                "`Int` has no static function `missing`",
+            ]
+        );
+        assert_eq!(
+            messages_top(
+                "
+                impl Int {
+                    static fn zero() -> Int {
+                        return true
+                    }
+                }
+                "
+            ),
+            ["`zero` must return `Int`, found `Bool`"]
+        );
+    }
+
+    #[test]
+    fn static_functions_have_their_own_names() {
+        // Separate from the type's fields and methods, which share names with
+        // each other.
+        assert_eq!(
+            check_top(
+                "
+                group Point {
+                    let x: Int
+                }
+                impl Point {
+                    static fn x() -> Bool {
+                        return true
+                    }
+                    fn make() -> Int {
+                        return 1
+                    }
+                    static fn make() -> Point {
+                        return Point { x: 0 }
+                    }
+                }
+                let a: Int = Point.make().x
+                let b: Bool = Point.x()
+                let c: Int = Point.make().make()
+                "
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            messages_top(
+                "
+                group Point {}
+                impl Point {
+                    static fn make() {}
+                }
+                impl Point {
+                    static fn make() {}
+                    fn make() {}
+                    fn make() {}
+                }
+                "
+            ),
+            [
+                "`Point` already has a static function `make`",
+                "`Point` already has a method `make`",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_functions_need_their_module_imported() {
+        let ints = "
+            impl Int {
+                static fn zero() -> Int {
+                    return 0
+                }
+            }
+        ";
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /ints\nlet a = Int.zero()"),
+                ("/other", "let b = Int.zero()"),
+                ("/ints", ints),
+            ]),
+            ["/other: `Int.zero` is declared in `/ints`, which is not imported"]
+        );
+    }
+
+    #[test]
+    fn static_functions_are_hoisted() {
+        assert_eq!(
+            check_top(
+                "
+                let p: Point = Point.origin()
+                impl Point {
+                    static fn origin() -> Point {
+                        return Point {}
+                    }
+                }
+                group Point {}
+                "
+            ),
+            Ok(())
         );
     }
 }
