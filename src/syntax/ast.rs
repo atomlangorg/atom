@@ -21,10 +21,13 @@ use std::fmt;
 pub enum ModulePath {
     /// `/dir/other`: from the root of the project.
     Absolute(Vec<String>),
-    /// `./dir/other`: from the directory of the current file.
+    /// `./dir/other`: from the directory of the current file, within its
+    /// package if it's in one.
     Relative(Vec<String>),
-    /// `other`: by name alone. In a `use`, this names a library built into
-    /// the language, such as `stdlib`. As a qualifier, it matches any
+    /// `stdlib/core`: from the root of a package, whose name comes first.
+    /// Always has at least two segments.
+    Package(Vec<String>),
+    /// `other`: by name alone. Only used as a qualifier, where it matches any
     /// imported module with that name.
     Named(String),
 }
@@ -34,6 +37,7 @@ impl fmt::Display for ModulePath {
         match self {
             Self::Absolute(segments) => write!(f, "/{}", segments.join("/")),
             Self::Relative(segments) => write!(f, "./{}", segments.join("/")),
+            Self::Package(segments) => write!(f, "{}", segments.join("/")),
             Self::Named(name) => write!(f, "{name}"),
         }
     }

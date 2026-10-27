@@ -26,8 +26,14 @@
 //! yet, and top-level values whose initialisers depend on themselves are
 //! rejected.
 //!
-//! The standard library is a module called `stdlib`, which every module
-//! imports without needing a `use`.
+//! A module's own top-level names come before the names it imports, which
+//! must not clash with each other.
+//!
+//! The standard library is a package called `stdlib`, whose files are modules
+//! named from the package, such as `stdlib/core`. Every program imports
+//! `stdlib/core` without needing a `use`, but only the standard library itself
+//! can import its other files. `stdlib/builtin` declares the types the compiler
+//! creates itself for literals, which can't be constructed.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -43,12 +49,21 @@ use super::{
     parser::parse,
 };
 
-/// The name of the standard library, which is how it's imported and
-/// qualified, as in `stdlib::Int`.
-const STDLIB_NAME: &str = "stdlib";
+/// The package holding the standard library.
+const STDLIB_PACKAGE: &str = "stdlib";
 
-static STDLIB: LazyLock<Program> = LazyLock::new(|| {
-    parse(include_str!("../stdlib/core.atom")).expect("the standard library should parse")
+/// The files of the standard library, by their paths within it.
+static STDLIB: LazyLock<Vec<Module>> = LazyLock::new(|| {
+    [
+        ("builtin", include_str!("../stdlib/builtin.atom")),
+        ("core", include_str!("../stdlib/core.atom")),
+    ]
+    .into_iter()
+    .map(|(name, src)| Module {
+        path: vec![name.to_string()],
+        program: parse(src).unwrap_or_else(|errs| panic!("`stdlib/{name}` should parse: {errs:?}")),
+    })
+    .collect()
 });
 
 /// A parsed `.atom` file.
@@ -102,6 +117,14 @@ pub enum CheckError {
     UnknownModule(String),
     /// A qualified name's module isn't the current module or one it imports.
     NotImported(String),
+    /// A package was used where one of its modules was needed.
+    PackageNotModule(String),
+    /// A module was imported from outside its package, which doesn't export
+    /// it.
+    PrivateModule { module: String, package: String },
+    /// A type that only the compiler can create was constructed, such as
+    /// `Int`, whose values come from literals.
+    CompilerCreated(Type),
     /// `::` was used after a name that's declared, but isn't a module.
     NotAModule(String),
     /// A qualified name's module matched more than one module by name, so
@@ -278,6 +301,18 @@ impl fmt::Display for CheckError {
             ),
             Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
             Self::NotImported(path) => write!(f, "`{path}` is not an imported module"),
+            Self::PackageNotModule(package) => write!(
+                f,
+                "`{package}` is a package, so use one of its modules, such as `{package}/core`"
+            ),
+            Self::PrivateModule { module, package } => write!(
+                f,
+                "`{module}` can only be imported from inside the `{package}` package"
+            ),
+            Self::CompilerCreated(ty) => write!(
+                f,
+                "`{ty}` can only be created by the compiler, such as with a literal"
+            ),
             Self::NotAModule(name) => write!(
                 f,
                 "`{name}` is not a module, so it can't be followed by `::`"
@@ -432,11 +467,9 @@ impl fmt::Display for CheckError {
 /// Checks every module in a project, along with the standard library.
 pub fn check(modules: &[Module]) -> Result<(), Vec<ModuleError>> {
     let mut checker = Checker::default();
-    checker.add_module(STDLIB_NAME.to_string(), &[], STDLIB_NAME, &STDLIB);
+    checker.add_stdlib();
     for module in modules {
-        let name = module.path.last().expect("module paths aren't empty");
-        let display = format!("/{}", module.path.join("/"));
-        checker.add_module(display, &module.path, name, &module.program);
+        checker.add_module(None, module);
     }
     checker.check_modules();
 
@@ -531,11 +564,14 @@ enum Receiver {
 }
 
 struct ModuleInfo<'a> {
-    /// The module's path, such as `/dir/other`, or `stdlib`.
+    /// The module's path, such as `/dir/other` or `stdlib/core`.
     display: String,
-    /// The module's path from the project root. Empty for the standard
-    /// library.
+    /// The package the module is in, or `None` if it's in the project.
+    package: Option<&'a str>,
+    /// The module's path from the root of its package or the project.
     path: &'a [String],
+    /// Whether modules outside its package can import it.
+    exported: bool,
     /// The name used to qualify the module's names, such as `other` in
     /// `other::f`.
     name: &'a str,
@@ -590,6 +626,14 @@ enum Pending<'a> {
 struct Checker<'a> {
     /// The standard library first, then the project's modules.
     modules: Vec<ModuleInfo<'a>>,
+    /// The index in `modules` of `stdlib/core`, which every project module
+    /// imports, and which declares the types of literals.
+    core: usize,
+    /// The index in `modules` of `stdlib/builtin`, whose types the compiler
+    /// creates itself.
+    builtin: usize,
+    /// The `id`s of the types declared in `stdlib/builtin`.
+    builtin_types: HashSet<usize>,
     /// The index in `modules` of the module being checked.
     module: usize,
     /// One scope per enclosing block inside functions, innermost last. Empty
@@ -618,21 +662,41 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn add_module(
-        &mut self,
-        display: String,
-        path: &'a [String],
-        name: &'a str,
-        program: &'a Program,
-    ) {
+    /// Adds a module from `package`, or from the project if that's `None`.
+    /// Returns its index in `modules`.
+    fn add_module(&mut self, package: Option<&'a str>, module: &'a Module) -> usize {
+        let path = module.path.join("/");
+        let display = match package {
+            Some(package) => format!("{package}/{path}"),
+            None => format!("/{path}"),
+        };
         self.modules.push(ModuleInfo {
             display,
-            path,
-            name,
-            program,
+            package,
+            path: &module.path,
+            exported: package.is_none(),
+            name: module.path.last().expect("module paths aren't empty"),
+            program: &module.program,
             scope: HashMap::new(),
             imports: vec![],
         });
+        self.modules.len() - 1
+    }
+
+    /// Adds the standard library's modules. Only `stdlib/core` can be imported
+    /// from outside it.
+    fn add_stdlib(&mut self) {
+        for module in STDLIB.iter() {
+            let index = self.add_module(Some(STDLIB_PACKAGE), module);
+            match module.path[0].as_str() {
+                "core" => {
+                    self.core = index;
+                    self.modules[index].exported = true;
+                }
+                "builtin" => self.builtin = index,
+                _ => {}
+            }
+        }
     }
 
     fn error(&mut self, error: CheckError) {
@@ -753,12 +817,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Finds the modules imported by the current module. The standard library
-    /// is always imported.
+    /// Finds the modules imported by the current module. Modules in the
+    /// project always import `stdlib/core`.
     fn resolve_imports(&mut self) {
         let mut imports = vec![];
-        if self.module != 0 {
-            imports.push(0);
+        if self.modules[self.module].package.is_none() {
+            imports.push(self.core);
         }
 
         for stmt in self.modules[self.module].program {
@@ -766,30 +830,61 @@ impl<'a> Checker<'a> {
             match self.resolve_path(path) {
                 // Importing a module twice, or importing itself, is harmless.
                 Some(module) if module == self.module || imports.contains(&module) => {}
+                Some(module) if !self.can_import(module) => {
+                    let module = self.modules[module].display.clone();
+                    self.error(CheckError::PrivateModule {
+                        module,
+                        package: STDLIB_PACKAGE.to_string(),
+                    });
+                }
                 Some(module) => imports.push(module),
-                None => self.error(CheckError::UnknownModule(path.to_string())),
+                None => self.error(self.unknown_module(path)),
             }
         }
 
         self.modules[self.module].imports = imports;
     }
 
-    /// Finds the module at `path`, which is relative to the current module if
-    /// it starts with `./`. Only libraries, such as `stdlib`, are found by
-    /// name.
-    fn resolve_path(&self, path: &ModulePath) -> Option<usize> {
-        let full: Vec<&String> = match path {
-            ModulePath::Absolute(segments) => segments.iter().collect(),
-            ModulePath::Relative(segments) => {
-                let current = self.modules[self.module].path;
-                let dir = current.split_last().map_or(current, |(_, dir)| dir);
-                dir.iter().chain(segments).collect()
+    /// Whether the current module can import `module`, which must be in the
+    /// same package, or exported from its package.
+    fn can_import(&self, module: usize) -> bool {
+        let target = &self.modules[module];
+        target.exported || target.package == self.modules[self.module].package
+    }
+
+    /// The error for a module path that doesn't lead to a module.
+    fn unknown_module(&self, path: &ModulePath) -> CheckError {
+        match path {
+            ModulePath::Named(name) if name == STDLIB_PACKAGE => {
+                CheckError::PackageNotModule(name.clone())
             }
-            ModulePath::Named(name) => return (name == STDLIB_NAME).then_some(0),
+            _ => CheckError::UnknownModule(path.to_string()),
+        }
+    }
+
+    /// Finds the module at `path`. A path starting with `/` is from the root of
+    /// the project, one starting with `./` is from the current module's
+    /// directory, and one starting with a package's name is from the root of
+    /// that package. Modules can't be found by name alone.
+    fn resolve_path(&self, path: &ModulePath) -> Option<usize> {
+        let current = &self.modules[self.module];
+        let (package, full): (Option<&str>, Vec<&String>) = match path {
+            ModulePath::Absolute(segments) => (None, segments.iter().collect()),
+            ModulePath::Relative(segments) => {
+                let dir = current
+                    .path
+                    .split_last()
+                    .map_or(current.path, |(_, dir)| dir);
+                (current.package, dir.iter().chain(segments).collect())
+            }
+            ModulePath::Package(segments) => {
+                (Some(segments[0].as_str()), segments[1..].iter().collect())
+            }
+            ModulePath::Named(_) => return None,
         };
-        self.modules
-            .iter()
-            .position(|module| module.path.iter().eq(full.iter().copied()))
+        self.modules.iter().position(|module| {
+            module.package == package && module.path.iter().eq(full.iter().copied())
+        })
     }
 
     /// The modules whose top-level names the current module can use: itself,
@@ -810,6 +905,7 @@ impl<'a> Checker<'a> {
                 // Modules aren't identifiers, so a name can be both. If it's
                 // only an identifier, that's probably the mistake.
                 [] if self.is_declared(name) => Err(CheckError::NotAModule(name.clone())),
+                [] if name == STDLIB_PACKAGE => Err(CheckError::PackageNotModule(name.clone())),
                 [] => Err(CheckError::NotImported(name.clone())),
                 [module] => Ok(module),
                 _ => Err(CheckError::AmbiguousModule {
@@ -836,10 +932,10 @@ impl<'a> Checker<'a> {
                 .any(|module| self.modules[module].scope.contains_key(name))
     }
 
-    /// A type from the standard library, such as `Int` for integer literals.
-    /// Found in the standard library itself, so it can't be shadowed.
+    /// A type from `stdlib/core`, such as `Int` for integer literals. Found in
+    /// the standard library itself, so it can't be shadowed.
     fn std_type(&self, name: &str) -> Type {
-        match self.modules[0].scope.get(name) {
+        match self.modules[self.core].scope.get(name) {
             Some(Binding::Type(ty)) => ty.clone(),
             _ => panic!("the standard library should declare `{name}`"),
         }
@@ -872,11 +968,16 @@ impl<'a> Checker<'a> {
                     None => {}
                 }
 
-                // A name that isn't qualified must only be declared in one of
-                // the modules it could come from.
-                let found: Vec<_> = self
-                    .visible_modules()
-                    .filter_map(|module| {
+                // The current module's own names come first. Otherwise, a name
+                // that isn't qualified must only be declared in one of the
+                // modules it imports.
+                if let Some(binding) = self.modules[self.module].scope.get(name.name.as_str()) {
+                    return self.top_level(binding);
+                }
+                let found: Vec<_> = self.modules[self.module]
+                    .imports
+                    .iter()
+                    .filter_map(|&module| {
                         let binding = self.modules[module].scope.get(name.name.as_str())?;
                         Some((module, binding))
                     })
@@ -895,7 +996,12 @@ impl<'a> Checker<'a> {
             }
         };
 
-        // Top-level values are outside every function.
+        self.top_level(binding)
+    }
+
+    /// Checks that a module's top-level `binding` can be used here. Top-level
+    /// values are outside every function.
+    fn top_level(&self, binding: &Binding) -> Result<Binding, LookupError> {
         if matches!(binding, Binding::Global(_)) && self.current_fn.is_some() {
             return Err(LookupError::Captured);
         }
@@ -1136,6 +1242,11 @@ impl<'a> Checker<'a> {
             id,
             name: name.to_string(),
         };
+        // Groups in `stdlib/builtin` are the compiler's own, but only when
+        // they're declared at its top level.
+        if self.module == self.builtin && self.scopes.is_empty() {
+            self.builtin_types.insert(id);
+        }
         self.declare(name, Binding::Type(ty));
         id
     }
@@ -1526,6 +1637,16 @@ impl<'a> Checker<'a> {
         self.check_args(format!("{ty}.{method}"), args, found, signature)
     }
 
+    /// Whether `ty` can only be created by the compiler, because it's a type
+    /// from `stdlib/builtin`, or holds one directly, as `Int` does.
+    fn is_compiler_created(&self, ty: &Type) -> bool {
+        let is_builtin = |ty: &Type| self.builtin_types.contains(&ty.id);
+        is_builtin(ty)
+            || self.group_fields[ty.id]
+                .iter()
+                .any(|field| field.ty.as_ref().is_some_and(is_builtin))
+    }
+
     /// Checks the construction of a group, returning its type, or `None` if
     /// it can't be determined.
     fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Option<Type> {
@@ -1533,6 +1654,10 @@ impl<'a> Checker<'a> {
         let found: Vec<_> = values.iter().map(|field| self.expr(&field.value)).collect();
 
         let ty = self.resolve_type(type_name)?;
+        if self.is_compiler_created(&ty) {
+            self.error(CheckError::CompilerCreated(ty.clone()));
+            return Some(ty);
+        }
         let fields = self.group_fields[ty.id].clone();
         let name = type_name.to_string();
 
@@ -1696,7 +1821,7 @@ mod tests {
     /// The standard library type called `name`.
     fn ty(name: &str) -> Type {
         let mut checker = Checker::default();
-        checker.add_module(STDLIB_NAME.to_string(), &[], STDLIB_NAME, &STDLIB);
+        checker.add_stdlib();
         checker.check_modules();
         checker.std_type(name)
     }
@@ -2006,24 +2131,21 @@ mod tests {
     }
 
     #[test]
-    fn redeclaring_std_names_makes_them_ambiguous() {
-        // `/main` and `stdlib` are different modules, so both can declare
-        // `Int`, but then it must be qualified.
+    fn own_names_come_before_std_names() {
+        // `/main` and `stdlib/core` are different modules, so both can declare
+        // `Int`, and in `/main` a bare `Int` means its own.
         assert_eq!(
-            check_top(
+            messages_top(
                 "
                 group Int {}
                 let a: Int = 1
-                let b: stdlib::Int = 1
-                fn f(x: main::Int) -> stdlib::Bool {
+                let b: core::Int = 1
+                fn f(x: main::Int) -> core::Bool {
                     return true
                 }
                 "
             ),
-            Err(vec![CheckError::Ambiguous {
-                name: "Int".to_string(),
-                modules: vec!["/main".to_string(), "stdlib".to_string()],
-            }])
+            ["cannot assign `Int` to `a`, which has type `Int`"]
         );
     }
 
@@ -3306,7 +3428,7 @@ mod tests {
                     use ./main
                     use /lib
                     use ./lib
-                    use stdlib
+                    use stdlib/core
                     let x: Int = y + 1
                     let z = x
                     ",
@@ -3339,9 +3461,13 @@ mod tests {
             ]),
             ["/main: `f` is declared in `/a` and `/dir/b`, so it must be qualified"]
         );
-        // Including when the module itself declares the name.
+    }
+
+    #[test]
+    fn own_names_come_before_imported_names() {
+        let a = "fn f() -> Int {\nreturn 1\n}";
         assert_eq!(
-            file_messages(&[
+            check_files(&[
                 (
                     "/main",
                     "
@@ -3349,13 +3475,14 @@ mod tests {
                     fn f() -> Bool {
                         return f()
                     }
-                    let x: Int = a::f()
-                    let y: Bool = main::f()
+                    let x: Bool = f()
+                    let y: Int = a::f()
+                    let z: Bool = main::f()
                     ",
                 ),
                 ("/a", a),
             ]),
-            ["/main: `f` is declared in `/main` and `/a`, so it must be qualified"]
+            Ok(())
         );
     }
 
@@ -3400,7 +3527,7 @@ mod tests {
     #[test]
     fn std_names_can_be_qualified() {
         assert_eq!(
-            check_top("let x: stdlib::Int = 1\nlet y: Int = x\nlet z: stdlib::Bool = true"),
+            check_top("let x: core::Int = 1\nlet y: Int = x\nlet z: stdlib/core::Bool = true"),
             Ok(())
         );
     }
@@ -3696,10 +3823,25 @@ mod tests {
     }
 
     #[test]
-    fn std_types_can_be_constructed() {
+    fn only_literals_create_ints_and_bools() {
         assert_eq!(
-            check_body("let v: Void = Void {}\nlet b: stdlib::Bool = stdlib::Bool {}"),
+            check_body("let v: Void = Void {}\nlet w: core::Void = core::Void {}"),
             Ok(())
+        );
+        assert_eq!(
+            messages(
+                "
+                let a = Int {}
+                let b = core::Bool { builtin: c }
+                let d: Int = 1.builtin
+                "
+            ),
+            [
+                "`Int` can only be created by the compiler, such as with a literal",
+                "`c` is not declared",
+                "`Bool` can only be created by the compiler, such as with a literal",
+                "cannot assign `Int` to `d`, which has type `Int`",
+            ]
         );
     }
 
@@ -3965,7 +4107,7 @@ mod tests {
                         return self * 2
                     }
                 }
-                impl stdlib::Bool {
+                impl core::Bool {
                     fn flipped() -> Bool {
                         return !self
                     }
@@ -4479,7 +4621,7 @@ mod tests {
                 "
                 {POINT}
                 let zero: Int = Int.zero()
-                let alsoZero: Int = stdlib::Int.zero()
+                let alsoZero: Int = core::Int.zero()
                 let origin: Point = Point.origin()
                 let moved: Point = Point.at(x: 1).moved(by: 2)
                 fn f() -> Int {{
@@ -4718,6 +4860,98 @@ mod tests {
                 group Point {}
                 "
             ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn stdlib_is_a_package() {
+        assert_eq!(
+            file_messages(&[(
+                "/main",
+                "
+                use stdlib
+                use stdlib/core
+                use stdlib/missing
+                let a: stdlib::Int = 1
+                let b: stdlib/core::Int = 1
+                ",
+            )]),
+            [
+                "/main: `stdlib` is a package, so use one of its modules, such as `stdlib/core`",
+                "/main: cannot find module `stdlib/missing`",
+                "/main: `stdlib` is a package, so use one of its modules, such as `stdlib/core`",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_stdlib_can_import_builtin() {
+        assert_eq!(
+            file_messages(&[(
+                "/main",
+                "
+                use stdlib/builtin
+                let a: builtin::Int = 1
+                let b: stdlib/builtin::Int = 1
+                ",
+            )]),
+            [
+                "/main: `stdlib/builtin` can only be imported from inside the `stdlib` package",
+                "/main: `builtin` is not an imported module",
+                "/main: `stdlib/builtin` is not an imported module",
+            ]
+        );
+    }
+
+    #[test]
+    fn relative_paths_stay_in_their_package() {
+        // `./builtin` from the project looks in the project, not the standard
+        // library, even though `stdlib/core` imports it the same way.
+        assert_eq!(
+            file_messages(&[("/main", "use ./builtin")]),
+            ["/main: cannot find module `./builtin`"]
+        );
+        assert_eq!(
+            check_files(&[("/main", "use ./builtin"), ("/builtin", "group Int {}")]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn project_modules_can_share_names_with_stdlib_modules() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /core
+                    let a: Bool = flag
+                    let b: Bool = /core::flag
+                    let c: Int = stdlib/core::Int.zero()
+                    let d = core::flag
+                    ",
+                ),
+                (
+                    "/core",
+                    "
+                    let flag = true
+                    impl Int {
+                        static fn zero() -> Int {
+                            return 0
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            ["/main: `core` could be `stdlib/core` or `/core`, so the full path must be used",]
+        );
+    }
+
+    #[test]
+    fn programs_import_core_without_a_use() {
+        assert_eq!(
+            check_top("let x: Void = Void {}\nlet y: Bool = true\nlet z: core::Int = 1"),
             Ok(())
         );
     }

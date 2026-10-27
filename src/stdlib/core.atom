@@ -17,11 +17,17 @@
 // The standard library. Every program can use these names without importing
 // them.
 
+use ./builtin
+
 // Whole numbers, such as `42`.
-group Int {}
+group Int {
+    let builtin: builtin::Int
+}
 
 // `true` or `false`.
-group Bool {}
+group Bool {
+    let builtin: builtin::Bool
+}
 
 // The return type of a function that doesn't return anything useful.
 // Functions without an explicit return type return `Void`.

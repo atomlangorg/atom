@@ -148,7 +148,7 @@ where
 {
     let ident = select! { Token::Ident(name) => name.to_string() }.labelled("identifier");
 
-    // `/dir/other`, `./dir/other` or `other`.
+    // `/dir/other`, `./dir/other`, `stdlib/core` or `other`.
     let segments = ident
         .separated_by(just(Token::Slash))
         .at_least(1)
@@ -159,8 +159,14 @@ where
             .map(ModulePath::Absolute),
         just(Token::Dot)
             .then(just(Token::Slash))
-            .ignore_then(segments)
+            .ignore_then(segments.clone())
             .map(ModulePath::Relative),
+        ident
+            .then(just(Token::Slash).ignore_then(segments))
+            .map(|(package, mut path)| {
+                path.insert(0, package);
+                ModulePath::Package(path)
+            }),
         ident.map(ModulePath::Named),
     ))
     .labelled("module path")
@@ -1612,7 +1618,7 @@ mod tests {
             "use /",
             "use ./",
             "use /a/",
-            "use a/b",
+            "use a/",
             "use .a",
             "use ../a",
             "use /a::b",
@@ -2538,5 +2544,24 @@ mod tests {
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
+    }
+
+    #[test]
+    fn parses_package_paths() {
+        let package = || ModulePath::Package(vec!["stdlib".to_string(), "core".to_string()]);
+        assert_eq!(
+            parse("use stdlib/core\nlet x: stdlib/core::Int = stdlib/core::Int.zero()"),
+            Ok(vec![
+                Stmt::Use(package()),
+                Stmt::Decl {
+                    mutability: Mutability::Let,
+                    name: "x".to_string(),
+                    ty: Some(qualified(package(), "Int")),
+                    value: method_call(Expr::Var(qualified(package(), "Int")), "zero", vec![]),
+                },
+            ])
+        );
+        // Without `::`, `/` is still division.
+        assert_eq!(parse_expr("a/b"), *bin(var("a"), BinOp::Div, var("b")));
     }
 }
