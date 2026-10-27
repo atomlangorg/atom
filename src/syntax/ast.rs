@@ -43,6 +43,40 @@ impl fmt::Display for ModulePath {
     }
 }
 
+/// What a `use` imports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Import {
+    /// `use /dir/other`: one module.
+    Module(ModulePath),
+    /// `use /dir/*`: every module directly in a directory, whose path this is.
+    /// The path can be empty, as in `use ./*`, or just a package's name, as in
+    /// `use stdlib/*`.
+    Directory(ModulePath),
+}
+
+impl fmt::Display for Import {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Module(path) => write!(f, "{path}"),
+            // Written like a module path whose last segment is `*`.
+            Self::Directory(path) => {
+                let with_star = |segments: &Vec<String>| {
+                    let mut segments = segments.clone();
+                    segments.push("*".to_string());
+                    segments
+                };
+                let path = match path {
+                    ModulePath::Absolute(segments) => ModulePath::Absolute(with_star(segments)),
+                    ModulePath::Relative(segments) => ModulePath::Relative(with_star(segments)),
+                    ModulePath::Package(segments) => ModulePath::Package(with_star(segments)),
+                    ModulePath::Named(name) => ModulePath::Package(vec![name.clone(), "*".into()]),
+                };
+                write!(f, "{path}")
+            }
+        }
+    }
+}
+
 /// A name, optionally qualified by the module it's declared in, as in `f`,
 /// `other::f` or `/dir/other::f`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,9 +200,9 @@ pub enum Mutability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    /// `use /dir/other`: makes the names declared at the top level of another
-    /// module visible. Only allowed at the top level.
-    Use(ModulePath),
+    /// `use /dir/other` or `use /dir/*`: makes the names declared at the top
+    /// level of other modules visible. Only allowed at the top level.
+    Use(Import),
     /// `let name = value` or `var name = value`
     ///
     /// Either can have an explicit type, as in `let name: Int = value`.

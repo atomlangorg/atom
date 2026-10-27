@@ -1,6 +1,7 @@
 // The top level can only declare things. Declarations can be used in any
 // order, even across files.
-use ./users/user
+// Imports every module in `users`.
+use ./users/*
 use ./teams/team
 
 // `maxAge` comes from /users/user.

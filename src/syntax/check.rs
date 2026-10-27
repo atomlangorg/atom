@@ -43,8 +43,8 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, ModulePath, Mutability, Name,
-        Param, Program, Stmt, UnOp,
+        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, Import, ModulePath,
+        Mutability, Name, Param, Program, Stmt, UnOp,
     },
     parser::parse,
 };
@@ -117,6 +117,8 @@ pub enum CheckError {
     UnknownModule(String),
     /// A qualified name's module isn't the current module or one it imports.
     NotImported(String),
+    /// A `use` of a directory found no modules that could be imported.
+    EmptyDirectory(String),
     /// A package was used where one of its modules was needed.
     PackageNotModule(String),
     /// A module was imported from outside its package, which doesn't export
@@ -301,6 +303,12 @@ impl fmt::Display for CheckError {
             ),
             Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
             Self::NotImported(path) => write!(f, "`{path}` is not an imported module"),
+            Self::EmptyDirectory(import) => {
+                write!(
+                    f,
+                    "`{import}` doesn't match any modules that can be imported"
+                )
+            }
             Self::PackageNotModule(package) => write!(
                 f,
                 "`{package}` is a package, so use one of its modules, such as `{package}/core`"
@@ -826,7 +834,22 @@ impl<'a> Checker<'a> {
         }
 
         for stmt in self.modules[self.module].program {
-            let Stmt::Use(path) = stmt else { continue };
+            let Stmt::Use(import) = stmt else { continue };
+            let path = match import {
+                Import::Module(path) => path,
+                Import::Directory(dir) => {
+                    let found = self.resolve_directory(dir);
+                    if found.is_empty() {
+                        self.error(CheckError::EmptyDirectory(import.to_string()));
+                    }
+                    for module in found {
+                        if !imports.contains(&module) {
+                            imports.push(module);
+                        }
+                    }
+                    continue;
+                }
+            };
             match self.resolve_path(path) {
                 // Importing a module twice, or importing itself, is harmless.
                 Some(module) if module == self.module || imports.contains(&module) => {}
@@ -862,13 +885,40 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Finds the module at `path`. A path starting with `/` is from the root of
-    /// the project, one starting with `./` is from the current module's
-    /// directory, and one starting with a package's name is from the root of
-    /// that package. Modules can't be found by name alone.
+    /// Finds the module at `path`.
     fn resolve_path(&self, path: &ModulePath) -> Option<usize> {
+        let (package, full) = self.full_path(path)?;
+        self.modules.iter().position(|module| {
+            module.package == package && module.path.iter().eq(full.iter().copied())
+        })
+    }
+
+    /// Finds the modules directly in the directory at `path` that the current
+    /// module can import, other than itself.
+    fn resolve_directory(&self, path: &ModulePath) -> Vec<usize> {
+        let Some((package, dir)) = self.full_path(path) else {
+            return vec![];
+        };
+        (0..self.modules.len())
+            .filter(|&index| {
+                let module = &self.modules[index];
+                module.package == package
+                    && module.path.len() == dir.len() + 1
+                    && module.path.iter().zip(&dir).all(|(a, b)| a == *b)
+                    && index != self.module
+                    && self.can_import(index)
+            })
+            .collect()
+    }
+
+    /// The package and path within it that `path` leads to. A path starting
+    /// with `/` is from the root of the project, one starting with `./` is
+    /// from the current module's directory, and one starting with a package's
+    /// name is from the root of that package. Modules can't be found by name
+    /// alone.
+    fn full_path(&self, path: &'a ModulePath) -> Option<(Option<&'a str>, Vec<&'a String>)> {
         let current = &self.modules[self.module];
-        let (package, full): (Option<&str>, Vec<&String>) = match path {
+        Some(match path {
             ModulePath::Absolute(segments) => (None, segments.iter().collect()),
             ModulePath::Relative(segments) => {
                 let dir = current
@@ -881,9 +931,6 @@ impl<'a> Checker<'a> {
                 (Some(segments[0].as_str()), segments[1..].iter().collect())
             }
             ModulePath::Named(_) => return None,
-        };
-        self.modules.iter().position(|module| {
-            module.package == package && module.path.iter().eq(full.iter().copied())
         })
     }
 
@@ -4952,6 +4999,120 @@ mod tests {
     fn programs_import_core_without_a_use() {
         assert_eq!(
             check_top("let x: Void = Void {}\nlet y: Bool = true\nlet z: core::Int = 1"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn imports_every_module_in_a_directory() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use ./users/*
+                    let user: User = User { age: maxAge }
+                    let admin: Admin = promote(user: user)
+                    ",
+                ),
+                (
+                    "/users/user",
+                    "group User {\nlet age: Int\n}\nlet maxAge = 120"
+                ),
+                (
+                    "/users/admin",
+                    "
+                    use ./user
+                    group Admin {}
+                    fn promote(user: User) -> Admin {
+                        return Admin {}
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn directory_imports_skip_subdirectories() {
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /users/*\nlet a = top\nlet b = nested"),
+                ("/users/user", "let top = 1"),
+                ("/users/admins/admin", "let nested = 2"),
+            ]),
+            ["/main: `nested` is not declared"]
+        );
+    }
+
+    #[test]
+    fn directory_imports_are_relative_or_absolute() {
+        assert_eq!(
+            check_files(&[
+                ("/dir/main", "use ./*\nuse /*\nlet x = sibling + root"),
+                ("/dir/sibling", "let sibling = 1"),
+                ("/root", "let root = 2"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn directory_imports_skip_the_importing_module() {
+        // Only `/main` is in the root, so `/*` has nothing else to import.
+        assert_eq!(
+            file_messages(&[("/main", "use ./*\nuse /missing/*")]),
+            [
+                "/main: `./*` doesn't match any modules that can be imported",
+                "/main: `/missing/*` doesn't match any modules that can be imported",
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_imports_skip_private_modules() {
+        // Only `stdlib/core` can be imported from the project, which is
+        // imported anyway.
+        assert_eq!(
+            file_messages(&[("/main", "use stdlib/*\nlet a: builtin::Int = 1")]),
+            ["/main: `builtin` is not an imported module"]
+        );
+    }
+
+    #[test]
+    fn names_from_directory_imports_can_be_ambiguous() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use ./shapes/*
+                    let a = size
+                    let b: Int = circle::size
+                    let c: Bool = square::size
+                    ",
+                ),
+                ("/shapes/circle", "let size = 1"),
+                ("/shapes/square", "let size = true"),
+            ]),
+            [
+                "/main: `size` is declared in `/shapes/circle` and `/shapes/square`, so it must be qualified",
+            ]
+        );
+    }
+
+    #[test]
+    fn importing_a_directory_and_its_modules_is_harmless() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "use ./lib/*\nuse ./lib/a\nuse ./lib/*\nlet x = a + b"
+                ),
+                ("/lib/a", "let a = 1"),
+                ("/lib/b", "let b = 2"),
+            ]),
             Ok(())
         );
     }

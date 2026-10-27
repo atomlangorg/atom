@@ -14,9 +14,34 @@
  * limitations under the License.
  */
 
-use std::fmt;
+use std::{fmt, ops::Range};
 
 use logos::{FilterResult, Lexer, Logos};
+
+/// Lexes `src` into tokens and their spans. Input the lexer doesn't recognise
+/// becomes `Token::Error`.
+pub fn tokens(src: &str) -> impl Iterator<Item = (Token<'_>, Range<usize>)> {
+    Token::lexer(src).spanned().map(|(tok, span)| {
+        let tok = match tok {
+            Ok(Token::SlashStar(SlashStar::Wildcard)) => Token::Wildcard,
+            Ok(Token::SlashStar(SlashStar::MultilineComment)) => Token::Newline,
+            Ok(tok) => tok,
+            Err(()) => Token::Error,
+        };
+        (tok, span)
+    })
+}
+
+/// What a `/*` turned out to be. Only seen inside the lexer, since `tokens`
+/// replaces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlashStar {
+    /// A directory wildcard in a `use`, as in `use ./users/*`.
+    Wildcard,
+    /// A block comment over more than one line, which ends a statement like
+    /// a newline would.
+    MultilineComment,
+}
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t\r\f]+")]
@@ -102,11 +127,47 @@ pub enum Token<'src> {
     #[token("}")]
     RBrace,
 
+    /// Imports every module in a directory, as in `use ./users/*`. Written
+    /// `/*`, which otherwise starts a block comment.
+    Wildcard,
+
     /// Statements are terminated by newlines, including those inside a block
     /// comment.
     #[token("\n")]
-    #[token("/*", block_comment)]
     Newline,
+
+    /// A `/*`, which `tokens` replaces with what it turns out to be.
+    #[token("/*", slash_star)]
+    SlashStar(SlashStar),
+}
+
+/// Lexes a `/*`, which is a directory wildcard in a `use`, and otherwise
+/// starts a block comment.
+fn slash_star<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<SlashStar, ()> {
+    if is_wildcard(lex.source(), lex.span().start) {
+        FilterResult::Emit(SlashStar::Wildcard)
+    } else {
+        block_comment(lex)
+    }
+}
+
+/// Whether the `/*` at `start` is a directory wildcard. That's only on a line
+/// starting with `use`, either straight after a path, as in `./users/*`,
+/// `./*` and `stdlib/*`, or straight after the `use` itself, for the root of
+/// the project.
+fn is_wildcard(src: &str, start: usize) -> bool {
+    let line_start = src[..start].rfind('\n').map_or(0, |newline| newline + 1);
+    let before = &src[line_start..start];
+    let Some(after_use) = before.trim_start().strip_prefix("use") else {
+        return false;
+    };
+    if !after_use.starts_with([' ', '\t']) {
+        return false;
+    }
+    match before.chars().last() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '.' => true,
+        _ => after_use.trim().is_empty(),
+    }
 }
 
 /// Skips the rest of a `/* ... */` comment, whose opening `/*` has just been
@@ -115,7 +176,7 @@ pub enum Token<'src> {
 /// A comment spanning more than one line becomes a newline, so like a line
 /// comment, it never hides the end of a statement. A comment that is never
 /// closed is an error.
-fn block_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<(), ()> {
+fn block_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<SlashStar, ()> {
     let rest = lex.remainder().as_bytes();
     let mut depth = 1;
     let mut i = 0;
@@ -131,7 +192,7 @@ fn block_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<(), (
                 if depth == 0 {
                     lex.bump(i);
                     return if lex.slice().contains('\n') {
-                        FilterResult::Emit(())
+                        FilterResult::Emit(SlashStar::MultilineComment)
                     } else {
                         FilterResult::Skip
                     };
@@ -181,7 +242,9 @@ impl fmt::Display for Token<'_> {
             Self::RParen => write!(f, ")"),
             Self::LBrace => write!(f, "{{"),
             Self::RBrace => write!(f, "}}"),
+            Self::Wildcard => write!(f, "/*"),
             Self::Newline => write!(f, "<newline>"),
+            Self::SlashStar(_) => write!(f, "/*"),
         }
     }
 }
@@ -191,9 +254,7 @@ mod tests {
     use super::*;
 
     fn lex(src: &str) -> Vec<Token<'_>> {
-        Token::lexer(src)
-            .map(|tok| tok.unwrap_or(Token::Error))
-            .collect()
+        tokens(src).map(|(tok, _)| tok).collect()
     }
 
     #[test]
@@ -529,5 +590,51 @@ mod tests {
                 Token::Int(1),
             ]
         );
+    }
+
+    #[test]
+    fn lexes_directory_wildcards_in_use() {
+        assert_eq!(
+            lex("use ./users/*\n    use ./*\nuse /*\nuse stdlib/*"),
+            vec![
+                Token::Use,
+                Token::Dot,
+                Token::Slash,
+                Token::Ident("users"),
+                Token::Wildcard,
+                Token::Newline,
+                Token::Use,
+                Token::Dot,
+                Token::Wildcard,
+                Token::Newline,
+                Token::Use,
+                Token::Wildcard,
+                Token::Newline,
+                Token::Use,
+                Token::Ident("stdlib"),
+                Token::Wildcard,
+            ]
+        );
+    }
+
+    #[test]
+    fn slash_star_is_a_comment_outside_use_paths() {
+        // With a space before it, even on a `use` line.
+        assert_eq!(
+            lex("use ./a /* note */"),
+            vec![Token::Use, Token::Dot, Token::Slash, Token::Ident("a")]
+        );
+        // Straight after a name, but not on a `use` line.
+        assert_eq!(
+            lex("x = a/* note */\nuser /* note */"),
+            vec![
+                Token::Ident("x"),
+                Token::Eq,
+                Token::Ident("a"),
+                Token::Newline,
+                Token::Ident("user"),
+            ]
+        );
+        assert_eq!(lex("/* use ./a */"), vec![]);
     }
 }

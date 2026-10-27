@@ -21,14 +21,13 @@ use chumsky::{
     inspector::TruncateState,
     prelude::*,
 };
-use logos::Logos;
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, ModulePath, Mutability, Name,
-        Param, Program, Stmt, UnOp,
+        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, Import, ModulePath,
+        Mutability, Name, Param, Program, Stmt, UnOp,
     },
-    lexer::Token,
+    lexer::{self, Token},
 };
 
 pub type ParseError<'src> = Rich<'src, Token<'src>>;
@@ -76,10 +75,7 @@ pub fn parse(src: &str) -> Result<Program, Vec<ParseError<'_>>> {
 /// Lexes and parses `src` into a program, also returning any warnings,
 /// which are found even if parsing fails.
 pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, Vec<Warning>) {
-    let tokens = Token::lexer(src).spanned().map(|(tok, span)| match tok {
-        Ok(tok) => (tok, span.into()),
-        Err(()) => (Token::Error, span.into()),
-    });
+    let tokens = lexer::tokens(src).map(|(tok, span)| (tok, span.into()));
     let stream = Stream::from_iter(tokens).map((src.len()..src.len()).into(), |(t, s)| (t, s));
 
     let mut warnings = TruncateState(vec![]);
@@ -454,7 +450,29 @@ where
         function
     };
 
-    let use_ = just(Token::Use).ignore_then(module_path).map(Stmt::Use);
+    // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module directly in
+    // a directory. The lexer reads the final `/*` as a wildcard.
+    let dir_segments = ident
+        .separated_by(just(Token::Slash))
+        .at_least(1)
+        .collect::<Vec<_>>();
+    let directory = choice((
+        just(Token::Slash)
+            .ignore_then(dir_segments.clone())
+            .map(ModulePath::Absolute),
+        just(Token::Dot)
+            .then(just(Token::Slash))
+            .ignore_then(dir_segments.clone())
+            .map(ModulePath::Relative),
+        dir_segments.map(ModulePath::Package),
+        just(Token::Dot).to(ModulePath::Relative(vec![])),
+        empty().to(ModulePath::Absolute(vec![])),
+    ))
+    .then_ignore(just(Token::Wildcard))
+    .map(Import::Directory);
+    let use_ = just(Token::Use)
+        .ignore_then(directory.or(module_path.map(Import::Module)))
+        .map(Stmt::Use);
 
     // `impl Type { fn ... }`, with one function per line, like a block. Each
     // can be a method, or a `static fn`.
@@ -1532,15 +1550,15 @@ mod tests {
                 "
             ),
             Ok(vec![
-                Stmt::Use(ModulePath::Absolute(vec![
+                Stmt::Use(Import::Module(ModulePath::Absolute(vec![
                     "dir".to_string(),
                     "other".to_string()
-                ])),
-                Stmt::Use(ModulePath::Relative(vec![
+                ]))),
+                Stmt::Use(Import::Module(ModulePath::Relative(vec![
                     "dir".to_string(),
                     "other".to_string()
-                ])),
-                Stmt::Use(ModulePath::Named("stdlib".to_string())),
+                ]))),
+                Stmt::Use(Import::Module(ModulePath::Named("stdlib".to_string()))),
                 decl(Mutability::Let, "x", None, Expr::Int(1)),
                 decl(Mutability::Var, "y", Some("Int"), Expr::Int(2)),
                 Stmt::Fn(Function {
@@ -2552,7 +2570,7 @@ mod tests {
         assert_eq!(
             parse("use stdlib/core\nlet x: stdlib/core::Int = stdlib/core::Int.zero()"),
             Ok(vec![
-                Stmt::Use(package()),
+                Stmt::Use(Import::Module(package())),
                 Stmt::Decl {
                     mutability: Mutability::Let,
                     name: "x".to_string(),
@@ -2563,5 +2581,49 @@ mod tests {
         );
         // Without `::`, `/` is still division.
         assert_eq!(parse_expr("a/b"), *bin(var("a"), BinOp::Div, var("b")));
+    }
+
+    #[test]
+    fn parses_directory_imports() {
+        let directory = |path| Stmt::Use(Import::Directory(path));
+        let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            parse("use ./users/*\nuse /users/admins/*\nuse ./*\nuse /*\nuse stdlib/*"),
+            Ok(vec![
+                directory(ModulePath::Relative(segments(&["users"]))),
+                directory(ModulePath::Absolute(segments(&["users", "admins"]))),
+                directory(ModulePath::Relative(vec![])),
+                directory(ModulePath::Absolute(vec![])),
+                directory(ModulePath::Package(segments(&["stdlib"]))),
+            ])
+        );
+    }
+
+    #[test]
+    fn displays_directory_imports_as_written() {
+        for src in ["./users/*", "/users/admins/*", "./*", "/*", "stdlib/*"] {
+            let program = parse(&format!("use {src}")).unwrap();
+            let Stmt::Use(import) = &program[0] else {
+                panic!("expected a `use`");
+            };
+            assert_eq!(import.to_string(), src);
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_directory_imports() {
+        for src in [
+            "use *",
+            "use ./users*",
+            "use ./users/**",
+            "use ./users/*/admins",
+            "use ./users/*.x",
+            "use ./*/*",
+            "use users/*/",
+            "let x = users::*",
+            "fn f() {\nuse ./*\n}",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 }
