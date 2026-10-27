@@ -194,6 +194,13 @@ pub enum CheckError {
     MissingReturn { function: String, expected: Type },
     /// A method was called that no `impl` of the receiver's type declares.
     NoMethod { ty: Type, method: String },
+    /// A method was called from a module that doesn't import the module
+    /// declaring it.
+    MethodNotImported {
+        ty: Type,
+        method: String,
+        module: String,
+    },
     /// Two `impl`s of the same type declared methods with the same name.
     MethodRedeclared { ty: Type, method: String },
     /// `self` was used outside the methods of an `impl`.
@@ -339,6 +346,10 @@ impl fmt::Display for CheckError {
                 "`{function}` must return a value of type `{expected}` on every path"
             ),
             Self::NoMethod { ty, method } => write!(f, "`{ty}` has no method `{method}`"),
+            Self::MethodNotImported { ty, method, module } => write!(
+                f,
+                "`{ty}.{method}` is declared in `{module}`, which is not imported"
+            ),
             Self::MethodRedeclared { ty, method } => {
                 write!(f, "`{ty}` already has a method `{method}`")
             }
@@ -454,6 +465,14 @@ enum LookupError {
     Module(CheckError),
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Method {
+    /// The index in `Checker::modules` of the module whose `impl` declares it.
+    module: usize,
+    /// An index into `Checker::functions`.
+    function: usize,
+}
+
 /// A top-level declaration that still needs checking once every module's
 /// names have been declared.
 enum Pending<'a> {
@@ -482,10 +501,10 @@ struct Checker<'a> {
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
     functions: Vec<Signature<'a>>,
-    /// For each type `id`, the indexes into `functions` of its methods, by
-    /// name. Methods aren't names in any scope, and are only found through
-    /// the type of the value they're called on, wherever it's used.
-    methods: HashMap<usize, HashMap<&'a str, usize>>,
+    /// For each type `id`, its methods by name. Methods aren't names in any
+    /// scope, and are only found through the type of the value they're called
+    /// on, in the modules that can see the module declaring them.
+    methods: HashMap<usize, HashMap<&'a str, Method>>,
     globals: Vec<Global<'a>>,
     /// For each struct, indexed by `id`, its fields in the order they're
     /// declared.
@@ -885,6 +904,9 @@ impl<'a> Checker<'a> {
     fn declare_method(&mut self, self_ty: Option<&Type>, method: &'a Function) -> usize {
         let index = self.signature(&method.params, &method.ret);
         if let Some(self_ty) = self_ty {
+            // Methods must be unique across every module, even ones that
+            // can't see each other, since a call can't say which module's
+            // method it means.
             let methods = self.methods.entry(self_ty.id).or_default();
             if methods.contains_key(method.name.as_str()) {
                 self.error(CheckError::MethodRedeclared {
@@ -892,7 +914,14 @@ impl<'a> Checker<'a> {
                     method: method.name.clone(),
                 });
             } else {
-                methods.insert(&method.name, index);
+                let module = self.module;
+                methods.insert(
+                    &method.name,
+                    Method {
+                        module,
+                        function: index,
+                    },
+                );
             }
         }
         index
@@ -1211,19 +1240,34 @@ impl<'a> Checker<'a> {
         let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
         let ty = receiver_ty?;
 
-        let index = self
+        let found_method = self
             .methods
             .get(&ty.id)
             .and_then(|methods| methods.get(method))
             .copied();
-        let Some(index) = index else {
+        let Some(found_method) = found_method else {
             self.error(CheckError::NoMethod {
                 ty,
                 method: method.to_string(),
             });
             return None;
         };
-        let signature = self.functions[index].clone();
+
+        // Like functions, methods can only be used from their own module or
+        // one that imports it.
+        if !self
+            .visible_modules()
+            .any(|module| module == found_method.module)
+        {
+            self.error(CheckError::MethodNotImported {
+                ty,
+                method: method.to_string(),
+                module: self.modules[found_method.module].display.clone(),
+            });
+            return None;
+        }
+
+        let signature = self.functions[found_method.function].clone();
         self.check_args(format!("{ty}.{method}"), args, found, signature)
     }
 
@@ -3735,14 +3779,13 @@ mod tests {
 
     #[test]
     fn impls_work_across_modules() {
-        // Methods are found through their type, so the module with the
-        // `impl` doesn't need importing to call them.
         assert_eq!(
             check_files(&[
                 (
                     "/main",
                     "
                     use /users/user
+                    use /users/score
                     let score: Int = User {}.score()
                     ",
                 ),
@@ -3767,6 +3810,96 @@ mod tests {
                 ("/other", "use /main\nimpl main::User {\nfn f() {}\n}"),
             ]),
             ["/other: `User` already has a method `f`"]
+        );
+    }
+
+    #[test]
+    fn methods_need_their_module_imported() {
+        let score = "
+            use /user
+            impl User {
+                fn score() -> Int {
+                    return 1
+                }
+            }
+        ";
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /user
+                    let a = User {}.score()
+                    fn f(user: User) {
+                        user.score()
+                    }
+                    ",
+                ),
+                ("/user", "struct User {}"),
+                ("/score", score),
+            ]),
+            [
+                "/main: `User.score` is declared in `/score`, which is not imported",
+                "/main: `User.score` is declared in `/score`, which is not imported",
+            ]
+        );
+        // Imports aren't transitive, even if the type's module imports it.
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /user\nlet a = User {}.score()"),
+                (
+                    "/user",
+                    "use /score\nstruct User {}\nlet b = User {}.score()"
+                ),
+                ("/score", score),
+            ]),
+            ["/main: `User.score` is declared in `/score`, which is not imported"]
+        );
+        // A method's own module can use it, even without importing anything.
+        assert_eq!(
+            check_files(&[
+                ("/user", "struct User {}"),
+                ("/score", &format!("{score}\nlet c = User {{}}.score()")),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn methods_on_std_types_need_their_module_imported() {
+        // The type comes from the standard library, which is always imported,
+        // but the method comes from `/ints`, which must be imported.
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /ints\nlet a = 1.doubled()"),
+                ("/other", "let b = 1.doubled()"),
+                (
+                    "/ints",
+                    "
+                    impl Int {
+                        fn doubled() -> Int {
+                            return self * 2
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            ["/other: `Int.doubled` is declared in `/ints`, which is not imported"]
+        );
+    }
+
+    #[test]
+    fn functions_need_their_module_imported() {
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /a\nlet x = f()\nlet y = b::f()"),
+                ("/a", "use /b"),
+                ("/b", "fn f() -> Int {\nreturn 1\n}"),
+            ]),
+            [
+                "/main: `f` is not declared",
+                "/main: `b` is not an imported module",
+            ]
         );
     }
 
