@@ -48,7 +48,7 @@ use super::{
 const STDLIB_NAME: &str = "stdlib";
 
 static STDLIB: LazyLock<Program> = LazyLock::new(|| {
-    parse(include_str!("../stdlib.atom")).expect("the standard library should parse")
+    parse(include_str!("../stdlib/core.atom")).expect("the standard library should parse")
 });
 
 /// A parsed `.atom` file.
