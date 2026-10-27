@@ -192,10 +192,12 @@ pub enum CheckError {
     },
     /// A function that doesn't return `Void` can finish without returning.
     MissingReturn { function: String, expected: Type },
-    /// A method was called that no `impl` of the receiver's type declares.
-    NoMethod { ty: Type, method: String },
-    /// A field was read that the receiver's type doesn't declare.
-    NoField { ty: Type, field: String },
+    /// A field or method was used that the receiver's type doesn't have.
+    NoMember { ty: Type, member: String },
+    /// A field was called like a method.
+    FieldNotMethod { ty: Type, field: String },
+    /// A method was used without calling it.
+    MethodNotValue { ty: Type, method: String },
     /// `.` was used after a module's name, where `::` was probably meant.
     ModuleNotValue { module: String, member: String },
     /// A method was called from a module that doesn't import the module
@@ -205,10 +207,31 @@ pub enum CheckError {
         method: String,
         module: String,
     },
-    /// Two `impl`s of the same type declared methods with the same name.
-    MethodRedeclared { ty: Type, method: String },
+    /// A field or method was declared with the same name as another field or
+    /// method of its type, which share names.
+    MemberRedeclared {
+        ty: Type,
+        member: String,
+        existing: MemberKind,
+    },
     /// `self` was used outside the methods of an `impl`.
     SelfOutsideImpl,
+}
+
+/// Whether a member of a type is a field or a method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    Field,
+    Method,
+}
+
+impl fmt::Display for MemberKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Field => write!(f, "field"),
+            Self::Method => write!(f, "method"),
+        }
+    }
 }
 
 /// Formats `items` as "`a`", "`a` and `b`", or "`a`, `b` and `c`", using
@@ -349,8 +372,15 @@ impl fmt::Display for CheckError {
                 f,
                 "`{function}` must return a value of type `{expected}` on every path"
             ),
-            Self::NoMethod { ty, method } => write!(f, "`{ty}` has no method `{method}`"),
-            Self::NoField { ty, field } => write!(f, "`{ty}` has no field `{field}`"),
+            Self::NoMember { ty, member } => {
+                write!(f, "`{ty}` has no field or method `{member}`")
+            }
+            Self::FieldNotMethod { ty, field } => {
+                write!(f, "`{ty}.{field}` is a field, not a method")
+            }
+            Self::MethodNotValue { ty, method } => {
+                write!(f, "`{ty}.{method}` is a method, not a value")
+            }
             Self::ModuleNotValue { module, member } => write!(
                 f,
                 "`{module}` is a module, not a value, so use `{module}::{member}` to refer to a name in it"
@@ -359,9 +389,11 @@ impl fmt::Display for CheckError {
                 f,
                 "`{ty}.{method}` is declared in `{module}`, which is not imported"
             ),
-            Self::MethodRedeclared { ty, method } => {
-                write!(f, "`{ty}` already has a method `{method}`")
-            }
+            Self::MemberRedeclared {
+                ty,
+                member,
+                existing,
+            } => write!(f, "`{ty}` already has a {existing} `{member}`"),
             Self::SelfOutsideImpl => write!(f, "`self` can only be used inside an `impl`"),
         }
     }
@@ -474,6 +506,14 @@ enum LookupError {
     Module(CheckError),
 }
 
+/// A field or method of a type, which are found with `.name`. Whether it's
+/// called is decided by the brackets after it, not by which kind it is.
+enum Member {
+    /// `None` if the field's type is unknown.
+    Field(Option<Type>),
+    Method(Method),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Method {
     /// The index in `Checker::modules` of the module whose `impl` declares it.
@@ -512,7 +552,8 @@ struct Checker<'a> {
     functions: Vec<Signature<'a>>,
     /// For each type `id`, its methods by name. Methods aren't names in any
     /// scope, and are only found through the type of the value they're called
-    /// on, in the modules that can see the module declaring them.
+    /// on, in the modules that can see the module declaring them. They share
+    /// names with the type's fields.
     methods: HashMap<usize, HashMap<&'a str, Method>>,
     globals: Vec<Global<'a>>,
     /// For each struct, indexed by `id`, its fields in the order they're
@@ -568,9 +609,9 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        for &(module, id, _, fields) in &structs {
+        for &(module, id, name, fields) in &structs {
             self.module = module;
-            self.define_struct(id, fields);
+            self.define_struct(id, name, fields);
         }
         for &(module, id, name, _) in &structs {
             self.module = module;
@@ -916,15 +957,20 @@ impl<'a> Checker<'a> {
             // Methods must be unique across every module, even ones that
             // can't see each other, since a call can't say which module's
             // method it means.
-            let methods = self.methods.entry(self_ty.id).or_default();
-            if methods.contains_key(method.name.as_str()) {
-                self.error(CheckError::MethodRedeclared {
+            let existing = match self.member(self_ty, &method.name) {
+                Some(Member::Field(_)) => Some(MemberKind::Field),
+                Some(Member::Method(_)) => Some(MemberKind::Method),
+                None => None,
+            };
+            if let Some(existing) = existing {
+                self.error(CheckError::MemberRedeclared {
                     ty: self_ty.clone(),
-                    method: method.name.clone(),
+                    member: method.name.clone(),
+                    existing,
                 });
             } else {
                 let module = self.module;
-                methods.insert(
+                self.methods.entry(self_ty.id).or_default().insert(
                     &method.name,
                     Method {
                         module,
@@ -1022,13 +1068,20 @@ impl<'a> Checker<'a> {
         id
     }
 
-    /// Resolves the fields of the struct with `id`.
-    fn define_struct(&mut self, id: usize, fields: &'a [Field]) {
+    /// Resolves the fields of the struct called `name` with `id`.
+    fn define_struct(&mut self, id: usize, name: &str, fields: &'a [Field]) {
         // Field names only need to be unique within their struct.
         let mut field_names = HashSet::new();
         for field in fields {
             if !field_names.insert(&field.name) {
-                self.error(CheckError::Redeclared(field.name.clone()));
+                self.error(CheckError::MemberRedeclared {
+                    ty: Type {
+                        id,
+                        name: name.to_string(),
+                    },
+                    member: field.name.clone(),
+                    existing: MemberKind::Field,
+                });
             }
             let ty = self.resolve_type(&field.ty);
             self.struct_fields[id].push(FieldSignature {
@@ -1142,7 +1195,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Struct { name, fields } => {
                 let id = self.declare_struct(name);
-                self.define_struct(id, fields);
+                self.define_struct(id, name, fields);
                 self.check_not_recursive(id, name);
             }
             Stmt::Return(value) => {
@@ -1261,20 +1314,37 @@ impl<'a> Checker<'a> {
         self.expr(receiver)
     }
 
+    /// Finds the field or method of `ty` called `name`.
+    fn member(&self, ty: &Type, name: &str) -> Option<Member> {
+        if let Some(field) = self.struct_fields[ty.id]
+            .iter()
+            .find(|field| field.name == name)
+        {
+            return Some(Member::Field(field.ty.clone()));
+        }
+        self.methods
+            .get(&ty.id)
+            .and_then(|methods| methods.get(name))
+            .map(|method| Member::Method(*method))
+    }
+
     /// Checks a field access, returning the field's type, or `None` if it
     /// can't be determined.
     fn field(&mut self, receiver: &Expr, field: &str) -> Option<Type> {
         let ty = self.receiver(receiver, field)?;
-        let found = self.struct_fields[ty.id]
-            .iter()
-            .find(|declared| declared.name == field)
-            .map(|declared| declared.ty.clone());
-        match found {
-            Some(field_ty) => field_ty,
-            None => {
-                self.error(CheckError::NoField {
+        match self.member(&ty, field) {
+            Some(Member::Field(field_ty)) => field_ty,
+            Some(Member::Method(_)) => {
+                self.error(CheckError::MethodNotValue {
                     ty,
-                    field: field.to_string(),
+                    method: field.to_string(),
+                });
+                None
+            }
+            None => {
+                self.error(CheckError::NoMember {
+                    ty,
+                    member: field.to_string(),
                 });
                 None
             }
@@ -1290,17 +1360,22 @@ impl<'a> Checker<'a> {
         let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
         let ty = receiver_ty?;
 
-        let found_method = self
-            .methods
-            .get(&ty.id)
-            .and_then(|methods| methods.get(method))
-            .copied();
-        let Some(found_method) = found_method else {
-            self.error(CheckError::NoMethod {
-                ty,
-                method: method.to_string(),
-            });
-            return None;
+        let found_method = match self.member(&ty, method) {
+            Some(Member::Method(found_method)) => found_method,
+            Some(Member::Field(_)) => {
+                self.error(CheckError::FieldNotMethod {
+                    ty,
+                    field: method.to_string(),
+                });
+                return None;
+            }
+            None => {
+                self.error(CheckError::NoMember {
+                    ty,
+                    member: method.to_string(),
+                });
+                return None;
+            }
         };
 
         // Like functions, methods can only be used from their own module or
@@ -2696,7 +2771,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_fields() {
         assert_eq!(
-            check_body(
+            messages(
                 "
                 struct User {
                     let age: Int
@@ -2704,7 +2779,7 @@ mod tests {
                 }
                 "
             ),
-            Err(vec![CheckError::Redeclared("age".to_string())])
+            ["`User` already has a field `age`"]
         );
     }
 
@@ -3697,8 +3772,8 @@ mod tests {
                 "
             )),
             [
-                "`Counter` has no method `missing`",
-                "`Int` has no method `double`",
+                "`Counter` has no field or method `missing`",
+                "`Int` has no field or method `double`",
                 "`missing` is not declared",
                 "`y` is not declared",
             ]
@@ -4076,9 +4151,9 @@ mod tests {
                 "
             )),
             [
-                "`User` has no field `name`",
-                "`Int` has no field `value`",
-                "`User` has no field `name`",
+                "`User` has no field or method `name`",
+                "`Int` has no field or method `value`",
+                "`User` has no field or method `name`",
                 "`missing` is not declared",
             ]
         );
@@ -4114,18 +4189,42 @@ mod tests {
                     fn nextAge() -> Int {{
                         return self.age + 1
                     }}
-                    // Fields and methods can share names.
-                    fn age() -> Int {{
-                        return self.age
-                    }}
                 }}
                 let x: Int = User {{ age: 1, isAdmin: true }}.nextAge()
-                let y: Int = User {{ age: 1, isAdmin: true }}.age()
                 "
             )),
             Ok(())
         );
-        // Fields can't be called, and methods aren't fields.
+    }
+
+    #[test]
+    fn fields_and_methods_share_names() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {TEAM}
+                impl User {{
+                    fn age() -> Int {{
+                        return 1
+                    }}
+                    fn nextAge() -> Int {{
+                        return 2
+                    }}
+                }}
+                impl Team {{
+                    fn size() {{}}
+                }}
+                "
+            )),
+            [
+                "`User` already has a field `age`",
+                "`Team` already has a field `size`",
+            ]
+        );
+    }
+
+    #[test]
+    fn brackets_decide_whether_members_are_called() {
         assert_eq!(
             messages_top(&format!(
                 "
@@ -4135,11 +4234,17 @@ mod tests {
                         return self.age() + self.nextAge
                     }}
                 }}
+                fn f(user: User) {{
+                    // Arguments are still checked.
+                    user.isAdmin(x: missing)
+                }}
                 "
             )),
             [
-                "`User` has no method `age`",
-                "`User` has no field `nextAge`",
+                "`User.age` is a field, not a method",
+                "`User.nextAge` is a method, not a value",
+                "`missing` is not declared",
+                "`User.isAdmin` is a field, not a method",
             ]
         );
     }
@@ -4210,7 +4315,7 @@ mod tests {
             [
                 "/main: `user` is a module, not a value, so use `user::User` to refer to a name in it",
                 "/main: `user` is a module, not a value, so use `user::make` to refer to a name in it",
-                "/main: `Int` has no field `age`",
+                "/main: `Int` has no field or method `age`",
             ]
         );
     }
