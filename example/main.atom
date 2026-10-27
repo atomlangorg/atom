@@ -37,7 +37,7 @@ fn run() {
         ),
         size: 3,
     }
-    y = describeBoth(team: crew, user: owner) + owner.score()
+    y = describeBoth(team: crew, user: owner) + owner.score() + crew.lead.age
 }
 
 fn addFive(to value: Int) -> Int {

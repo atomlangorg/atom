@@ -16,8 +16,9 @@ impl User {
         return self.base().doubled()
     }
 
+    // Fields are read with `.`.
     fn base() -> Int {
-        return describe(user: self)
+        return self.age + describe(user: self)
     }
 }
 

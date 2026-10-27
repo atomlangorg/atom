@@ -194,6 +194,10 @@ pub enum CheckError {
     MissingReturn { function: String, expected: Type },
     /// A method was called that no `impl` of the receiver's type declares.
     NoMethod { ty: Type, method: String },
+    /// A field was read that the receiver's type doesn't declare.
+    NoField { ty: Type, field: String },
+    /// `.` was used after a module's name, where `::` was probably meant.
+    ModuleNotValue { module: String, member: String },
     /// A method was called from a module that doesn't import the module
     /// declaring it.
     MethodNotImported {
@@ -346,6 +350,11 @@ impl fmt::Display for CheckError {
                 "`{function}` must return a value of type `{expected}` on every path"
             ),
             Self::NoMethod { ty, method } => write!(f, "`{ty}` has no method `{method}`"),
+            Self::NoField { ty, field } => write!(f, "`{ty}` has no field `{field}`"),
+            Self::ModuleNotValue { module, member } => write!(
+                f,
+                "`{module}` is a module, not a value, so use `{module}::{member}` to refer to a name in it"
+            ),
             Self::MethodNotImported { ty, method, module } => write!(
                 f,
                 "`{ty}.{method}` is declared in `{module}`, which is not imported"
@@ -1213,6 +1222,7 @@ impl<'a> Checker<'a> {
                 method,
                 args,
             } => self.method_call(receiver, method, args),
+            Expr::Field { receiver, field } => self.field(receiver, field),
             Expr::SelfValue => {
                 let name = Name::new("self");
                 match self.lookup(&name) {
@@ -1231,12 +1241,52 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Checks the receiver of a field access or method call, which is followed
+    /// by `.member`. A module's name gets its own error, since `::` was
+    /// probably meant.
+    fn receiver(&mut self, receiver: &Expr, member: &str) -> Option<Type> {
+        if let Expr::Var(name) = receiver
+            && name.module.is_none()
+            && matches!(self.lookup(name), Err(LookupError::Undeclared))
+            && self
+                .visible_modules()
+                .any(|module| self.modules[module].name == name.name)
+        {
+            self.error(CheckError::ModuleNotValue {
+                module: name.name.clone(),
+                member: member.to_string(),
+            });
+            return None;
+        }
+        self.expr(receiver)
+    }
+
+    /// Checks a field access, returning the field's type, or `None` if it
+    /// can't be determined.
+    fn field(&mut self, receiver: &Expr, field: &str) -> Option<Type> {
+        let ty = self.receiver(receiver, field)?;
+        let found = self.struct_fields[ty.id]
+            .iter()
+            .find(|declared| declared.name == field)
+            .map(|declared| declared.ty.clone());
+        match found {
+            Some(field_ty) => field_ty,
+            None => {
+                self.error(CheckError::NoField {
+                    ty,
+                    field: field.to_string(),
+                });
+                None
+            }
+        }
+    }
+
     /// Checks a method call, returning the method's return type, or `None` if
     /// it can't be determined.
     fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Option<Type> {
         // The receiver and arguments are checked first, so their errors come
         // before the call's.
-        let receiver_ty = self.expr(receiver);
+        let receiver_ty = self.receiver(receiver, method);
         let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
         let ty = receiver_ty?;
 
@@ -3957,6 +4007,211 @@ mod tests {
                 "
             ),
             Ok(())
+        );
+    }
+
+    const TEAM: &str = "
+        struct User {
+            let age: Int
+            var isAdmin: Bool
+        }
+        struct Team {
+            let lead: User
+            let size: Int
+        }
+    ";
+
+    #[test]
+    fn reads_fields() {
+        assert_eq!(
+            check_top(&format!(
+                "
+                {TEAM}
+                let user = User {{ age: 42, isAdmin: true }}
+                let team = Team {{ lead: user, size: 3 }}
+                let age: Int = user.age
+                let isAdmin: Bool = team.lead.isAdmin
+                let total: Int = team.lead.age + team.size
+                fn leadAge(of team: Team) -> Int {{
+                    return team.lead.age
+                }}
+                "
+            )),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn fields_have_their_declared_types() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {TEAM}
+                let user = User {{ age: 42, isAdmin: true }}
+                let a: Bool = user.age
+                let b = user.isAdmin + 1
+                let c: Int = Team {{ lead: user, size: 1 }}.lead
+                "
+            )),
+            [
+                "cannot assign `Int` to `a`, which has type `Bool`",
+                "operator `+` expects `Int`, found `Bool`",
+                "cannot assign `User` to `c`, which has type `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {TEAM}
+                let user = User {{ age: 42, isAdmin: true }}
+                let a = user.name
+                let b = 1.value
+                // Not reported again.
+                let c = user.name.length
+                let d = missing.field
+                "
+            )),
+            [
+                "`User` has no field `name`",
+                "`Int` has no field `value`",
+                "`User` has no field `name`",
+                "`missing` is not declared",
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_field_types_are_not_reported_again() {
+        assert_eq!(
+            messages_top(
+                "
+                struct Box {
+                    let value: Missing
+                }
+                fn f(box: Box) -> Int {
+                    return box.value + true
+                }
+                "
+            ),
+            [
+                "unknown type `Missing`",
+                "operator `+` expects `Int`, found `Bool`",
+            ]
+        );
+    }
+
+    #[test]
+    fn methods_read_fields_through_self() {
+        assert_eq!(
+            check_top(&format!(
+                "
+                {TEAM}
+                impl User {{
+                    fn nextAge() -> Int {{
+                        return self.age + 1
+                    }}
+                    // Fields and methods can share names.
+                    fn age() -> Int {{
+                        return self.age
+                    }}
+                }}
+                let x: Int = User {{ age: 1, isAdmin: true }}.nextAge()
+                let y: Int = User {{ age: 1, isAdmin: true }}.age()
+                "
+            )),
+            Ok(())
+        );
+        // Fields can't be called, and methods aren't fields.
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {TEAM}
+                impl User {{
+                    fn nextAge() -> Int {{
+                        return self.age() + self.nextAge
+                    }}
+                }}
+                "
+            )),
+            [
+                "`User` has no method `age`",
+                "`User` has no field `nextAge`",
+            ]
+        );
+    }
+
+    #[test]
+    fn fields_follow_capture_rules() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {TEAM}
+                let admin = User {{ age: 42, isAdmin: true }}
+                let age = admin.age
+                fn f() -> Int {{
+                    return admin.age
+                }}
+                "
+            )),
+            ["functions can't use `admin`, because it is declared outside the function"]
+        );
+    }
+
+    #[test]
+    fn fields_need_no_import() {
+        // Fields are part of their struct, so a value's fields can be read
+        // without importing the module that declares it.
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /make
+                    let age: Int = make().age
+                    ",
+                ),
+                (
+                    "/make",
+                    "
+                    use /user
+                    fn make() -> User {
+                        return User { age: 1 }
+                    }
+                    ",
+                ),
+                ("/user", "struct User {\nlet age: Int\n}"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn suggests_colons_after_modules() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "
+                    use /user
+                    let a = user.User
+                    let b = user.make()
+                    // A value with the module's name takes precedence.
+                    fn f(user: Int) -> Int {
+                        return user.age
+                    }
+                    ",
+                ),
+                ("/user", "struct User {}\nfn make() {}"),
+            ]),
+            [
+                "/main: `user` is a module, not a value, so use `user::User` to refer to a name in it",
+                "/main: `user` is a module, not a value, so use `user::make` to refer to a name in it",
+                "/main: `Int` has no field `age`",
+            ]
         );
     }
 }

@@ -129,6 +129,11 @@ pub enum Expr {
         method: String,
         args: Vec<Arg>,
     },
+    /// `receiver.field`: reads a field of a struct.
+    Field {
+        receiver: Box<Expr>,
+        field: String,
+    },
     /// `self`: the value a method was called on.
     SelfValue,
 }

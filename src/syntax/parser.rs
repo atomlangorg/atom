@@ -256,22 +256,29 @@ where
 
     let self_value = just(Token::SelfValue).to(Expr::SelfValue);
 
-    // `.method(args)` after any atom, which binds tighter than any operator,
-    // so `-a.f()` is `-(a.f())`. Calls can be chained, as in `a.f().g()`.
-    let method_call = just(Token::Dot).ignore_then(ident).then(args);
-    let with_method_calls = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
-        atom.foldl(
-            method_call.clone().repeated(),
-            |receiver, (method, args)| Expr::MethodCall {
-                receiver: Box::new(receiver),
-                method,
-                args,
-            },
-        )
+    // `.field` or `.method(args)` after any atom, which binds tighter than
+    // any operator, so `-a.b` is `-(a.b)`. They can be chained, as in
+    // `a.f().b`.
+    let member = just(Token::Dot).ignore_then(ident).then(args.or_not());
+    let with_members = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
+        atom.foldl(member.clone().repeated(), |receiver, (name, args)| {
+            let receiver = Box::new(receiver);
+            match args {
+                Some(args) => Expr::MethodCall {
+                    receiver,
+                    method: name,
+                    args,
+                },
+                None => Expr::Field {
+                    receiver,
+                    field: name,
+                },
+            }
+        })
         .boxed()
     };
 
-    expr.define(operators(with_method_calls(
+    expr.define(operators(with_members(
         literal
             .or(self_value.clone())
             .or(construct)
@@ -284,7 +291,7 @@ where
     // An `if` condition can't construct a struct outside of parentheses or
     // arguments, since in `if done { ... }`, the `{` starts the `if`'s block
     // rather than constructing `done`.
-    let condition = operators(with_method_calls(
+    let condition = operators(with_members(
         literal
             .or(self_value)
             .or(name_or_call)
@@ -1607,13 +1614,13 @@ mod tests {
             "let x = a::",
             "let x = ::a",
             "let x = a::b::c",
+            "let x = a::b.c::d",
             "let x = a:::b",
             "let x = a: :b",
             "let x: a:: = 1",
             "let x = /a::",
             "let x = ./a/::b",
-            // `.` no longer qualifies names.
-            "let x = a.b",
+            // `.` doesn't qualify names.
             "let x = /a.b",
             "let x: a.B = 1",
             // Assignments can't be qualified.
@@ -2380,8 +2387,6 @@ mod tests {
     #[test]
     fn rejects_malformed_method_calls() {
         for src in [
-            // Fields can't be accessed yet.
-            "x = a.f",
             "x = a.",
             "x = .f()",
             "x = a.1()",
@@ -2406,6 +2411,84 @@ mod tests {
             "f(self: 1)",
             "x = self::f()",
             "struct self {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    fn field_access(receiver: Expr, field: &str) -> Expr {
+        Expr::Field {
+            receiver: Box::new(receiver),
+            field: field.to_string(),
+        }
+    }
+
+    #[test]
+    fn parses_field_access() {
+        assert_eq!(parse_expr("user.age"), field_access(*var("user"), "age"));
+        assert_eq!(
+            parse_expr("team.lead.age"),
+            field_access(field_access(*var("team"), "lead"), "age")
+        );
+        assert_eq!(parse_expr("self.age"), field_access(Expr::SelfValue, "age"));
+        assert_eq!(
+            parse_expr("User { age: 1 }.age"),
+            field_access(
+                construct(Name::new("User"), vec![field_value("age", Expr::Int(1))]),
+                "age"
+            )
+        );
+        assert_eq!(
+            parse_expr("other::user.age"),
+            field_access(
+                Expr::Var(qualified(ModulePath::Named("other".to_string()), "user")),
+                "age"
+            )
+        );
+    }
+
+    #[test]
+    fn mixes_fields_and_method_calls() {
+        assert_eq!(
+            parse_expr("a.f().b.g(x: c.d)"),
+            method_call(
+                field_access(method_call(*var("a"), "f", vec![]), "b"),
+                "g",
+                vec![arg(Some("x"), field_access(*var("c"), "d"))],
+            )
+        );
+    }
+
+    #[test]
+    fn field_access_binds_tightest() {
+        assert_eq!(
+            parse_expr("-a.b * c.d"),
+            *bin(
+                neg(Box::new(field_access(*var("a"), "b"))),
+                BinOp::Mul,
+                Box::new(field_access(*var("c"), "d")),
+            )
+        );
+        assert_eq!(
+            parse_body("if user.isAdmin {}"),
+            Ok(vec![if_(
+                field_access(*var("user"), "isAdmin"),
+                vec![],
+                None
+            )])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_field_access() {
+        for src in [
+            // Fields can't be assigned to.
+            "user.age = 1",
+            // A field on its own isn't a statement.
+            "user.age",
+            "x = a.b.",
+            "x = a.1",
+            "x = a.b\n.c",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
