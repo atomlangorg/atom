@@ -1,5 +1,5 @@
 // Fields have types but no values.
-struct User {
+group User {
     let age: Int
     var isAdmin: Bool
 }

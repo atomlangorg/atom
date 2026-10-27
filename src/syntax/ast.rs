@@ -116,7 +116,7 @@ pub enum Expr {
         callee: Name,
         args: Vec<Arg>,
     },
-    /// `Type { field: value, ... }`: constructs a struct, giving every field
+    /// `Type { field: value, ... }`: constructs a group, giving every field
     /// a value in the order they're declared.
     Construct {
         ty: Name,
@@ -129,7 +129,7 @@ pub enum Expr {
         method: String,
         args: Vec<Arg>,
     },
-    /// `receiver.field`: reads a field of a struct.
+    /// `receiver.field`: reads a field of a group.
     Field {
         receiver: Box<Expr>,
         field: String,
@@ -138,7 +138,7 @@ pub enum Expr {
     SelfValue,
 }
 
-/// A field's value when constructing a struct, such as `age: 42`.
+/// A field's value when constructing a group, such as `age: 42`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldValue {
     pub name: String,
@@ -195,8 +195,8 @@ pub enum Stmt {
         ty: Name,
         methods: Vec<Function>,
     },
-    /// `struct Name { let field: Type ... }`
-    Struct {
+    /// `group Name { let field: Type ... }`
+    Group {
         name: String,
         fields: Vec<Field>,
     },
@@ -230,7 +230,7 @@ pub struct Param {
     pub ty: Name,
 }
 
-/// A struct field, such as `let age: Int`. Fields can't have values.
+/// A group field, such as `let age: Int`. Fields can't have values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub mutability: Mutability,

@@ -18,11 +18,11 @@
 // them.
 
 // Whole numbers, such as `42`.
-struct Int {}
+group Int {}
 
 // `true` or `false`.
-struct Bool {}
+group Bool {}
 
 // The return type of a function that doesn't return anything useful.
 // Functions without an explicit return type return `Void`.
-struct Void {}
+group Void {}

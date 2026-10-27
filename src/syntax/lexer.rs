@@ -48,8 +48,8 @@ pub enum Token<'src> {
     Fn,
     #[token("return")]
     Return,
-    #[token("struct")]
-    Struct,
+    #[token("group")]
+    Group,
     #[token("use")]
     Use,
     #[token("impl")]
@@ -155,7 +155,7 @@ impl fmt::Display for Token<'_> {
             Self::Else => write!(f, "else"),
             Self::Fn => write!(f, "fn"),
             Self::Return => write!(f, "return"),
-            Self::Struct => write!(f, "struct"),
+            Self::Group => write!(f, "group"),
             Self::Use => write!(f, "use"),
             Self::Impl => write!(f, "impl"),
             Self::SelfValue => write!(f, "self"),
@@ -295,11 +295,11 @@ mod tests {
     }
 
     #[test]
-    fn lexes_struct() {
+    fn lexes_group() {
         assert_eq!(
-            lex("struct User { let age: Int }"),
+            lex("group User { let age: Int }"),
             vec![
-                Token::Struct,
+                Token::Group,
                 Token::Ident("User"),
                 Token::LBrace,
                 Token::Let,
@@ -408,12 +408,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            lex("fnord returned structure user"),
+            lex("fnord returned grouping user struct"),
             vec![
                 Token::Ident("fnord"),
                 Token::Ident("returned"),
-                Token::Ident("structure"),
+                Token::Ident("grouping"),
                 Token::Ident("user"),
+                Token::Ident("struct"),
             ]
         );
     }

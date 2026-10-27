@@ -1,6 +1,6 @@
 use /users/user
 
-struct Team {
+group Team {
     let lead: User
     let size: Int
 }

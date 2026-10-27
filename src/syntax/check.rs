@@ -15,7 +15,7 @@
  */
 
 //! Checks that names are declared before use, that only `var`s are
-//! reassigned, that functions are called and return correctly, that structs
+//! reassigned, that functions are called and return correctly, that groups
 //! are well formed, and that every expression is well typed.
 //!
 //! Every file is a module, named by its path from the project root, so
@@ -60,8 +60,8 @@ pub struct Module {
     pub program: Program,
 }
 
-/// Every type is a struct, including `Int`, `Bool` and `Void`, which are
-/// declared in the standard library. Structs in different scopes can share a
+/// Every type is a group, including `Int`, `Bool` and `Void`, which are
+/// declared in the standard library. Groups in different scopes can share a
 /// name, so they're told apart by `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
@@ -109,9 +109,9 @@ pub enum CheckError {
     AmbiguousModule { name: String, modules: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
-    /// A struct contains itself, directly or through other structs, so it
+    /// A group contains itself, directly or through other groups, so it
     /// would be infinitely large.
-    RecursiveStruct(String),
+    RecursiveGroup(String),
     /// A name was declared twice.
     Redeclared(String),
     /// A `let` constant was assigned to.
@@ -154,20 +154,20 @@ pub enum CheckError {
         expected: Option<String>,
         found: Option<String>,
     },
-    /// A struct was constructed with the wrong number of fields.
+    /// A group was constructed with the wrong number of fields.
     WrongFieldCount {
         ty: String,
         expected: usize,
         found: usize,
     },
-    /// A struct was constructed with a field that isn't the next one it
+    /// A group was constructed with a field that isn't the next one it
     /// declares, either because the name is wrong or it's out of order.
     WrongField {
         ty: String,
         expected: String,
         found: String,
     },
-    /// A struct was constructed with a field value of the wrong type.
+    /// A group was constructed with a field value of the wrong type.
     FieldTypeMismatch {
         ty: String,
         field: String,
@@ -270,7 +270,7 @@ impl fmt::Display for CheckError {
                 quoted_list(modules, "or")
             ),
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
-            Self::RecursiveStruct(name) => write!(f, "`{name}` contains itself"),
+            Self::RecursiveGroup(name) => write!(f, "`{name}` contains itself"),
             Self::Redeclared(name) => write!(f, "`{name}` is already declared"),
             Self::AssignToConstant(name) => {
                 write!(
@@ -556,9 +556,9 @@ struct Checker<'a> {
     /// names with the type's fields.
     methods: HashMap<usize, HashMap<&'a str, Method>>,
     globals: Vec<Global<'a>>,
-    /// For each struct, indexed by `id`, its fields in the order they're
+    /// For each group, indexed by `id`, its fields in the order they're
     /// declared.
-    struct_fields: Vec<Vec<FieldSignature<'a>>>,
+    group_fields: Vec<Vec<FieldSignature<'a>>>,
     errors: Vec<ModuleError>,
 }
 
@@ -598,28 +598,28 @@ impl<'a> Checker<'a> {
             self.resolve_imports();
         }
 
-        // Every struct is declared before any fields are resolved, so structs
+        // Every group is declared before any fields are resolved, so groups
         // can contain each other in any order.
-        let mut structs = vec![];
+        let mut groups = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
-                if let Stmt::Struct { name, fields } = stmt {
-                    structs.push((module, self.declare_struct(name), name, fields));
+                if let Stmt::Group { name, fields } = stmt {
+                    groups.push((module, self.declare_group(name), name, fields));
                 }
             }
         }
-        for &(module, id, name, fields) in &structs {
+        for &(module, id, name, fields) in &groups {
             self.module = module;
-            self.define_struct(id, name, fields);
+            self.define_group(id, name, fields);
         }
-        for &(module, id, name, _) in &structs {
+        for &(module, id, name, _) in &groups {
             self.module = module;
             self.check_not_recursive(id, name);
         }
 
-        // Functions, methods and values come after structs, since their types
-        // can be structs.
+        // Functions, methods and values come after groups, since their types
+        // can be groups.
         let mut pending = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
@@ -667,7 +667,7 @@ impl<'a> Checker<'a> {
                         self.declare(name, Binding::Global(index));
                         pending.push((module, Pending::Global(index)));
                     }
-                    Stmt::Use(_) | Stmt::Struct { .. } => {}
+                    Stmt::Use(_) | Stmt::Group { .. } => {}
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
@@ -1056,10 +1056,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Declares a struct without its fields, returning its `id`.
-    fn declare_struct(&mut self, name: &'a str) -> usize {
-        let id = self.struct_fields.len();
-        self.struct_fields.push(vec![]);
+    /// Declares a group without its fields, returning its `id`.
+    fn declare_group(&mut self, name: &'a str) -> usize {
+        let id = self.group_fields.len();
+        self.group_fields.push(vec![]);
         let ty = Type {
             id,
             name: name.to_string(),
@@ -1068,9 +1068,9 @@ impl<'a> Checker<'a> {
         id
     }
 
-    /// Resolves the fields of the struct called `name` with `id`.
-    fn define_struct(&mut self, id: usize, name: &str, fields: &'a [Field]) {
-        // Field names only need to be unique within their struct.
+    /// Resolves the fields of the group called `name` with `id`.
+    fn define_group(&mut self, id: usize, name: &str, fields: &'a [Field]) {
+        // Field names only need to be unique within their group.
         let mut field_names = HashSet::new();
         for field in fields {
             if !field_names.insert(&field.name) {
@@ -1084,33 +1084,33 @@ impl<'a> Checker<'a> {
                 });
             }
             let ty = self.resolve_type(&field.ty);
-            self.struct_fields[id].push(FieldSignature {
+            self.group_fields[id].push(FieldSignature {
                 name: &field.name,
                 ty,
             });
         }
     }
 
-    /// The `id`s of the structs that the fields of the struct with `id` have
+    /// The `id`s of the groups that the fields of the group with `id` have
     /// as types.
-    fn contained_structs(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
-        self.struct_fields[id]
+    fn contained_groups(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
+        self.group_fields[id]
             .iter()
             .filter_map(|field| field.ty.as_ref().map(|ty| ty.id))
     }
 
-    /// Reports an error if the struct with `id` contains itself, which would
+    /// Reports an error if the group with `id` contains itself, which would
     /// make it infinitely large.
     fn check_not_recursive(&mut self, id: usize, name: &str) {
         let mut seen = HashSet::new();
-        let mut unvisited: Vec<_> = self.contained_structs(id).collect();
+        let mut unvisited: Vec<_> = self.contained_groups(id).collect();
         while let Some(next) = unvisited.pop() {
             if next == id {
-                self.error(CheckError::RecursiveStruct(name.to_string()));
+                self.error(CheckError::RecursiveGroup(name.to_string()));
                 return;
             }
             if seen.insert(next) {
-                unvisited.extend(self.contained_structs(next));
+                unvisited.extend(self.contained_groups(next));
             }
         }
     }
@@ -1186,16 +1186,16 @@ impl<'a> Checker<'a> {
                     self.block(else_block);
                 }
             }
-            // Inside functions, functions and structs are only visible after
+            // Inside functions, functions and groups are only visible after
             // they're declared.
             Stmt::Fn(function) => {
                 // Declared before the body is checked, so it can call itself.
                 let index = self.declare_fn(&function.name, &function.params, &function.ret);
                 self.fn_body(index, &function.name, &function.body, None);
             }
-            Stmt::Struct { name, fields } => {
-                let id = self.declare_struct(name);
-                self.define_struct(id, name, fields);
+            Stmt::Group { name, fields } => {
+                let id = self.declare_group(name);
+                self.define_group(id, name, fields);
                 self.check_not_recursive(id, name);
             }
             Stmt::Return(value) => {
@@ -1316,7 +1316,7 @@ impl<'a> Checker<'a> {
 
     /// Finds the field or method of `ty` called `name`.
     fn member(&self, ty: &Type, name: &str) -> Option<Member> {
-        if let Some(field) = self.struct_fields[ty.id]
+        if let Some(field) = self.group_fields[ty.id]
             .iter()
             .find(|field| field.name == name)
         {
@@ -1396,17 +1396,17 @@ impl<'a> Checker<'a> {
         self.check_args(format!("{ty}.{method}"), args, found, signature)
     }
 
-    /// Checks the construction of a struct, returning its type, or `None` if
+    /// Checks the construction of a group, returning its type, or `None` if
     /// it can't be determined.
     fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Option<Type> {
-        // Values are checked first, so their errors come before the struct's.
+        // Values are checked first, so their errors come before the group's.
         let found: Vec<_> = values.iter().map(|field| self.expr(&field.value)).collect();
 
         let ty = self.resolve_type(type_name)?;
-        let fields = self.struct_fields[ty.id].clone();
+        let fields = self.group_fields[ty.id].clone();
         let name = type_name.to_string();
 
-        // Every field must be given, in the order the struct declares them.
+        // Every field must be given, in the order the group declares them.
         if values.len() != fields.len() {
             self.error(CheckError::WrongFieldCount {
                 ty: name,
@@ -1882,7 +1882,7 @@ mod tests {
         assert_eq!(
             check_top(
                 "
-                struct Int {}
+                group Int {}
                 let a: Int = 1
                 let b: stdlib::Int = 1
                 fn f(x: main::Int) -> stdlib::Bool {
@@ -1913,11 +1913,11 @@ mod tests {
     }
 
     #[test]
-    fn std_types_are_structs() {
+    fn std_types_are_groups() {
         assert_eq!(
             check_body(
                 "
-                struct Wrapper {
+                group Wrapper {
                     let int: Int
                     let bool: Bool
                     let void: Void
@@ -2188,7 +2188,7 @@ mod tests {
             check_body(
                 "
                 fn outer() {
-                    struct Point {}
+                    group Point {}
                     fn helper(point: Point) {}
                     fn inner(point: Point) {
                         helper(point: point)
@@ -2644,15 +2644,15 @@ mod tests {
     }
 
     #[test]
-    fn structs_can_be_used_as_types() {
+    fn groups_can_be_used_as_types() {
         assert_eq!(
             check_body(
                 "
-                struct User {
+                group User {
                     let age: Int
                     var isAdmin: Bool
                 }
-                struct Post {
+                group Post {
                     let author: User
                 }
                 fn pick(first a: User, or b: User) -> User {
@@ -2671,12 +2671,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_empty_and_void_structs() {
+    fn accepts_empty_and_void_groups() {
         assert_eq!(
             check_body(
                 "
-                struct Empty {}
-                struct Nothing {
+                group Empty {}
+                group Nothing {
                     let value: Void
                     let empty: Empty
                 }
@@ -2687,11 +2687,11 @@ mod tests {
     }
 
     #[test]
-    fn type_errors_use_struct_names() {
+    fn type_errors_use_group_names() {
         assert_eq!(
             messages(
                 "
-                struct User {}
+                group User {}
                 fn f(user: User) -> User {
                     let x: Int = user
                     let y = user + 1
@@ -2712,14 +2712,14 @@ mod tests {
     }
 
     #[test]
-    fn different_structs_are_different_types() {
+    fn different_groups_are_different_types() {
         assert_eq!(
             messages(
                 "
-                struct A {
+                group A {
                     let x: Int
                 }
-                struct B {
+                group B {
                     let x: Int
                 }
                 fn f(a: A) -> B {
@@ -2732,15 +2732,15 @@ mod tests {
     }
 
     #[test]
-    fn structs_with_the_same_name_are_different_types() {
-        // The inner `A` is a different struct, even though it has the same
+    fn groups_with_the_same_name_are_different_types() {
+        // The inner `A` is a different group, even though it has the same
         // name and fields.
         assert_eq!(
             messages(
                 "
-                struct A {}
+                group A {}
                 fn f(a: A) {
-                    struct A {}
+                    group A {}
                     fn g(b: A) {}
                     g(b: a)
                 }
@@ -2755,7 +2755,7 @@ mod tests {
         assert_eq!(
             check_body(
                 "
-                struct User {
+                group User {
                     let age: int
                     var friend: Person
                 }
@@ -2773,7 +2773,7 @@ mod tests {
         assert_eq!(
             messages(
                 "
-                struct User {
+                group User {
                     let age: Int
                     var age: Bool
                 }
@@ -2789,10 +2789,10 @@ mod tests {
             check_body(
                 "
                 let age = 1
-                struct A {
+                group A {
                     let age: Int
                 }
-                struct B {
+                group B {
                     let age: Int
                 }
                 "
@@ -2802,20 +2802,20 @@ mod tests {
     }
 
     #[test]
-    fn top_level_structs_can_be_used_in_any_order() {
+    fn top_level_groups_can_be_used_in_any_order() {
         assert_eq!(
             check_top(
                 "
                 fn f(user: User) -> Post {
                     return f(user: user)
                 }
-                struct Post {
+                group Post {
                     let author: User
                 }
-                struct User {
+                group User {
                     let address: Address
                 }
-                struct Address {}
+                group Address {}
                 "
             ),
             Ok(())
@@ -2823,16 +2823,16 @@ mod tests {
     }
 
     #[test]
-    fn nested_structs_must_be_declared_before_use() {
+    fn nested_groups_must_be_declared_before_use() {
         assert_eq!(
             check_body(
                 "
                 fn outer() {
                     fn f(user: User) {}
-                    struct Post {
+                    group Post {
                         let author: User
                     }
-                    struct User {}
+                    group User {}
                 }
                 "
             ),
@@ -2844,62 +2844,62 @@ mod tests {
     }
 
     #[test]
-    fn structs_cannot_contain_themselves() {
+    fn groups_cannot_contain_themselves() {
         assert_eq!(
             check_body(
                 "
-                struct Node {
+                group Node {
                     let next: Node
                 }
                 fn f() {
-                    struct Inner {
+                    group Inner {
                         let inner: Inner
                     }
                 }
                 "
             ),
             Err(vec![
-                CheckError::RecursiveStruct("Node".to_string()),
-                CheckError::RecursiveStruct("Inner".to_string()),
+                CheckError::RecursiveGroup("Node".to_string()),
+                CheckError::RecursiveGroup("Inner".to_string()),
             ])
         );
-        // Every struct in a cycle is reported, but not one that only contains
-        // a struct in a cycle.
+        // Every group in a cycle is reported, but not one that only contains
+        // a group in a cycle.
         assert_eq!(
             check_top(
                 "
-                struct A {
+                group A {
                     let b: B
                 }
-                struct B {
+                group B {
                     let c: C
                 }
-                struct C {
+                group C {
                     let a: A
                 }
-                struct D {
+                group D {
                     let a: A
                 }
                 "
             ),
             Err(vec![
-                CheckError::RecursiveStruct("A".to_string()),
-                CheckError::RecursiveStruct("B".to_string()),
-                CheckError::RecursiveStruct("C".to_string()),
+                CheckError::RecursiveGroup("A".to_string()),
+                CheckError::RecursiveGroup("B".to_string()),
+                CheckError::RecursiveGroup("C".to_string()),
             ])
         );
     }
 
     #[test]
-    fn structs_can_contain_the_same_struct_twice() {
+    fn groups_can_contain_the_same_group_twice() {
         assert_eq!(
             check_top(
                 "
-                struct Line {
+                group Line {
                     let start: Point
                     let end: Point
                 }
-                struct Point {}
+                group Point {}
                 "
             ),
             Ok(())
@@ -2907,9 +2907,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_redeclared_structs() {
+    fn rejects_redeclared_groups() {
         assert_eq!(
-            check_body("struct A {}\nstruct A {}"),
+            check_body("group A {}\ngroup A {}"),
             Err(vec![CheckError::Redeclared("A".to_string())])
         );
         // A function can declare its own `Int`, which is a different type,
@@ -2918,7 +2918,7 @@ mod tests {
             messages(
                 "
                 fn f() {
-                    struct Int {}
+                    group Int {}
                     let x: Int = 1
                 }
                 "
@@ -2928,13 +2928,13 @@ mod tests {
     }
 
     #[test]
-    fn structs_share_names_with_values_and_functions() {
+    fn groups_share_names_with_values_and_functions() {
         for src in [
-            "struct User {}\nlet User = 1",
-            "let User = 1\nstruct User {}",
-            "struct User {}\nfn User() {}",
-            "fn User() {}\nstruct User {}",
-            "fn f(User: Int) {\nstruct User {}\n}",
+            "group User {}\nlet User = 1",
+            "let User = 1\ngroup User {}",
+            "group User {}\nfn User() {}",
+            "fn User() {}\ngroup User {}",
+            "fn f(User: Int) {\ngroup User {}\n}",
         ] {
             assert_eq!(
                 check_body(src),
@@ -2949,7 +2949,7 @@ mod tests {
         assert_eq!(
             messages(
                 "
-                struct User {}
+                group User {}
                 let x = User
                 User = 1
                 let y = Int + 1
@@ -2977,7 +2977,7 @@ mod tests {
                 fn h(a: Int) {
                     let b: a = 1
                     let c: x = 1
-                    struct S {
+                    group S {
                         let field: f
                     }
                 }
@@ -2994,12 +2994,12 @@ mod tests {
     }
 
     #[test]
-    fn structs_are_scoped_like_other_names() {
+    fn groups_are_scoped_like_other_names() {
         assert_eq!(
             check_body(
                 "
                 if true {
-                    struct A {}
+                    group A {}
                     fn f(a: A) {}
                 }
                 fn g(a: A) {}
@@ -3011,7 +3011,7 @@ mod tests {
             check_body(
                 "
                 fn f() {
-                    struct A {}
+                    group A {}
                     fn g(a: A) {}
                 }
                 fn h(a: A) {}
@@ -3024,9 +3024,9 @@ mod tests {
             check_body(
                 "
                 if true {
-                    struct A {}
+                    group A {}
                 } else {
-                    struct A {}
+                    group A {}
                 }
                 "
             ),
@@ -3036,12 +3036,12 @@ mod tests {
         assert_eq!(
             check_body(
                 "
-                struct A {}
+                group A {}
                 if true {
-                    struct A {}
+                    group A {}
                 }
                 fn f() {
-                    struct A {}
+                    group A {}
                 }
                 "
             ),
@@ -3097,7 +3097,7 @@ mod tests {
                 (
                     "/dir/other",
                     "
-                    struct Point {}
+                    group Point {}
                     fn identity(of point: Point) -> Point {
                         return point
                     }
@@ -3283,7 +3283,7 @@ mod tests {
                     "/a",
                     "
                     use /b
-                    struct A {
+                    group A {
                         let b: B
                     }
                     fn f(b: B) -> Int {
@@ -3296,7 +3296,7 @@ mod tests {
                     "/b",
                     "
                     use /a
-                    struct B {}
+                    group B {}
                     fn g(b: B) -> Int {
                         return 1
                     }
@@ -3309,11 +3309,11 @@ mod tests {
     }
 
     #[test]
-    fn structs_cannot_contain_themselves_across_modules() {
+    fn groups_cannot_contain_themselves_across_modules() {
         assert_eq!(
             file_messages(&[
-                ("/a", "use /b\nstruct A {\nlet b: B\n}"),
-                ("/b", "use /a\nstruct B {\nlet a: A\n}"),
+                ("/a", "use /b\ngroup A {\nlet b: B\n}"),
+                ("/b", "use /a\ngroup B {\nlet a: A\n}"),
             ]),
             ["/a: `A` contains itself", "/b: `B` contains itself"]
         );
@@ -3383,7 +3383,7 @@ mod tests {
     #[test]
     fn rejects_redeclaration_within_a_module() {
         assert_eq!(
-            check_top("struct a {}\nfn a() {}\nlet a = 1"),
+            check_top("group a {}\nfn a() {}\nlet a = 1"),
             Err(vec![
                 CheckError::Redeclared("a".to_string()),
                 CheckError::Redeclared("a".to_string()),
@@ -3400,23 +3400,23 @@ mod tests {
     }
 
     const USER: &str = "
-        struct User {
+        group User {
             let age: Int
             var isAdmin: Bool
         }
     ";
 
     #[test]
-    fn constructs_structs() {
+    fn constructs_groups() {
         assert_eq!(
             check_top(&format!(
                 "
                 {USER}
-                struct Team {{
+                group Team {{
                     let lead: User
                     let size: Int
                 }}
-                struct Empty {{}}
+                group Empty {{}}
 
                 let admin: User = User {{ age: 42, isAdmin: true }}
                 let team = Team {{ lead: User {{ age: 30, isAdmin: false }}, size: 1 + 2 }}
@@ -3436,7 +3436,7 @@ mod tests {
     }
 
     #[test]
-    fn constructors_give_the_struct_type() {
+    fn constructors_give_the_group_type() {
         assert_eq!(
             messages(&format!(
                 "
@@ -3509,7 +3509,7 @@ mod tests {
     }
 
     #[test]
-    fn constructors_need_a_struct() {
+    fn constructors_need_a_group() {
         assert_eq!(
             messages(
                 "
@@ -3534,7 +3534,7 @@ mod tests {
         assert_eq!(
             messages(
                 "
-                struct Box {
+                group Box {
                     let value: Missing
                 }
                 let b = Box { value: 1 }
@@ -3606,7 +3606,7 @@ mod tests {
                     "/main",
                     "
                     use /lib
-                    struct Point {}
+                    group Point {}
                     let x = 1
                     let a = x::y
                     let b = Point::origin
@@ -3656,7 +3656,7 @@ mod tests {
     }
 
     const COUNTER: &str = "
-        struct Counter {}
+        group Counter {}
         impl Counter {
             fn me() -> Counter {
                 return self
@@ -3697,7 +3697,7 @@ mod tests {
         assert_eq!(
             messages_top(
                 "
-                struct Counter {}
+                group Counter {}
                 impl Counter {
                     fn once() -> Int {
                         return 1
@@ -3717,7 +3717,7 @@ mod tests {
                 fn once() -> Bool {
                     return true
                 }
-                struct Counter {}
+                group Counter {}
                 impl Counter {
                     fn once() -> Int {
                         return 1
@@ -3807,7 +3807,7 @@ mod tests {
         assert_eq!(
             messages_top(
                 "
-                struct Counter {}
+                group Counter {}
                 impl Counter {
                     fn a() -> Int {
                         return true
@@ -3884,7 +3884,7 @@ mod tests {
         assert_eq!(
             check_top(
                 "
-                struct Counter {}
+                group Counter {}
                 fn count() {}
                 let total = 1
                 impl Counter {
@@ -3892,7 +3892,7 @@ mod tests {
                     fn total() {}
                     fn Counter() {}
                 }
-                struct Other {}
+                group Other {}
                 impl Other {
                     fn count() {}
                 }
@@ -3914,7 +3914,7 @@ mod tests {
                     let score: Int = User {}.score()
                     ",
                 ),
-                ("/users/user", "struct User {}"),
+                ("/users/user", "group User {}"),
                 (
                     "/users/score",
                     "
@@ -3931,7 +3931,7 @@ mod tests {
         );
         assert_eq!(
             file_messages(&[
-                ("/main", "struct User {}\nimpl User {\nfn f() {}\n}"),
+                ("/main", "group User {}\nimpl User {\nfn f() {}\n}"),
                 ("/other", "use /main\nimpl main::User {\nfn f() {}\n}"),
             ]),
             ["/other: `User` already has a method `f`"]
@@ -3960,7 +3960,7 @@ mod tests {
                     }
                     ",
                 ),
-                ("/user", "struct User {}"),
+                ("/user", "group User {}"),
                 ("/score", score),
             ]),
             [
@@ -3974,7 +3974,7 @@ mod tests {
                 ("/main", "use /user\nlet a = User {}.score()"),
                 (
                     "/user",
-                    "use /score\nstruct User {}\nlet b = User {}.score()"
+                    "use /score\ngroup User {}\nlet b = User {}.score()"
                 ),
                 ("/score", score),
             ]),
@@ -3983,7 +3983,7 @@ mod tests {
         // A method's own module can use it, even without importing anything.
         assert_eq!(
             check_files(&[
-                ("/user", "struct User {}"),
+                ("/user", "group User {}"),
                 ("/score", &format!("{score}\nlet c = User {{}}.score()")),
             ]),
             Ok(())
@@ -4058,7 +4058,7 @@ mod tests {
                         return 1
                     }
                 }
-                struct Counter {}
+                group Counter {}
                 "
             ),
             Ok(())
@@ -4068,11 +4068,11 @@ mod tests {
     #[test]
     fn self_is_immutable_and_not_a_name() {
         // `self` isn't declared like other names, so it doesn't clash with a
-        // struct's methods or the program's names.
+        // group's methods or the program's names.
         assert_eq!(
             check_top(
                 "
-                struct Box {}
+                group Box {}
                 impl Box {
                     fn same(as other: Box) -> Box {
                         let copy: Box = self
@@ -4086,11 +4086,11 @@ mod tests {
     }
 
     const TEAM: &str = "
-        struct User {
+        group User {
             let age: Int
             var isAdmin: Bool
         }
-        struct Team {
+        group Team {
             let lead: User
             let size: Int
         }
@@ -4164,7 +4164,7 @@ mod tests {
         assert_eq!(
             messages_top(
                 "
-                struct Box {
+                group Box {
                     let value: Missing
                 }
                 fn f(box: Box) -> Int {
@@ -4268,7 +4268,7 @@ mod tests {
 
     #[test]
     fn fields_need_no_import() {
-        // Fields are part of their struct, so a value's fields can be read
+        // Fields are part of their group, so a value's fields can be read
         // without importing the module that declares it.
         assert_eq!(
             check_files(&[
@@ -4288,7 +4288,7 @@ mod tests {
                     }
                     ",
                 ),
-                ("/user", "struct User {\nlet age: Int\n}"),
+                ("/user", "group User {\nlet age: Int\n}"),
             ]),
             Ok(())
         );
@@ -4310,7 +4310,7 @@ mod tests {
                     }
                     ",
                 ),
-                ("/user", "struct User {}\nfn make() {}"),
+                ("/user", "group User {}\nfn make() {}"),
             ]),
             [
                 "/main: `user` is a module, not a value, so use `user::User` to refer to a name in it",

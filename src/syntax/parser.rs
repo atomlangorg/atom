@@ -288,7 +288,7 @@ where
             .boxed(),
     )));
 
-    // An `if` condition can't construct a struct outside of parentheses or
+    // An `if` condition can't construct a group outside of parentheses or
     // arguments, since in `if done { ... }`, the `{` starts the `if`'s block
     // rather than constructing `done`.
     let condition = operators(with_members(
@@ -336,7 +336,7 @@ where
         .then(just(Token::Eq).ignore_then(expr.clone()).or_not())
         .validate(|(((mutability, name), ty), value), e, emitter| {
             if value.is_some() {
-                emitter.emit(Rich::custom(e.span(), "struct fields can't have values"));
+                emitter.emit(Rich::custom(e.span(), "group fields can't have values"));
             }
             Field {
                 mutability,
@@ -346,8 +346,8 @@ where
         });
 
     // Like a block, one field per line with blank lines allowed, and the `{`
-    // on the same line as `struct`.
-    let struct_ = just(Token::Struct)
+    // on the same line as `group`.
+    let group_ = just(Token::Group)
         .ignore_then(ident)
         .then(
             newlines
@@ -360,7 +360,7 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(name, fields)| Stmt::Struct { name, fields });
+        .map(|(name, fields)| Stmt::Group { name, fields });
 
     // One statement per line; blank lines are allowed anywhere.
     let mut stmt = Recursive::declare();
@@ -441,7 +441,7 @@ where
                 .or(assign)
                 .or(if_)
                 .or(function.clone().map(Stmt::Fn))
-                .or(struct_)
+                .or(group_)
                 .or(return_)
                 .or(call),
         );
@@ -470,7 +470,7 @@ where
     // just by being imported. Other statements are parsed only so that they
     // can be reported clearly.
     let top_level_stmt = use_.or(impl_).or(stmt.validate(|stmt, e, emitter| {
-        if !matches!(stmt, Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Struct { .. }) {
+        if !matches!(stmt, Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Group { .. }) {
             emitter.emit(Rich::custom(
                 e.span(),
                 "only declarations can be used at the top level",
@@ -1352,25 +1352,25 @@ mod tests {
         }
     }
 
-    fn struct_(name: &str, fields: Vec<Field>) -> Stmt {
-        Stmt::Struct {
+    fn group_(name: &str, fields: Vec<Field>) -> Stmt {
+        Stmt::Group {
             name: name.to_string(),
             fields,
         }
     }
 
     #[test]
-    fn parses_struct() {
+    fn parses_group() {
         assert_eq!(
             parse_body(
                 "
-                struct User {
+                group User {
                     let age: Int
                     var isAdmin: Bool
                 }
                 "
             ),
-            Ok(vec![struct_(
+            Ok(vec![group_(
                 "User",
                 vec![
                     field(Mutability::Let, "age", "Int"),
@@ -1381,14 +1381,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_struct_layouts() {
+    fn parses_group_layouts() {
         assert_eq!(
-            parse_body("struct Empty {}"),
-            Ok(vec![struct_("Empty", vec![])])
+            parse_body("group Empty {}"),
+            Ok(vec![group_("Empty", vec![])])
         );
         assert_eq!(
-            parse_body("struct Point { let x: Int }"),
-            Ok(vec![struct_(
+            parse_body("group Point { let x: Int }"),
+            Ok(vec![group_(
                 "Point",
                 vec![field(Mutability::Let, "x", "Int")]
             )])
@@ -1396,7 +1396,7 @@ mod tests {
         assert_eq!(
             parse_body(
                 "
-                struct Post { // A comment.
+                group Post { // A comment.
 
                     // Another comment.
                     let author: User
@@ -1405,7 +1405,7 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![struct_(
+            Ok(vec![group_(
                 "Post",
                 vec![
                     field(Mutability::Let, "author", "User"),
@@ -1416,12 +1416,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_struct_inside_blocks() {
+    fn parses_group_inside_blocks() {
         assert_eq!(
             parse_body(
                 "
                 fn f() {
-                    struct Inner {}
+                    group Inner {}
                 }
                 "
             ),
@@ -1429,58 +1429,58 @@ mod tests {
                 name: "f".to_string(),
                 params: vec![],
                 ret: Name::new("Void"),
-                body: vec![struct_("Inner", vec![])],
+                body: vec![group_("Inner", vec![])],
             })])
         );
     }
 
     #[test]
-    fn rejects_struct_field_values() {
+    fn rejects_group_field_values() {
         for src in [
-            "struct User { let age: Int = 3 }",
-            "struct User { var isAdmin: Bool = true }",
+            "group User { let age: Int = 3 }",
+            "group User { var isAdmin: Bool = true }",
         ] {
             let errs = parse_body(src).unwrap_err();
             assert_eq!(
                 errs[0].to_string(),
-                "struct fields can't have values",
+                "group fields can't have values",
                 "{src:?}"
             );
         }
-        assert!(parse_body("struct User { let age = 3 }").is_err());
+        assert!(parse_body("group User { let age = 3 }").is_err());
     }
 
     #[test]
-    fn rejects_malformed_structs() {
+    fn rejects_malformed_groups() {
         for src in [
             // Missing parts.
-            "struct {}",
-            "struct User",
-            "struct User {",
-            "struct User { let }",
-            "struct User { let age }",
-            "struct User { let age: }",
+            "group {}",
+            "group User",
+            "group User {",
+            "group User { let }",
+            "group User { let age }",
+            "group User { let age: }",
             // Fields need `let` or `var`.
-            "struct User { age: Int }",
+            "group User { age: Int }",
             // Only fields are allowed.
-            "struct User { x = 1 }",
-            "struct User { f() }",
-            "struct User { return }",
-            "struct User { if c {} }",
-            "struct User { fn f() {} }",
-            "struct User { struct Inner {} }",
+            "group User { x = 1 }",
+            "group User { f() }",
+            "group User { return }",
+            "group User { if c {} }",
+            "group User { fn f() {} }",
+            "group User { group Inner {} }",
             // Separators.
-            "struct User { let a: Int var b: Int }",
-            "struct User { let a: Int, var b: Int }",
-            "struct User { let a: Int; }",
+            "group User { let a: Int var b: Int }",
+            "group User { let a: Int, var b: Int }",
+            "group User { let a: Int; }",
             // `{` must be on the same line.
-            "struct User\n{}",
+            "group User\n{}",
             // Statements after `}` need their own line.
-            "struct User {} x = 1",
+            "group User {} x = 1",
             // Keywords.
-            "struct struct {}",
-            "let struct = 1",
-            "struct User { let let: Int }",
+            "group group {}",
+            "let group = 1",
+            "group User { let let: Int }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
@@ -1514,7 +1514,7 @@ mod tests {
                 let x = 1
                 var y: Int = 2
                 fn f() {}
-                struct S {}
+                group S {}
                 "
             ),
             Ok(vec![
@@ -1535,7 +1535,7 @@ mod tests {
                     ret: Name::new("Void"),
                     body: vec![],
                 }),
-                struct_("S", vec![]),
+                group_("S", vec![]),
             ])
         );
     }
@@ -2373,7 +2373,7 @@ mod tests {
             "impl User { fn f() {} fn g() {} }",
             // Only functions are allowed inside.
             "impl User {\nlet x = 1\n}",
-            "impl User {\nstruct S {}\n}",
+            "impl User {\ngroup S {}\n}",
             "impl User {\nimpl User {}\n}",
             "impl User {\nuse /lib\n}",
             "impl User {\nf()\n}",
@@ -2410,7 +2410,7 @@ mod tests {
             "fn f(_ self: Int) {}",
             "f(self: 1)",
             "x = self::f()",
-            "struct self {}",
+            "group self {}",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
