@@ -893,8 +893,8 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Finds the modules directly in the directory at `path` that the current
-    /// module can import, other than itself.
+    /// Finds the modules in the directory at `path`, including in its
+    /// subdirectories, that the current module can import, other than itself.
     fn resolve_directory(&self, path: &ModulePath) -> Vec<usize> {
         let Some((package, dir)) = self.full_path(path) else {
             return vec![];
@@ -903,7 +903,7 @@ impl<'a> Checker<'a> {
             .filter(|&index| {
                 let module = &self.modules[index];
                 module.package == package
-                    && module.path.len() == dir.len() + 1
+                    && module.path.len() > dir.len()
                     && module.path.iter().zip(&dir).all(|(a, b)| a == *b)
                     && index != self.module
                     && self.can_import(index)
@@ -5035,14 +5035,43 @@ mod tests {
     }
 
     #[test]
-    fn directory_imports_skip_subdirectories() {
+    fn directory_imports_include_subdirectories() {
         assert_eq!(
             file_messages(&[
-                ("/main", "use /users/*\nlet a = top\nlet b = nested"),
+                (
+                    "/main",
+                    "use /users/*\nlet a = top\nlet b = nested\nlet c = deeper\nlet d = outside",
+                ),
                 ("/users/user", "let top = 1"),
                 ("/users/admins/admin", "let nested = 2"),
+                ("/users/admins/super/root", "let deeper = 3"),
+                ("/other/thing", "let outside = 4"),
+                // Only whole directory names match, not prefixes.
+                ("/usersExtra/x", "let outside = 5"),
             ]),
-            ["/main: `nested` is not declared"]
+            ["/main: `outside` is not declared"]
+        );
+    }
+
+    #[test]
+    fn root_directory_imports_cover_the_whole_project() {
+        assert_eq!(
+            check_files(&[
+                ("/main", "use /*\nlet x = a + b + c"),
+                ("/a", "let a = 1"),
+                ("/dir/b", "let b = 2"),
+                ("/dir/sub/c", "let c = 3"),
+            ]),
+            Ok(())
+        );
+        // `./*` from inside a directory doesn't reach outside it.
+        assert_eq!(
+            file_messages(&[
+                ("/dir/main", "use ./*\nlet x = b + a"),
+                ("/a", "let a = 1"),
+                ("/dir/sub/b", "let b = 2"),
+            ]),
+            ["/dir/main: `a` is not declared"]
         );
     }
 

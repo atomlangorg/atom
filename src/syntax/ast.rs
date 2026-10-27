@@ -48,7 +48,8 @@ impl fmt::Display for ModulePath {
 pub enum Import {
     /// `use /dir/other`: one module.
     Module(ModulePath),
-    /// `use /dir/*`: every module directly in a directory, whose path this is.
+    /// `use /dir/*`: every module in a directory, including those in its
+    /// subdirectories, given the directory's path.
     /// The path can be empty, as in `use ./*`, or just a package's name, as in
     /// `use stdlib/*`.
     Directory(ModulePath),

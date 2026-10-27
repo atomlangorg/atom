@@ -450,8 +450,9 @@ where
         function
     };
 
-    // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module directly in
-    // a directory. The lexer reads the final `/*` as a wildcard.
+    // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module in a
+    // directory and its subdirectories. The lexer reads the final `/*` as a
+    // wildcard.
     let dir_segments = ident
         .separated_by(just(Token::Slash))
         .at_least(1)
