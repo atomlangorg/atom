@@ -5145,4 +5145,28 @@ mod tests {
             Ok(())
         );
     }
+
+    #[test]
+    fn creates_void_values() {
+        assert_eq!(
+            check_top(
+                "
+                let a: Void = Void.new()
+                fn nothing() {}
+                let b: Void = nothing()
+                fn f() -> Void {
+                    return core::Void.new()
+                }
+                "
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            messages_top("let a: Int = Void.new()\nlet b = Void.new().new()"),
+            [
+                "cannot assign `Void` to `a`, which has type `Int`",
+                "`Void.new` is a static function, so it must be used on `Void` itself rather than a value",
+            ]
+        );
+    }
 }
