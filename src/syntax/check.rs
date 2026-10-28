@@ -127,6 +127,10 @@ pub enum CheckError {
     /// A type that only the compiler can create was constructed, such as
     /// `Int`, whose values come from literals.
     CompilerCreated(Type),
+    /// A group was constructed outside the `impl`s of its type.
+    ConstructedOutsideImpl(Type),
+    /// A group was constructed outside the module that declares it.
+    ConstructedOutsideModule { ty: Type, module: String },
     /// `::` was used after a name that's declared, but isn't a module.
     NotAModule(String),
     /// A qualified name's module matched more than one module by name, so
@@ -317,6 +321,13 @@ impl fmt::Display for CheckError {
                 f,
                 "`{module}` can only be imported from inside the `{package}` package"
             ),
+            Self::ConstructedOutsideModule { ty, module } => write!(
+                f,
+                "`{ty}` can only be constructed in `{module}`, which declares it"
+            ),
+            Self::ConstructedOutsideImpl(ty) => {
+                write!(f, "`{ty}` can only be constructed inside an `impl {ty}`")
+            }
             Self::CompilerCreated(ty) => write!(
                 f,
                 "`{ty}` can only be created by the compiler, such as with a literal"
@@ -554,13 +565,15 @@ struct FnContext<'a> {
 }
 
 /// What kind of function a body belongs to, which decides whether it has
-/// `self`.
+/// `self`, and which type it can construct.
 #[derive(Debug, Clone)]
 enum FnKind {
     Function,
     /// A method, with the type of `self`, which is `None` if it's unknown.
     Method(Option<Type>),
-    Static,
+    /// A static function, with the type whose `impl` it's in, which is `None`
+    /// if it's unknown.
+    Static(Option<Type>),
 }
 
 /// What `.member` is used on.
@@ -652,6 +665,10 @@ struct Checker<'a> {
     /// can't be redeclared from here inwards.
     fn_scope_start: usize,
     current_fn: Option<FnContext<'a>>,
+    /// The type whose `impl` the code being checked is in, including inside
+    /// functions nested in its methods. Only it can be constructed. `Some(None)`
+    /// if the `impl`'s type is unknown.
+    impl_type: Option<Option<Type>>,
     functions: Vec<Signature<'a>>,
     /// For each type `id`, its methods by name. Methods aren't names in any
     /// scope, and are only found through the type of the value they're called
@@ -666,6 +683,9 @@ struct Checker<'a> {
     /// For each group, indexed by `id`, its fields in the order they're
     /// declared.
     group_fields: Vec<Vec<FieldSignature<'a>>>,
+    /// For each group, indexed by `id`, the index in `modules` of the module
+    /// that declares it, which is the only one that can construct it.
+    group_modules: Vec<usize>,
     errors: Vec<ModuleError>,
 }
 
@@ -774,7 +794,7 @@ impl<'a> Checker<'a> {
                         {
                             let index = self.declare_method(self_ty.as_ref(), function, *is_static);
                             let kind = if *is_static {
-                                FnKind::Static
+                                FnKind::Static(self_ty.clone())
                             } else {
                                 FnKind::Method(self_ty.clone())
                             };
@@ -1241,9 +1261,13 @@ impl<'a> Checker<'a> {
         let outer_fn = self.current_fn.replace(FnContext {
             name,
             returns: returns.clone(),
-            is_static: matches!(kind, FnKind::Static),
+            is_static: matches!(kind, FnKind::Static(_)),
         });
         self.scopes.push(HashMap::new());
+        let outer_impl_type = match &kind {
+            FnKind::Method(ty) | FnKind::Static(ty) => self.impl_type.replace(ty.clone()),
+            FnKind::Function => self.impl_type.clone(),
+        };
 
         // `self` is a keyword, so it can't clash with a parameter. Like any
         // other value, functions nested in the method can't use it.
@@ -1268,6 +1292,7 @@ impl<'a> Checker<'a> {
         self.scopes.pop();
         self.current_fn = outer_fn;
         self.fn_scope_start = outer_scope_start;
+        self.impl_type = outer_impl_type;
 
         // A `Void` function can finish without an explicit `return`.
         if let Some(expected) = returns
@@ -1285,6 +1310,7 @@ impl<'a> Checker<'a> {
     fn declare_group(&mut self, name: &'a str) -> usize {
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
+        self.group_modules.push(self.module);
         let ty = Type {
             id,
             name: name.to_string(),
@@ -1704,6 +1730,25 @@ impl<'a> Checker<'a> {
         if self.is_compiler_created(&ty) {
             self.error(CheckError::CompilerCreated(ty.clone()));
             return Some(ty);
+        }
+        // Only the type's own module can construct it, and only in the type's
+        // `impl`s. Elsewhere, values come from its functions, such as
+        // `Void.new()`. An unknown `impl` type isn't reported again.
+        let declared_in = self.group_modules[ty.id];
+        if declared_in != self.module {
+            self.error(CheckError::ConstructedOutsideModule {
+                ty: ty.clone(),
+                module: self.modules[declared_in].display.clone(),
+            });
+            return Some(ty);
+        }
+        match &self.impl_type {
+            Some(Some(impl_type)) if *impl_type == ty => {}
+            Some(None) => {}
+            _ => {
+                self.error(CheckError::ConstructedOutsideImpl(ty.clone()));
+                return Some(ty);
+            }
         }
         let fields = self.group_fields[ty.id].clone();
         let name = type_name.to_string();
@@ -3708,6 +3753,11 @@ mod tests {
             let age: Int
             var isAdmin: Bool
         }
+        impl User {
+            static fn new(age: Int, isAdmin: Bool) -> User {
+                return User { age: age, isAdmin: isAdmin }
+            }
+        }
     ";
 
     #[test]
@@ -3721,18 +3771,24 @@ mod tests {
                     let size: Int
                 }}
                 group Empty {{}}
-
-                let admin: User = User {{ age: 42, isAdmin: true }}
-                let team = Team {{ lead: User {{ age: 30, isAdmin: false }}, size: 1 + 2 }}
-                let empty = Empty {{}}
-
-                fn promote(user: User) -> User {{
-                    return User {{ age: 18, isAdmin: true }}
+                impl Team {{
+                    static fn new() -> Team {{
+                        return Team {{ lead: User.new(age: 30, isAdmin: false), size: 1 + 2 }}
+                    }}
+                    fn withLead(lead: User) -> Team {{
+                        return Team {{ lead: lead, size: 1 }}
+                    }}
                 }}
-                fn newTeam() -> Team {{
-                    let lead = promote(user: User {{ age: 20, isAdmin: false }})
-                    return Team {{ lead: lead, size: 1 }}
+                impl Empty {{
+                    static fn new() -> Empty {{
+                        let empty = Empty {{}}
+                        return empty
+                    }}
                 }}
+
+                let admin: User = User.new(age: 42, isAdmin: true)
+                let team = Team.new().withLead(lead: admin)
+                let empty = Empty.new()
                 "
             )),
             Ok(())
@@ -3742,11 +3798,15 @@ mod tests {
     #[test]
     fn constructors_give_the_group_type() {
         assert_eq!(
-            messages(&format!(
+            messages_top(&format!(
                 "
                 {USER}
-                let x: Int = User {{ age: 1, isAdmin: true }}
-                let y = User {{ age: 1, isAdmin: true }} + 1
+                impl User {{
+                    static fn make() {{
+                        let x: Int = User {{ age: 1, isAdmin: true }}
+                        let y = User {{ age: 1, isAdmin: true }} + 1
+                    }}
+                }}
                 "
             )),
             [
@@ -3759,12 +3819,16 @@ mod tests {
     #[test]
     fn constructors_need_every_field() {
         assert_eq!(
-            messages(&format!(
+            messages_top(&format!(
                 "
                 {USER}
-                let a = User {{ age: 1 }}
-                let b = User {{ age: 1, isAdmin: true, extra: 2 }}
-                let c = User {{}}
+                impl User {{
+                    static fn make() {{
+                        let a = User {{ age: 1 }}
+                        let b = User {{ age: 1, isAdmin: true, extra: 2 }}
+                        let c = User {{}}
+                    }}
+                }}
                 "
             )),
             [
@@ -3778,11 +3842,15 @@ mod tests {
     #[test]
     fn constructor_fields_must_be_in_order() {
         assert_eq!(
-            messages(&format!(
+            messages_top(&format!(
                 "
                 {USER}
-                let a = User {{ isAdmin: true, age: 1 }}
-                let b = User {{ age: 1, admin: true }}
+                impl User {{
+                    static fn make() {{
+                        let a = User {{ isAdmin: true, age: 1 }}
+                        let b = User {{ age: 1, admin: true }}
+                    }}
+                }}
                 "
             )),
             [
@@ -3796,17 +3864,20 @@ mod tests {
     #[test]
     fn constructor_fields_are_type_checked() {
         assert_eq!(
-            messages(&format!(
+            messages_top(&format!(
                 "
                 {USER}
-                let a = User {{ age: true, isAdmin: 1 }}
-                let b = User {{ age: -true, isAdmin: false }}
+                impl User {{
+                    static fn make() {{
+                        let a = User {{ age: true, isAdmin: 1 }}
+                        let b = User {{ age: -true, isAdmin: false }}
+                    }}
+                }}
                 "
             )),
             [
                 "field `age` of `User` expects `Int`, found `Bool`",
                 "field `isAdmin` of `User` expects `Bool`, found `Int`",
-                // The `-` makes `age` an `Int`, so it's only reported once.
                 "operator `-` expects `Int`, found `Bool`",
             ]
         );
@@ -3836,12 +3907,16 @@ mod tests {
     #[test]
     fn unknown_field_types_accept_any_value() {
         assert_eq!(
-            messages(
+            messages_top(
                 "
                 group Box {
                     let value: Missing
                 }
-                let b = Box { value: 1 }
+                impl Box {
+                    static fn make() -> Box {
+                        return Box { value: 1 }
+                    }
+                }
                 "
             ),
             ["unknown type `Missing`"]
@@ -3849,30 +3924,40 @@ mod tests {
     }
 
     #[test]
-    fn constructors_work_across_modules() {
+    fn groups_are_only_constructed_in_their_own_module() {
+        // Even in an `impl` of the type, another module can't construct it,
+        // but it can use the type's own functions.
         assert_eq!(
-            check_files(&[
+            file_messages(&[
                 (
                     "/main",
                     "
                     use ./users/user
-                    let a: User = User { age: 1, isAdmin: true }
-                    let b: user::User = user::User { age: 2, isAdmin: false }
-                    fn f() -> User {
-                        return /users/user::User { age: 3, isAdmin: true }
+                    impl User {
+                        static fn admin(age: Int) -> User {
+                            return User { age: age, isAdmin: true }
+                        }
+                        static fn guest() -> User {
+                            return User.new(age: 3, isAdmin: false)
+                        }
                     }
+                    let a = user::User { age: 1, isAdmin: true }
+                    let b: User = User.guest()
                     ",
                 ),
                 ("/users/user", USER),
             ]),
-            Ok(())
+            [
+                "/main: `User` can only be constructed in `/users/user`, which declares it",
+                "/main: `User` can only be constructed in `/users/user`, which declares it",
+            ]
         );
     }
 
     #[test]
     fn only_literals_create_ints_and_bools() {
         assert_eq!(
-            check_body("let v: Void = Void {}\nlet w: core::Void = core::Void {}"),
+            check_body("let v: Void = Void.new()\nlet w: core::Void = core::Void.new()"),
             Ok(())
         );
         assert_eq!(
@@ -3901,12 +3986,13 @@ mod tests {
                     "
                     {USER}
                     let age = 1
-                    let a = User {{ age: age, isAdmin: true }}
-                    fn f() -> User {{
-                        return User {{ age: age, isAdmin: true }}
+                    impl User {{
+                        static fn make() -> User {{
+                            return User {{ age: age, isAdmin: true }}
+                        }}
                     }}
                     // A value can't contain itself.
-                    let b: User = User {{ age: b, isAdmin: true }}
+                    let b: User = User.new(age: b.age, isAdmin: true)
                     "
                 ),
             )]),
@@ -3977,6 +4063,9 @@ mod tests {
     const COUNTER: &str = "
         group Counter {}
         impl Counter {
+            static fn new() -> Counter {
+                return Counter {}
+            }
             fn me() -> Counter {
                 return self
             }
@@ -3998,9 +4087,9 @@ mod tests {
             check_top(&format!(
                 "
                 {COUNTER}
-                let counter = Counter {{}}
+                let counter = Counter.new()
                 let a: Int = counter.twice() + counter.add(amount: 2)
-                let b: Counter = Counter {{}}.me().me()
+                let b: Counter = Counter.new().me().me()
                 fn f(counter: Counter) -> Int {{
                     counter.once()
                     return counter.me().twice()
@@ -4084,7 +4173,7 @@ mod tests {
             messages_top(&format!(
                 "
                 {COUNTER}
-                let a = Counter {{}}.missing()
+                let a = Counter.new().missing()
                 let b = 1.double()
                 // Unknown receivers aren't reported again.
                 let c = missing.f(x: y)
@@ -4105,7 +4194,7 @@ mod tests {
             messages_top(&format!(
                 "
                 {COUNTER}
-                let c = Counter {{}}
+                let c = Counter.new()
                 let a = c.add()
                 let b = c.add(by: 1)
                 let d = c.add(amount: true)
@@ -4178,7 +4267,7 @@ mod tests {
                         return self.twice() + self.once()
                     }}
                 }}
-                let x = Counter {{}}.thrice()
+                let x = Counter.new().thrice()
                 "
             )),
             Ok(())
@@ -4230,10 +4319,13 @@ mod tests {
                     "
                     use /users/user
                     use /users/score
-                    let score: Int = User {}.score()
+                    let score: Int = User.new().score()
                     ",
                 ),
-                ("/users/user", "group User {}"),
+                (
+                    "/users/user",
+                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}"
+                ),
                 (
                     "/users/score",
                     "
@@ -4273,13 +4365,16 @@ mod tests {
                     "/main",
                     "
                     use /user
-                    let a = User {}.score()
+                    let a = User.new().score()
                     fn f(user: User) {
                         user.score()
                     }
                     ",
                 ),
-                ("/user", "group User {}"),
+                (
+                    "/user",
+                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}"
+                ),
                 ("/score", score),
             ]),
             [
@@ -4290,10 +4385,10 @@ mod tests {
         // Imports aren't transitive, even if the type's module imports it.
         assert_eq!(
             file_messages(&[
-                ("/main", "use /user\nlet a = User {}.score()"),
+                ("/main", "use /user\nlet a = User.new().score()"),
                 (
                     "/user",
-                    "use /score\ngroup User {}\nlet b = User {}.score()"
+                    "use /score\ngroup User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}\nlet b = User.new().score()"
                 ),
                 ("/score", score),
             ]),
@@ -4302,8 +4397,11 @@ mod tests {
         // A method's own module can use it, even without importing anything.
         assert_eq!(
             check_files(&[
-                ("/user", "group User {}"),
-                ("/score", &format!("{score}\nlet c = User {{}}.score()")),
+                (
+                    "/user",
+                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}"
+                ),
+                ("/score", &format!("{score}\nlet c = User.new().score()")),
             ]),
             Ok(())
         );
@@ -4371,8 +4469,11 @@ mod tests {
         assert_eq!(
             check_top(
                 "
-                let x: Int = Counter {}.once()
+                let x: Int = Counter.new().once()
                 impl Counter {
+                    static fn new() -> Counter {
+                        return Counter {}
+                    }
                     fn once() -> Int {
                         return 1
                     }
@@ -4409,9 +4510,19 @@ mod tests {
             let age: Int
             var isAdmin: Bool
         }
+        impl User {
+            static fn new(age: Int, isAdmin: Bool) -> User {
+                return User { age: age, isAdmin: isAdmin }
+            }
+        }
         group Team {
             let lead: User
             let size: Int
+        }
+        impl Team {
+            static fn new(lead: User, size: Int) -> Team {
+                return Team { lead: lead, size: size }
+            }
         }
     ";
 
@@ -4421,8 +4532,8 @@ mod tests {
             check_top(&format!(
                 "
                 {TEAM}
-                let user = User {{ age: 42, isAdmin: true }}
-                let team = Team {{ lead: user, size: 3 }}
+                let user = User.new(age: 42, isAdmin: true)
+                let team = Team.new(lead: user, size: 3)
                 let age: Int = user.age
                 let isAdmin: Bool = team.lead.isAdmin
                 let total: Int = team.lead.age + team.size
@@ -4441,10 +4552,10 @@ mod tests {
             messages_top(&format!(
                 "
                 {TEAM}
-                let user = User {{ age: 42, isAdmin: true }}
+                let user = User.new(age: 42, isAdmin: true)
                 let a: Bool = user.age
                 let b = user.isAdmin + 1
-                let c: Int = Team {{ lead: user, size: 1 }}.lead
+                let c: Int = Team.new(lead: user, size: 1).lead
                 "
             )),
             [
@@ -4461,7 +4572,7 @@ mod tests {
             messages_top(&format!(
                 "
                 {TEAM}
-                let user = User {{ age: 42, isAdmin: true }}
+                let user = User.new(age: 42, isAdmin: true)
                 let a = user.name
                 let b = 1.value
                 // Not reported again.
@@ -4509,7 +4620,7 @@ mod tests {
                         return self.age + 1
                     }}
                 }}
-                let x: Int = User {{ age: 1, isAdmin: true }}.nextAge()
+                let x: Int = User.new(age: 1, isAdmin: true).nextAge()
                 "
             )),
             Ok(())
@@ -4574,7 +4685,7 @@ mod tests {
             messages_top(&format!(
                 "
                 {TEAM}
-                let admin = User {{ age: 42, isAdmin: true }}
+                let admin = User.new(age: 42, isAdmin: true)
                 let age = admin.age
                 fn f() -> Int {{
                     return admin.age
@@ -4603,11 +4714,23 @@ mod tests {
                     "
                     use /user
                     fn make() -> User {
-                        return User { age: 1 }
+                        return User.new(age: 1)
                     }
                     ",
                 ),
-                ("/user", "group User {\nlet age: Int\n}"),
+                (
+                    "/user",
+                    "
+                    group User {
+                        let age: Int
+                    }
+                    impl User {
+                        static fn new(age: Int) -> User {
+                            return User { age: age }
+                        }
+                    }
+                    ",
+                ),
             ]),
             Ok(())
         );
@@ -4998,7 +5121,7 @@ mod tests {
     #[test]
     fn programs_import_core_without_a_use() {
         assert_eq!(
-            check_top("let x: Void = Void {}\nlet y: Bool = true\nlet z: core::Int = 1"),
+            check_top("let x: Void = Void.new()\nlet y: Bool = true\nlet z: core::Int = 1"),
             Ok(())
         );
     }
@@ -5011,21 +5134,33 @@ mod tests {
                     "/main",
                     "
                     use ./users/*
-                    let user: User = User { age: maxAge }
-                    let admin: Admin = promote(user: user)
+                    let user: User = User.new(age: maxAge)
+                    let admin: Admin = Admin.promote(user: user)
                     ",
                 ),
                 (
                     "/users/user",
-                    "group User {\nlet age: Int\n}\nlet maxAge = 120"
+                    "
+                    group User {
+                        let age: Int
+                    }
+                    impl User {
+                        static fn new(age: Int) -> User {
+                            return User { age: age }
+                        }
+                    }
+                    let maxAge = 120
+                    ",
                 ),
                 (
                     "/users/admin",
                     "
                     use ./user
                     group Admin {}
-                    fn promote(user: User) -> Admin {
-                        return Admin {}
+                    impl Admin {
+                        static fn promote(user: User) -> Admin {
+                            return Admin {}
+                        }
                     }
                     ",
                 ),
@@ -5167,6 +5302,79 @@ mod tests {
                 "cannot assign `Void` to `a`, which has type `Int`",
                 "`Void.new` is a static function, so it must be used on `Void` itself rather than a value",
             ]
+        );
+    }
+
+    #[test]
+    fn groups_are_only_constructed_in_their_impls() {
+        assert_eq!(
+            messages_top(
+                "
+                group Point {}
+                group Other {}
+                let a = Point {}
+                fn f() -> Point {
+                    return Point {}
+                }
+                impl Other {
+                    static fn make() -> Point {
+                        return Point {}
+                    }
+                    fn method() -> Point {
+                        return Point {}
+                    }
+                }
+                let b = Void {}
+                "
+            ),
+            [
+                "`Point` can only be constructed inside an `impl Point`",
+                "`Point` can only be constructed inside an `impl Point`",
+                "`Point` can only be constructed inside an `impl Point`",
+                "`Point` can only be constructed inside an `impl Point`",
+                "`Void` can only be constructed in `stdlib/core`, which declares it",
+            ]
+        );
+    }
+
+    #[test]
+    fn methods_static_functions_and_nested_functions_can_construct() {
+        assert_eq!(
+            check_top(
+                "
+                group Point {}
+                impl Point {
+                    static fn origin() -> Point {
+                        return Point {}
+                    }
+                    fn copy() -> Point {
+                        fn make() -> Point {
+                            return Point {}
+                        }
+                        return make()
+                    }
+                }
+                let p: Point = Point.origin().copy()
+                "
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn unknown_impl_types_do_not_report_constructors() {
+        assert_eq!(
+            messages_top(
+                "
+                group Point {}
+                impl Missing {
+                    static fn make() -> Point {
+                        return Point {}
+                    }
+                }
+                "
+            ),
+            ["unknown type `Missing`"]
         );
     }
 }

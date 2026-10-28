@@ -11,6 +11,12 @@ fn describe(user: User) -> Int {
 }
 
 impl User {
+    // Groups can only be constructed inside their own `impl`, so other code
+    // uses `User.new(...)`.
+    static fn new(age: Int, isAdmin: Bool) -> User {
+        return User { age: age, isAdmin: isAdmin }
+    }
+
     // Methods can only reach each other through `self`.
     fn score() -> Int {
         return self.base().doubled()

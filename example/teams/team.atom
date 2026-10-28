@@ -5,6 +5,12 @@ group Team {
     let size: Int
 }
 
+impl Team {
+    static fn new(ledBy lead: User, size: Int) -> Team {
+        return Team { lead: lead, size: size }
+    }
+}
+
 fn describe(team: Team) -> Int {
     return 2
 }

@@ -8,8 +8,7 @@ use ./teams/team
 let oldest = maxAge + 1
 let ready: Bool = true // Never changes.
 
-// Constructors give every field a value, in the order they're declared.
-let founder = User { age: oldest, isAdmin: true }
+let founder = User.new(age: oldest, isAdmin: true)
 
 fn run() {
     let x = -1 + 2 * 3
@@ -28,16 +27,16 @@ fn run() {
 
     y = bump(y, by: 2, twice: true)
 
-    let owner = User { age: y, isAdmin: false }
-    let manager = User { age: 30, isAdmin: true }
-    let crew = Team {
-        lead: choose(
+    let owner = User.new(age: y, isAdmin: false)
+    let manager = User.new(age: 30, isAdmin: true)
+    let crew = Team.new(
+        ledBy: choose(
             owner,
             or: manager,
             preferringFirst: done,
         ),
         size: 3,
-    }
+    )
     y = describeBoth(team: crew, user: owner) + owner.score() + crew.lead.age
 }
 
