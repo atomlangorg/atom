@@ -34,6 +34,9 @@
 //! `stdlib/core` without needing a `use`, but only the standard library itself
 //! can import its other files. `stdlib/builtin` declares the types the compiler
 //! creates itself for literals, which can't be constructed.
+//!
+//! As it checks, the checker lowers the AST into an `ir::Program`. That program
+//! is only returned when there are no errors, so everything in it is known.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -48,6 +51,7 @@ use super::{
     },
     parser::parse,
 };
+use crate::ir;
 
 /// The package holding the standard library.
 const STDLIB_PACKAGE: &str = "stdlib";
@@ -483,8 +487,9 @@ impl fmt::Display for CheckError {
     }
 }
 
-/// Checks every module in a project, along with the standard library.
-pub fn check(modules: &[Module]) -> Result<(), Vec<ModuleError>> {
+/// Checks every module in a project, along with the standard library,
+/// returning the program they make up.
+pub fn check(modules: &[Module]) -> Result<ir::Program, Vec<ModuleError>> {
     let mut checker = Checker::default();
     checker.add_stdlib();
     for module in modules {
@@ -493,7 +498,7 @@ pub fn check(modules: &[Module]) -> Result<(), Vec<ModuleError>> {
     checker.check_modules();
 
     if checker.errors.is_empty() {
-        Ok(())
+        Ok(checker.program())
     } else {
         Err(checker.errors)
     }
@@ -501,6 +506,8 @@ pub fn check(modules: &[Module]) -> Result<(), Vec<ModuleError>> {
 
 #[derive(Debug, Clone)]
 struct Signature<'a> {
+    /// Its full name, as in `ir::Function::name`.
+    name: String,
     params: Vec<ParamSignature<'a>>,
     /// `None` if the return type is unknown.
     returns: Option<Type>,
@@ -528,6 +535,8 @@ enum Binding {
         /// `None` if the type couldn't be determined because of an error, so
         /// that later uses don't report errors caused by the same mistake.
         ty: Option<Type>,
+        /// An index into the locals of the function declaring it.
+        local: usize,
     },
     /// A top-level value, as an index into `Checker::globals`.
     Global(usize),
@@ -544,6 +553,9 @@ struct Global<'a> {
     ty: Option<&'a Name>,
     value: &'a Expr,
     state: GlobalState,
+    /// What its initialiser compiles to, once it's been checked, or `None` if
+    /// it has an error.
+    lowered: Option<ir::Expr>,
 }
 
 enum GlobalState {
@@ -558,10 +570,15 @@ enum GlobalState {
 #[derive(Debug, Clone)]
 struct FnContext<'a> {
     name: &'a str,
+    /// Its full name, as in `ir::Function::name`.
+    full_name: String,
     /// `None` if the return type is unknown.
     returns: Option<Type>,
     /// Whether it's a `static fn`, which has no `self`.
     is_static: bool,
+    /// The types of the values declared in it so far, including `self` and
+    /// its parameters, which are `None` if they're unknown.
+    locals: Vec<Option<Type>>,
 }
 
 /// What kind of function a body belongs to, which decides whether it has
@@ -578,8 +595,9 @@ enum FnKind {
 
 /// What `.member` is used on.
 enum Receiver {
-    /// A value of the type, for its fields and methods.
-    Value(Type),
+    /// A value of the type, for its fields and methods, along with what it
+    /// compiles to, or `None` if it has an error.
+    Value(Type, Option<ir::Expr>),
     /// The type itself, for its static functions.
     Type(Type),
 }
@@ -617,8 +635,9 @@ enum LookupError {
 /// Whether it's called is decided by the brackets after it, not by which kind
 /// it is.
 enum Member {
-    /// `None` if the field's type is unknown.
-    Field(Option<Type>),
+    /// The field's index in the order its group declares them, and its type,
+    /// which is `None` if it's unknown.
+    Field(usize, Option<Type>),
     Method(Method),
 }
 
@@ -629,6 +648,30 @@ struct Method {
     module: usize,
     /// An index into `Checker::functions`.
     function: usize,
+}
+
+/// The result of checking an expression.
+struct Typed {
+    /// `None` if the type couldn't be determined because of an error that has
+    /// already been reported.
+    ty: Option<Type>,
+    /// What the expression compiles to, or `None` if it has an error.
+    expr: Option<ir::Expr>,
+}
+
+impl Typed {
+    /// An expression whose error has already been reported.
+    const UNKNOWN: Self = Self {
+        ty: None,
+        expr: None,
+    };
+}
+
+/// Splits checked expressions into their types, and what they compile to if
+/// none of them have errors.
+fn split(typed: Vec<Typed>) -> (Vec<Option<Type>>, Option<Vec<ir::Expr>>) {
+    let (types, exprs): (Vec<_>, Vec<_>) = typed.into_iter().map(|t| (t.ty, t.expr)).unzip();
+    (types, exprs.into_iter().collect())
 }
 
 /// A top-level declaration that still needs checking once every module's
@@ -653,8 +696,8 @@ struct Checker<'a> {
     /// The index in `modules` of `stdlib/builtin`, whose types the compiler
     /// creates itself.
     builtin: usize,
-    /// The `id`s of the types declared in `stdlib/builtin`.
-    builtin_types: HashSet<usize>,
+    /// The types declared in `stdlib/builtin`, by `id`.
+    builtin_types: HashMap<usize, ir::Builtin>,
     /// The index in `modules` of the module being checked.
     module: usize,
     /// One scope per enclosing block inside functions, innermost last. Empty
@@ -670,6 +713,9 @@ struct Checker<'a> {
     /// if the `impl`'s type is unknown.
     impl_type: Option<Option<Type>>,
     functions: Vec<Signature<'a>>,
+    /// For each of `functions`, what it compiles to, once its body has been
+    /// checked, or `None` if it has an error.
+    lowered_functions: Vec<Option<ir::Function>>,
     /// For each type `id`, its methods by name. Methods aren't names in any
     /// scope, and are only found through the type of the value they're called
     /// on, in the modules that can see the module declaring them. They share
@@ -680,12 +726,17 @@ struct Checker<'a> {
     /// from the type's fields and methods.
     statics: HashMap<usize, HashMap<&'a str, Method>>,
     globals: Vec<Global<'a>>,
+    /// Indexes into `globals`, in the order their types were worked out, so
+    /// that each comes after the values its initialiser uses.
+    global_order: Vec<usize>,
     /// For each group, indexed by `id`, its fields in the order they're
     /// declared.
     group_fields: Vec<Vec<FieldSignature<'a>>>,
     /// For each group, indexed by `id`, the index in `modules` of the module
     /// that declares it, which is the only one that can construct it.
     group_modules: Vec<usize>,
+    /// For each group, indexed by `id`, its full name, such as `/main::Point`.
+    group_names: Vec<String>,
     errors: Vec<ModuleError>,
 }
 
@@ -792,7 +843,14 @@ impl<'a> Checker<'a> {
                             function,
                         } in functions
                         {
-                            let index = self.declare_method(self_ty.as_ref(), function, *is_static);
+                            let full_name =
+                                self.full_name(&format!("{}.{}", ty.name, function.name));
+                            let index = self.declare_method(
+                                self_ty.as_ref(),
+                                function,
+                                *is_static,
+                                full_name,
+                            );
                             let kind = if *is_static {
                                 FnKind::Static(self_ty.clone())
                             } else {
@@ -818,6 +876,7 @@ impl<'a> Checker<'a> {
                             ty: ty.as_ref(),
                             value,
                             state: GlobalState::Unchecked,
+                            lowered: None,
                         });
                         let index = self.globals.len() - 1;
                         self.declare(name, Binding::Global(index));
@@ -1154,34 +1213,48 @@ impl<'a> Checker<'a> {
             (global.module, global.name, global.ty, global.value);
         self.globals[index].state = GlobalState::Checking;
         let outer_module = std::mem::replace(&mut self.module, module);
-        let ty = self.decl_type(name, type_name, value);
+        let Typed { ty, expr } = self.decl_type(name, type_name, value);
         self.module = outer_module;
 
         self.globals[index].state = GlobalState::Checked(ty.clone());
+        self.globals[index].lowered = expr;
+        self.global_order.push(index);
         ty
     }
 
     /// Checks a `let` or `var` declaration's value, returning the type it's
-    /// declared with.
-    fn decl_type(&mut self, name: &str, type_name: Option<&Name>, value: &Expr) -> Option<Type> {
+    /// declared with, along with what the value compiles to.
+    fn decl_type(&mut self, name: &str, type_name: Option<&Name>, value: &Expr) -> Typed {
         // Checked first so that `let x = x` refers to an earlier `x`.
-        let found = self.expr(value);
+        let Typed { ty: found, expr } = self.expr(value);
 
         // An explicit type takes precedence over the value's type, so later
         // uses are checked against what the programmer wrote.
-        match type_name {
+        let ty = match type_name {
             Some(type_name) => {
                 let expected = self.resolve_type(type_name);
                 self.check_assignable(name, expected.clone(), found);
                 expected
             }
             None => found,
-        }
+        };
+        Typed { ty, expr }
+    }
+
+    /// The full name of something called `name` declared here, as in
+    /// `ir::Function::name`. Names inside a function start with the
+    /// function's own.
+    fn full_name(&self, name: &str) -> String {
+        let outer = match &self.current_fn {
+            Some(function) => &function.full_name,
+            None => &self.modules[self.module].display,
+        };
+        format!("{outer}::{name}")
     }
 
     /// Declares a function, returning its index into `functions`.
     fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &Name) -> usize {
-        let index = self.signature(params, ret);
+        let index = self.signature(params, ret, self.full_name(name));
         self.declare(name, Binding::Function(index));
         index
     }
@@ -1193,8 +1266,9 @@ impl<'a> Checker<'a> {
         self_ty: Option<&Type>,
         method: &'a Function,
         is_static: bool,
+        full_name: String,
     ) -> usize {
-        let index = self.signature(&method.params, &method.ret);
+        let index = self.signature(&method.params, &method.ret, full_name);
         if let Some(self_ty) = self_ty {
             // Methods must be unique across every module, even ones that
             // can't see each other, since a call can't say which module's
@@ -1204,7 +1278,7 @@ impl<'a> Checker<'a> {
                     .map(|_| MemberKind::StaticFunction)
             } else {
                 match self.member(self_ty, &method.name) {
-                    Some(Member::Field(_)) => Some(MemberKind::Field),
+                    Some(Member::Field(..)) => Some(MemberKind::Field),
                     Some(Member::Method(_)) => Some(MemberKind::Method),
                     None => None,
                 }
@@ -1234,9 +1308,9 @@ impl<'a> Checker<'a> {
         index
     }
 
-    /// Resolves a function's parameter and return types, returning its index
-    /// into `functions`.
-    fn signature(&mut self, params: &'a [Param], ret: &Name) -> usize {
+    /// Resolves the parameter and return types of the function called
+    /// `full_name`, returning its index into `functions`.
+    fn signature(&mut self, params: &'a [Param], ret: &Name, full_name: String) -> usize {
         let params = params
             .iter()
             .map(|param| ParamSignature {
@@ -1247,21 +1321,32 @@ impl<'a> Checker<'a> {
             .collect();
         let returns = self.resolve_type(ret);
 
-        self.functions.push(Signature { params, returns });
+        self.functions.push(Signature {
+            name: full_name,
+            params,
+            returns,
+        });
+        self.lowered_functions.push(None);
         self.functions.len() - 1
     }
 
     /// Checks the body of the function at `index` in `functions`.
     fn fn_body(&mut self, index: usize, name: &'a str, body: &'a [Stmt], kind: FnKind) {
-        let Signature { params, returns } = self.functions[index].clone();
+        let Signature {
+            name: full_name,
+            params,
+            returns,
+        } = self.functions[index].clone();
 
         // The body starts a new function scope holding the parameters. It can
         // see the functions and types declared outside it, but not values.
         let outer_scope_start = std::mem::replace(&mut self.fn_scope_start, self.scopes.len());
         let outer_fn = self.current_fn.replace(FnContext {
             name,
+            full_name: full_name.clone(),
             returns: returns.clone(),
             is_static: matches!(kind, FnKind::Static(_)),
+            locals: vec![],
         });
         self.scopes.push(HashMap::new());
         let outer_impl_type = match &kind {
@@ -1272,37 +1357,74 @@ impl<'a> Checker<'a> {
         // `self` is a keyword, so it can't clash with a parameter. Like any
         // other value, functions nested in the method can't use it.
         if let FnKind::Method(ty) = kind {
-            let binding = Binding::Value {
-                mutability: Mutability::Let,
-                ty,
-            };
-            self.declare("self", binding);
+            self.declare_local("self", Mutability::Let, ty);
         }
         for param in params {
-            let binding = Binding::Value {
-                mutability: Mutability::Let,
-                ty: param.ty,
-            };
-            self.declare(param.name, binding);
+            self.declare_local(param.name, Mutability::Let, param.ty);
         }
-        for stmt in body {
-            self.stmt(stmt);
-        }
+        let param_count = self.current_fn.as_ref().expect("set above").locals.len();
+        let mut lowered: Vec<_> = body.iter().filter_map(|stmt| self.stmt(stmt)).collect();
 
         self.scopes.pop();
-        self.current_fn = outer_fn;
+        let locals = std::mem::replace(&mut self.current_fn, outer_fn)
+            .expect("set above")
+            .locals;
         self.fn_scope_start = outer_scope_start;
         self.impl_type = outer_impl_type;
 
         // A `Void` function can finish without an explicit `return`.
-        if let Some(expected) = returns
-            && expected != self.std_type("Void")
-            && !always_returns(body)
-        {
-            self.error(CheckError::MissingReturn {
-                function: name.to_string(),
-                expected,
+        if !always_returns(body) {
+            match &returns {
+                Some(expected) if *expected != self.std_type("Void") => {
+                    self.error(CheckError::MissingReturn {
+                        function: name.to_string(),
+                        expected: expected.clone(),
+                    });
+                }
+                _ => lowered.push(ir::Stmt::Return(self.void())),
+            }
+        }
+
+        self.lowered_functions[index] = locals
+            .into_iter()
+            .map(|ty| ty.map(|ty| ty.id))
+            .collect::<Option<_>>()
+            .zip(returns)
+            .map(|(locals, returns)| ir::Function {
+                name: full_name,
+                locals,
+                params: param_count,
+                returns: returns.id,
+                body: lowered,
             });
+    }
+
+    /// Declares a value in the current function, returning its index among
+    /// the function's locals.
+    fn declare_local(&mut self, name: &'a str, mutability: Mutability, ty: Option<Type>) -> usize {
+        let locals = &mut self
+            .current_fn
+            .as_mut()
+            .expect("values are only declared inside functions")
+            .locals;
+        locals.push(ty.clone());
+        let local = locals.len() - 1;
+        self.declare(
+            name,
+            Binding::Value {
+                mutability,
+                ty,
+                local,
+            },
+        );
+        local
+    }
+
+    /// Creates a `Void`, which has no fields.
+    fn void(&self) -> ir::Expr {
+        ir::Expr::Construct {
+            group: self.std_type("Void").id,
+            fields: vec![],
         }
     }
 
@@ -1311,6 +1433,7 @@ impl<'a> Checker<'a> {
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
         self.group_modules.push(self.module);
+        self.group_names.push(self.full_name(name));
         let ty = Type {
             id,
             name: name.to_string(),
@@ -1318,7 +1441,12 @@ impl<'a> Checker<'a> {
         // Groups in `stdlib/builtin` are the compiler's own, but only when
         // they're declared at its top level.
         if self.module == self.builtin && self.scopes.is_empty() {
-            self.builtin_types.insert(id);
+            let builtin = match name {
+                "Int" => ir::Builtin::Int,
+                "Bool" => ir::Builtin::Bool,
+                _ => panic!("the compiler doesn't know how to create `builtin::{name}`"),
+            };
+            self.builtin_types.insert(id, builtin);
         }
         self.declare(name, Binding::Type(ty));
         id
@@ -1372,17 +1500,18 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks `stmts` in a new scope, so their declarations aren't visible
-    /// afterwards.
-    fn block(&mut self, stmts: &'a [Stmt]) {
+    /// afterwards, returning what they compile to.
+    fn block(&mut self, stmts: &'a [Stmt]) -> Vec<ir::Stmt> {
         self.scopes.push(HashMap::new());
-        for stmt in stmts {
-            self.stmt(stmt);
-        }
+        let lowered = stmts.iter().filter_map(|stmt| self.stmt(stmt)).collect();
         self.scopes.pop();
+        lowered
     }
 
-    /// Checks a statement inside a function.
-    fn stmt(&mut self, stmt: &'a Stmt) {
+    /// Checks a statement inside a function, returning what it compiles to,
+    /// or `None` if it declares a function or group, which compile
+    /// separately, or if it has an error.
+    fn stmt(&mut self, stmt: &'a Stmt) -> Option<ir::Stmt> {
         match stmt {
             Stmt::Use(_) | Stmt::Impl { .. } => {
                 unreachable!("the parser only allows `use` and `impl` at the top level")
@@ -1393,12 +1522,12 @@ impl<'a> Checker<'a> {
                 ty: type_name,
                 value,
             } => {
-                let ty = self.decl_type(name, type_name.as_ref(), value);
-                let binding = Binding::Value {
-                    mutability: *mutability,
-                    ty,
-                };
-                self.declare(name, binding);
+                let Typed { ty, expr } = self.decl_type(name, type_name.as_ref(), value);
+                let local = self.declare_local(name, *mutability, ty);
+                Some(ir::Stmt::Assign {
+                    local,
+                    value: expr?,
+                })
             }
             Stmt::Assign { name, value } => {
                 let found = self.expr(value);
@@ -1407,7 +1536,14 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Value {
                         mutability: Mutability::Var,
                         ty: expected,
-                    }) => self.check_assignable(name, expected, found),
+                        local,
+                    }) => {
+                        self.check_assignable(name, expected, found.ty);
+                        return Some(ir::Stmt::Assign {
+                            local,
+                            value: found.expr?,
+                        });
+                    }
                     Ok(Binding::Value {
                         mutability: Mutability::Let,
                         ..
@@ -1425,22 +1561,30 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Global(_)) => self.lookup_error(&target, LookupError::Captured),
                     Err(error) => self.lookup_error(&target, error),
                 }
+                None
             }
             Stmt::If {
                 cond,
                 then_block,
                 else_block,
             } => {
-                if let Some(found) = self.expr(cond)
-                    && found != self.std_type("Bool")
+                let cond = self.expr(cond);
+                if let Some(found) = &cond.ty
+                    && *found != self.std_type("Bool")
                 {
-                    self.error(CheckError::ConditionNotBool(found));
+                    self.error(CheckError::ConditionNotBool(found.clone()));
                 }
 
-                self.block(then_block);
-                if let Some(else_block) = else_block {
-                    self.block(else_block);
-                }
+                let then_block = self.block(then_block);
+                let else_block = match else_block {
+                    Some(else_block) => self.block(else_block),
+                    None => vec![],
+                };
+                Some(ir::Stmt::If {
+                    cond: unwrap_builtin(cond.expr?),
+                    then_block,
+                    else_block,
+                })
             }
             // Inside functions, functions and groups are only visible after
             // they're declared.
@@ -1448,11 +1592,13 @@ impl<'a> Checker<'a> {
                 // Declared before the body is checked, so it can call itself.
                 let index = self.declare_fn(&function.name, &function.params, &function.ret);
                 self.fn_body(index, &function.name, &function.body, FnKind::Function);
+                None
             }
             Stmt::Group { name, fields } => {
                 let id = self.declare_group(name);
                 self.define_group(id, name, fields);
                 self.check_not_recursive(id, name);
+                None
             }
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
@@ -1463,66 +1609,85 @@ impl<'a> Checker<'a> {
 
                 // A bare `return` returns `Void`.
                 let function = name.to_string();
-                match (returns, found) {
+                match (returns, found.as_ref().map(|found| &found.ty)) {
                     (Some(expected), None) if expected != self.std_type("Void") => {
                         self.error(CheckError::MissingReturnValue { function, expected });
                     }
-                    (Some(expected), Some(Some(found))) if expected != found => {
+                    (Some(expected), Some(Some(found))) if expected != *found => {
                         self.error(CheckError::ReturnTypeMismatch {
                             function,
                             expected,
-                            found,
+                            found: found.clone(),
                         });
                     }
                     _ => {}
                 }
+                match found {
+                    Some(found) => found.expr.map(ir::Stmt::Return),
+                    None => Some(ir::Stmt::Return(self.void())),
+                }
             }
-            Stmt::Expr(expr) => match expr {
-                // A call's return value can be ignored.
-                Expr::Call { callee, args } => {
-                    self.call(callee, args);
-                }
-                _ => {
-                    self.expr(expr);
-                }
-            },
+            Stmt::Expr(expr) => {
+                let found = match expr {
+                    // A call's return value can be ignored.
+                    Expr::Call { callee, args } => self.call(callee, args),
+                    _ => self.expr(expr),
+                };
+                found.expr.map(ir::Stmt::Expr)
+            }
         }
     }
 
-    /// Returns the type of `expr`, or `None` if it can't be determined
-    /// because of an error that has already been reported.
-    fn expr(&mut self, expr: &Expr) -> Option<Type> {
+    /// Checks `expr`, returning its type, or `None` if it can't be determined
+    /// because of an error that has already been reported, along with what it
+    /// compiles to.
+    fn expr(&mut self, expr: &Expr) -> Typed {
         match expr {
-            Expr::Int(_) => Some(self.std_type("Int")),
-            Expr::Bool(_) => Some(self.std_type("Bool")),
+            Expr::Int(value) => self.literal("Int", ir::Expr::Int(*value)),
+            Expr::Bool(value) => self.literal("Bool", ir::Expr::Bool(*value)),
             Expr::Var(name) => match self.lookup(name) {
-                Ok(Binding::Value { ty, .. }) => ty,
-                Ok(Binding::Global(index)) => self.global_type(index),
+                Ok(Binding::Value { ty, local, .. }) => Typed {
+                    ty,
+                    expr: Some(ir::Expr::Local(local)),
+                },
+                Ok(Binding::Global(index)) => Typed {
+                    ty: self.global_type(index),
+                    expr: Some(ir::Expr::Global(index)),
+                },
                 Ok(Binding::Function(_)) => {
                     self.error(CheckError::NotAValue(name.to_string()));
-                    None
+                    Typed::UNKNOWN
                 }
                 Ok(Binding::Type(_)) => {
                     self.error(CheckError::TypeAsValue(name.to_string()));
-                    None
+                    Typed::UNKNOWN
                 }
                 Err(error) => {
                     self.lookup_error(name, error);
-                    None
+                    Typed::UNKNOWN
                 }
             },
             // Operators always produce their result type, even if an operand
             // is invalid, so one bad operand doesn't cause further errors.
             Expr::Unary(op, operand) => {
                 let ty = self.std_type(unary_type(op));
-                self.operand(op.symbol(), operand, ty.clone());
-                Some(ty)
+                let operand = self.operand(op.symbol(), operand, ty.clone());
+                let expr = operand.map(|operand| {
+                    wrap_builtin(&ty, ir::Expr::Unary(op.clone(), Box::new(operand)))
+                });
+                Typed { ty: Some(ty), expr }
             }
             Expr::Binary(lhs, op, rhs) => {
                 let ty = self.std_type(binary_type(op));
-                self.operand(op.symbol(), lhs, ty.clone());
-                self.operand(op.symbol(), rhs, ty.clone());
-                Some(ty)
+                let lhs = self.operand(op.symbol(), lhs, ty.clone());
+                let rhs = self.operand(op.symbol(), rhs, ty.clone());
+                let expr = lhs.zip(rhs).map(|(lhs, rhs)| {
+                    wrap_builtin(
+                        &ty,
+                        ir::Expr::Binary(Box::new(lhs), op.clone(), Box::new(rhs)),
+                    )
+                });
+                Typed { ty: Some(ty), expr }
             }
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::Construct { ty, fields } => self.construct(ty, fields),
@@ -1535,7 +1700,10 @@ impl<'a> Checker<'a> {
             Expr::SelfValue => {
                 let name = Name::new("self");
                 match self.lookup(&name) {
-                    Ok(Binding::Value { ty, .. }) => ty,
+                    Ok(Binding::Value { ty, local, .. }) => Typed {
+                        ty,
+                        expr: Some(ir::Expr::Local(local)),
+                    },
                     Ok(_) => unreachable!("only methods declare `self`, as a value"),
                     Err(LookupError::Undeclared) => {
                         let in_static = self.current_fn.as_ref().is_some_and(|f| f.is_static);
@@ -1544,14 +1712,24 @@ impl<'a> Checker<'a> {
                         } else {
                             CheckError::SelfOutsideImpl
                         });
-                        None
+                        Typed::UNKNOWN
                     }
                     Err(error) => {
                         self.lookup_error(&name, error);
-                        None
+                        Typed::UNKNOWN
                     }
                 }
             }
+        }
+    }
+
+    /// A literal of the standard library type called `name`, which holds the
+    /// builtin `value`.
+    fn literal(&self, name: &str, value: ir::Expr) -> Typed {
+        let ty = self.std_type(name);
+        Typed {
+            expr: Some(wrap_builtin(&ty, value)),
+            ty: Some(ty),
         }
     }
 
@@ -1578,16 +1756,18 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
-        self.expr(receiver).map(Receiver::Value)
+        let Typed { ty, expr } = self.expr(receiver);
+        Some(Receiver::Value(ty?, expr))
     }
 
     /// Finds the field or method of `ty` called `name`.
     fn member(&self, ty: &Type, name: &str) -> Option<Member> {
-        if let Some(field) = self.group_fields[ty.id]
+        if let Some(index) = self.group_fields[ty.id]
             .iter()
-            .find(|field| field.name == name)
+            .position(|field| field.name == name)
         {
-            return Some(Member::Field(field.ty.clone()));
+            let field_ty = self.group_fields[ty.id][index].ty.clone();
+            return Some(Member::Field(index, field_ty));
         }
         self.methods
             .get(&ty.id)
@@ -1617,7 +1797,7 @@ impl<'a> Checker<'a> {
     /// out a field or method with that name.
     fn no_static_function(&self, ty: Type, name: &str) -> CheckError {
         let kind = match self.member(&ty, name) {
-            Some(Member::Field(_)) => MemberKind::Field,
+            Some(Member::Field(..)) => MemberKind::Field,
             Some(Member::Method(_)) => MemberKind::Method,
             None => {
                 return CheckError::NoStaticFunction {
@@ -1634,11 +1814,22 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks a field access, returning the field's type, or `None` if it
-    /// can't be determined.
-    fn field(&mut self, receiver: &Expr, field: &str) -> Option<Type> {
-        let error = match self.receiver(receiver, field)? {
-            Receiver::Value(ty) => match self.member(&ty, field) {
-                Some(Member::Field(field_ty)) => return field_ty,
+    /// can't be determined, along with what it compiles to.
+    fn field(&mut self, receiver: &Expr, field: &str) -> Typed {
+        let Some(receiver) = self.receiver(receiver, field) else {
+            return Typed::UNKNOWN;
+        };
+        let error = match receiver {
+            Receiver::Value(ty, receiver) => match self.member(&ty, field) {
+                Some(Member::Field(index, field_ty)) => {
+                    return Typed {
+                        ty: field_ty,
+                        expr: receiver.map(|receiver| ir::Expr::Field {
+                            receiver: Box::new(receiver),
+                            index,
+                        }),
+                    };
+                }
                 Some(Member::Method(_)) => CheckError::MemberNotValue {
                     ty,
                     member: field.to_string(),
@@ -1656,37 +1847,41 @@ impl<'a> Checker<'a> {
             },
         };
         self.error(error);
-        None
+        Typed::UNKNOWN
     }
 
     /// Checks a call to a method on a value, or a static function on a type,
-    /// returning its return type, or `None` if it can't be determined.
-    fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Option<Type> {
+    /// returning its return type, or `None` if it can't be determined, along
+    /// with what it compiles to.
+    fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Typed {
         // The receiver and arguments are checked first, so their errors come
         // before the call's.
         let receiver = self.receiver(receiver, method);
-        let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
+        let (found, lowered_args) = split(args.iter().map(|arg| self.expr(&arg.value)).collect());
 
-        let (ty, found_method) = match receiver? {
-            Receiver::Value(ty) => match self.member(&ty, method) {
-                Some(Member::Method(found_method)) => (ty, found_method),
-                Some(Member::Field(_)) => {
+        let Some(receiver) = receiver else {
+            return Typed::UNKNOWN;
+        };
+        let (ty, found_method, lowered_receiver) = match receiver {
+            Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
+                Some(Member::Method(found_method)) => (ty, found_method, Some(lowered_receiver)),
+                Some(Member::Field(..)) => {
                     let field = method.to_string();
                     self.error(CheckError::FieldNotMethod { ty, field });
-                    return None;
+                    return Typed::UNKNOWN;
                 }
                 None => {
                     let error = self.no_member(ty, method);
                     self.error(error);
-                    return None;
+                    return Typed::UNKNOWN;
                 }
             },
             Receiver::Type(ty) => match self.static_function(&ty, method) {
-                Some(found_method) => (ty, found_method),
+                Some(found_method) => (ty, found_method, None),
                 None => {
                     let error = self.no_static_function(ty, method);
                     self.error(error);
-                    return None;
+                    return Typed::UNKNOWN;
                 }
             },
         };
@@ -1703,17 +1898,32 @@ impl<'a> Checker<'a> {
                 member,
                 module: self.modules[found_method.module].display.clone(),
             });
-            return None;
+            return Typed::UNKNOWN;
         }
 
         let signature = self.functions[found_method.function].clone();
-        self.check_args(format!("{ty}.{method}"), args, found, signature)
+        let returns = self.check_args(format!("{ty}.{method}"), args, found, signature);
+
+        // A method's receiver is its first argument.
+        let lowered_args = match lowered_receiver {
+            Some(lowered_receiver) => lowered_receiver
+                .zip(lowered_args)
+                .map(|(receiver, args)| iter::once(receiver).chain(args).collect()),
+            None => lowered_args,
+        };
+        Typed {
+            ty: returns,
+            expr: lowered_args.map(|args| ir::Expr::Call {
+                function: found_method.function,
+                args,
+            }),
+        }
     }
 
     /// Whether `ty` can only be created by the compiler, because it's a type
     /// from `stdlib/builtin`, or holds one directly, as `Int` does.
     fn is_compiler_created(&self, ty: &Type) -> bool {
-        let is_builtin = |ty: &Type| self.builtin_types.contains(&ty.id);
+        let is_builtin = |ty: &Type| self.builtin_types.contains_key(&ty.id);
         is_builtin(ty)
             || self.group_fields[ty.id]
                 .iter()
@@ -1721,15 +1931,21 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks the construction of a group, returning its type, or `None` if
-    /// it can't be determined.
-    fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Option<Type> {
+    /// it can't be determined, along with what it compiles to.
+    fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Typed {
         // Values are checked first, so their errors come before the group's.
-        let found: Vec<_> = values.iter().map(|field| self.expr(&field.value)).collect();
+        let (found, lowered) = split(values.iter().map(|field| self.expr(&field.value)).collect());
 
-        let ty = self.resolve_type(type_name)?;
+        let Some(ty) = self.resolve_type(type_name) else {
+            return Typed::UNKNOWN;
+        };
+        let with_error = |ty| Typed {
+            ty: Some(ty),
+            expr: None,
+        };
         if self.is_compiler_created(&ty) {
             self.error(CheckError::CompilerCreated(ty.clone()));
-            return Some(ty);
+            return with_error(ty);
         }
         // Only the type's own module can construct it, and only in the type's
         // `impl`s. Elsewhere, values come from its functions, such as
@@ -1740,14 +1956,14 @@ impl<'a> Checker<'a> {
                 ty: ty.clone(),
                 module: self.modules[declared_in].display.clone(),
             });
-            return Some(ty);
+            return with_error(ty);
         }
         match &self.impl_type {
             Some(Some(impl_type)) if *impl_type == ty => {}
             Some(None) => {}
             _ => {
                 self.error(CheckError::ConstructedOutsideImpl(ty.clone()));
-                return Some(ty);
+                return with_error(ty);
             }
         }
         let fields = self.group_fields[ty.id].clone();
@@ -1760,7 +1976,7 @@ impl<'a> Checker<'a> {
                 expected: fields.len(),
                 found: values.len(),
             });
-            return Some(ty);
+            return with_error(ty);
         }
 
         for ((value, found), field) in values.iter().zip(found).zip(&fields) {
@@ -1782,28 +1998,40 @@ impl<'a> Checker<'a> {
             }
         }
 
-        Some(ty)
+        Typed {
+            expr: lowered.map(|fields| ir::Expr::Construct {
+                group: ty.id,
+                fields,
+            }),
+            ty: Some(ty),
+        }
     }
 
     /// Checks a call, returning the function's return type, or `None` if it
-    /// can't be determined.
-    fn call(&mut self, callee: &Name, args: &[Arg]) -> Option<Type> {
+    /// can't be determined, along with what it compiles to.
+    fn call(&mut self, callee: &Name, args: &[Arg]) -> Typed {
         // Arguments are checked first, so their errors come before the call's.
-        let found: Vec<_> = args.iter().map(|arg| self.expr(&arg.value)).collect();
+        let (found, lowered) = split(args.iter().map(|arg| self.expr(&arg.value)).collect());
 
         let index = match self.lookup(callee) {
             Ok(Binding::Function(index)) => index,
             Ok(Binding::Value { .. } | Binding::Global(_) | Binding::Type(_)) => {
                 self.error(CheckError::NotAFunction(callee.to_string()));
-                return None;
+                return Typed::UNKNOWN;
             }
             Err(error) => {
                 self.lookup_error(callee, error);
-                return None;
+                return Typed::UNKNOWN;
             }
         };
         let signature = self.functions[index].clone();
-        self.check_args(callee.to_string(), args, found, signature)
+        Typed {
+            ty: self.check_args(callee.to_string(), args, found, signature),
+            expr: lowered.map(|args| ir::Expr::Call {
+                function: index,
+                args,
+            }),
+        }
     }
 
     /// Checks a call's arguments, whose types are `found`, against the
@@ -1860,8 +2088,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn operand(&mut self, op: &'static str, operand: &Expr, expected: Type) {
-        if let Some(found) = self.expr(operand)
+    /// Checks an operand of `op`, returning the builtin value inside it, or
+    /// `None` if it has an error.
+    fn operand(&mut self, op: &'static str, operand: &Expr, expected: Type) -> Option<ir::Expr> {
+        let Typed { ty, expr } = self.expr(operand);
+        if let Some(found) = ty
             && found != expected
         {
             self.error(CheckError::InvalidOperand {
@@ -1870,6 +2101,89 @@ impl<'a> Checker<'a> {
                 found,
             });
         }
+        expr.map(unwrap_builtin)
+    }
+
+    /// The program made of everything that's been checked, which must not have
+    /// any errors.
+    fn program(self) -> ir::Program {
+        const NO_ERRORS: &str = "the program has no errors";
+
+        let main = self.main();
+        let groups = (0..self.group_fields.len())
+            .map(|id| match self.builtin_types.get(&id) {
+                Some(&builtin) => ir::Group::Builtin(builtin),
+                None => ir::Group::Fields {
+                    name: self.group_names[id].clone(),
+                    fields: self.group_fields[id]
+                        .iter()
+                        .map(|field| field.ty.as_ref().expect(NO_ERRORS).id)
+                        .collect(),
+                },
+            })
+            .collect();
+        let globals = self
+            .globals
+            .into_iter()
+            .map(|global| ir::Global {
+                name: format!("{}::{}", self.modules[global.module].display, global.name),
+                ty: match global.state {
+                    GlobalState::Checked(Some(ty)) => ty.id,
+                    _ => panic!("{NO_ERRORS}"),
+                },
+                value: global.lowered.expect(NO_ERRORS),
+            })
+            .collect();
+
+        ir::Program {
+            groups,
+            main,
+            functions: self
+                .lowered_functions
+                .into_iter()
+                .map(|function| function.expect(NO_ERRORS))
+                .collect(),
+            globals,
+            global_order: self.global_order,
+        }
+    }
+
+    /// Calls `fn main() -> Int` from `/main`, giving its result as a builtin
+    /// integer, or `None` if there isn't one.
+    fn main(&self) -> Option<ir::Expr> {
+        let module = self
+            .modules
+            .iter()
+            .find(|module| module.package.is_none() && module.path == ["main"])?;
+        let Some(&Binding::Function(index)) = module.scope.get("main") else {
+            return None;
+        };
+        let signature = &self.functions[index];
+        if !signature.params.is_empty() || signature.returns != Some(self.std_type("Int")) {
+            return None;
+        }
+        Some(unwrap_builtin(ir::Expr::Call {
+            function: index,
+            args: vec![],
+        }))
+    }
+}
+
+/// A value of `ty` from the standard library, such as `Int`, holding the
+/// builtin `value` as its only field.
+fn wrap_builtin(ty: &Type, value: ir::Expr) -> ir::Expr {
+    ir::Expr::Construct {
+        group: ty.id,
+        fields: vec![value],
+    }
+}
+
+/// The builtin value inside `expr`, a value of a type from the standard
+/// library, such as `Int`, that holds it as its only field.
+fn unwrap_builtin(expr: ir::Expr) -> ir::Expr {
+    ir::Expr::Field {
+        receiver: Box::new(expr),
+        index: 0,
     }
 }
 
@@ -1918,17 +2232,22 @@ mod tests {
         checker.std_type(name)
     }
 
-    /// Checks each `(path, src)` pair as a module, with paths like
+    /// Parses each `(path, src)` pair as a module, with paths like
     /// `/dir/other`.
-    fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<ModuleError>> {
-        let modules: Vec<_> = files
+    fn modules(files: &[(&str, &str)]) -> Vec<Module> {
+        files
             .iter()
             .map(|(path, src)| Module {
                 path: path[1..].split('/').map(str::to_string).collect(),
                 program: parse(src).expect("source should parse"),
             })
-            .collect();
-        check(&modules)
+            .collect()
+    }
+
+    /// Checks each `(path, src)` pair as a module, with paths like
+    /// `/dir/other`.
+    fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<ModuleError>> {
+        check(&modules(files)).map(|_| ())
     }
 
     fn file_messages(files: &[(&str, &str)]) -> Vec<String> {
@@ -3418,7 +3737,28 @@ mod tests {
 
     #[test]
     fn checks_the_standard_library_alone() {
-        assert_eq!(check(&[]), Ok(()));
+        assert!(check(&[]).is_ok());
+    }
+
+    /// Whether checking `src` as `path` finds the program's `main`.
+    fn has_main(path: &str, src: &str) -> bool {
+        check(&modules(&[(path, src)]))
+            .expect("source should check")
+            .main
+            .is_some()
+    }
+
+    #[test]
+    fn main_must_return_int_from_the_main_module() {
+        assert!(has_main("/main", "fn main() -> Int { return 0 }"));
+        assert!(!has_main("/main", "fn main() {}"));
+        assert!(!has_main(
+            "/main",
+            "fn main(code: Int) -> Int { return code }"
+        ));
+        assert!(!has_main("/main", "let main = 0"));
+        assert!(!has_main("/other", "fn main() -> Int { return 0 }"));
+        assert!(!has_main("/dir/main", "fn main() -> Int { return 0 }"));
     }
 
     #[test]

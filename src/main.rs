@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
+mod codegen;
+mod ir;
 mod syntax;
 
 use std::{fs, io, path::Path};
 
+use inkwell::context::Context;
 use syntax::Module;
 
 fn main() {
@@ -56,17 +59,30 @@ fn main() {
         return;
     }
 
-    match syntax::check(&modules) {
-        Ok(()) => {
-            for module in &modules {
-                println!("/{}: {:#?}", module.path.join("/"), module.program);
-            }
-        }
+    let program = match syntax::check(&modules) {
+        Ok(program) => program,
         Err(errs) => {
             for err in errs {
                 eprintln!("error in {err}");
             }
+            return;
         }
+    };
+    if program.main.is_none() {
+        eprintln!("error in /main: expected `fn main() -> Int`");
+        return;
+    }
+
+    let context = Context::create();
+    let module = codegen::compile(&context, &program);
+    let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/atom/example");
+    if let Err(err) = fs::create_dir_all(output.parent().expect("has a parent directory")) {
+        eprintln!("error creating {}: {err}", output.display());
+        return;
+    }
+    match codegen::write_executable(&module, &output) {
+        Ok(()) => println!("built {}", output.display()),
+        Err(err) => eprintln!("error: {err}"),
     }
 }
 
