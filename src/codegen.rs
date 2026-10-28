@@ -30,6 +30,7 @@
 use std::{fmt, io, path::Path, process::Command};
 
 use inkwell::{
+    IntPredicate::{EQ, NE},
     OptimizationLevel,
     basic_block::BasicBlock,
     builder::{Builder, BuilderError},
@@ -377,6 +378,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     BinOp::Sub => self.checked("llvm.ssub.with.overflow", lhs, rhs)?,
                     BinOp::Mul => self.checked("llvm.smul.with.overflow", lhs, rhs)?,
                     BinOp::Div => self.divide(lhs, rhs)?,
+                    BinOp::Eq => self.builder.build_int_compare(EQ, lhs, rhs, "")?,
+                    BinOp::Ne => self.builder.build_int_compare(NE, lhs, rhs, "")?,
                     BinOp::And => self.builder.build_and(lhs, rhs, "")?,
                     BinOp::Or => self.builder.build_or(lhs, rhs, "")?,
                 }
@@ -444,8 +447,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         lhs: IntValue<'ctx>,
         rhs: IntValue<'ctx>,
     ) -> Result<IntValue<'ctx>, BuilderError> {
-        use inkwell::IntPredicate::EQ;
-
         let int = self.context.i64_type();
         let by_zero = self
             .builder
@@ -702,18 +703,60 @@ mod tests {
     #[test]
     fn functions_can_recurse() {
         let src = "
-            fn countdown(from n: Int, last: Bool) -> Int {
-                if last {
-                    return n
+            fn factorial(of n: Int) -> Int {
+                if n == 0 {
+                    return 1
                 }
-                return n + countdown(from: n - 1, last: true)
+                return n * factorial(of: n - 1)
             }
 
             fn main() -> Int {
-                return countdown(from: 5, last: false)
+                return factorial(of: 5)
             }
             ";
-        assert_eq!(run(src), 9);
+        assert_eq!(run(src), 120);
+    }
+
+    #[test]
+    fn compares_integers() {
+        let src = "
+            fn bit(of value: Bool) -> Int {
+                if value {
+                    return 1
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(of: 2 + 2 == 4)
+                let b = bit(of: 2 + 2 == 5)
+                let c = bit(of: 0 - 9223372036854775807 - 1 != 9223372036854775807)
+                let d = bit(of: 7 != 7)
+                return a * 1000 + b * 100 + c * 10 + d
+            }
+            ";
+        assert_eq!(run(src), 1010);
+    }
+
+    #[test]
+    fn compares_booleans() {
+        let src = "
+            fn bit(of value: Bool) -> Int {
+                if value {
+                    return 1
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(of: true == true)
+                let b = bit(of: true == false)
+                let c = bit(of: false != true)
+                let d = bit(of: (1 == 2) == false)
+                return a * 1000 + b * 100 + c * 10 + d
+            }
+            ";
+        assert_eq!(run(src), 1011);
     }
 
     #[test]

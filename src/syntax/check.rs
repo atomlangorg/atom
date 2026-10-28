@@ -155,6 +155,8 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
+    /// A comparison's left operand has a type that can't be compared.
+    IncomparableOperand { op: &'static str, found: Type },
     /// A name was given a value of a different type to its declared type,
     /// either in an explicitly typed declaration or a later assignment.
     AssignTypeMismatch {
@@ -359,6 +361,12 @@ impl fmt::Display for CheckError {
                 expected,
                 found,
             } => write!(f, "operator `{op}` expects `{expected}`, found `{found}`"),
+            Self::IncomparableOperand { op, found } => {
+                write!(
+                    f,
+                    "operator `{op}` expects `Int` or `Bool`, found `{found}`"
+                )
+            }
             Self::AssignTypeMismatch {
                 name,
                 expected,
@@ -1677,6 +1685,7 @@ impl<'a> Checker<'a> {
                 });
                 Typed { ty: Some(ty), expr }
             }
+            Expr::Binary(lhs, op @ (BinOp::Eq | BinOp::Ne), rhs) => self.comparison(lhs, op, rhs),
             Expr::Binary(lhs, op, rhs) => {
                 let ty = self.std_type(binary_type(op));
                 let lhs = self.operand(op.symbol(), lhs, ty.clone());
@@ -1721,6 +1730,33 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// Checks a comparison of two `Int`s or two `Bool`s, which produces a
+    /// `Bool`. The right operand must have the same type as the left.
+    fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
+        let Typed { ty, expr: lhs } = self.expr(lhs);
+        let rhs = match ty {
+            Some(ty) if ty == self.std_type("Int") || ty == self.std_type("Bool") => {
+                self.operand(op.symbol(), rhs, ty)
+            }
+            // The right operand is still checked for its own errors, but
+            // there's nothing it could be compared to.
+            Some(found) => {
+                let op = op.symbol();
+                self.error(CheckError::IncomparableOperand { op, found });
+                self.expr(rhs);
+                None
+            }
+            None => self.expr(rhs).expr.map(unwrap_builtin),
+        };
+
+        let ty = self.std_type("Bool");
+        let expr = lhs.zip(rhs).map(|(lhs, rhs)| {
+            let lhs = Box::new(unwrap_builtin(lhs));
+            wrap_builtin(&ty, ir::Expr::Binary(lhs, op.clone(), Box::new(rhs)))
+        });
+        Typed { ty: Some(ty), expr }
     }
 
     /// A literal of the standard library type called `name`, which holds the
@@ -2211,11 +2247,13 @@ fn unary_type(op: &UnOp) -> &'static str {
 }
 
 /// The name of the standard library type of a binary operator's operands,
-/// which is also its result type.
+/// which is also its result type. Comparisons don't have one, since they can
+/// compare more than one type.
 fn binary_type(op: &BinOp) -> &'static str {
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => "Int",
         BinOp::And | BinOp::Or => "Bool",
+        BinOp::Eq | BinOp::Ne => unreachable!("comparisons are checked by `comparison`"),
     }
 }
 
@@ -2392,6 +2430,80 @@ mod tests {
                 "{src:?}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_comparisons_of_integers_and_booleans() {
+        let src = "
+            let a: Bool = 1 == 2
+            let b: Bool = 1 + 2 != 3
+            let c: Bool = true == false
+            let d: Bool = (a != b) == !c
+            ";
+        assert_eq!(check_body(src), Ok(()));
+    }
+
+    #[test]
+    fn comparisons_produce_booleans() {
+        assert_eq!(
+            check_body("let x = (1 == 1) + 1"),
+            Err(vec![invalid_operand("+")])
+        );
+    }
+
+    #[test]
+    fn rejects_comparing_different_types() {
+        // The right operand must have the left operand's type.
+        assert_eq!(
+            check_body("let x = 1 == true"),
+            Err(vec![invalid_operand("==")])
+        );
+        assert_eq!(
+            check_body("let x = false != 0"),
+            Err(vec![CheckError::InvalidOperand {
+                op: "!=",
+                expected: ty("Bool"),
+                found: ty("Int"),
+            }])
+        );
+    }
+
+    #[test]
+    fn rejects_comparing_other_types() {
+        let incomparable = |op| CheckError::IncomparableOperand {
+            op,
+            found: ty("Void"),
+        };
+        assert_eq!(
+            check_body("let x = Void.new() == Void.new()"),
+            Err(vec![incomparable("==")])
+        );
+        assert_eq!(
+            check_body("let x = Void.new() != 1"),
+            Err(vec![incomparable("!=")])
+        );
+        assert_eq!(
+            messages("let x = Void.new() == Void.new()"),
+            vec!["operator `==` expects `Int` or `Bool`, found `Void`"]
+        );
+    }
+
+    #[test]
+    fn comparisons_with_unknown_operands_do_not_cascade() {
+        assert_eq!(
+            check_body("let x = y == 1"),
+            Err(vec![CheckError::Undeclared("y".to_string())])
+        );
+        assert_eq!(
+            check_body("let x = Void.new() == y"),
+            Err(vec![
+                CheckError::IncomparableOperand {
+                    op: "==",
+                    found: ty("Void"),
+                },
+                CheckError::Undeclared("y".to_string()),
+            ])
+        );
     }
 
     #[test]

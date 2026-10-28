@@ -209,8 +209,35 @@ where
             .clone()
             .foldl(sum_op.then(product).repeated(), fold_binary);
 
+        // Comparisons can't be chained, since `a == b == c` would compare the
+        // result of `a == b` with `c`, which is rarely what's meant.
+        let comparison_op = select! {
+            Token::EqEq => BinOp::Eq,
+            Token::BangEq => BinOp::Ne,
+        };
+        let comparison = sum
+            .clone()
+            .then(
+                comparison_op
+                    .then(sum)
+                    .map_with(|rhs, e| (rhs, e.span()))
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .validate(move |(lhs, rest), _, emitter| {
+                if let Some((_, span)) = rest.get(1) {
+                    emitter.emit(Rich::custom(
+                        *span,
+                        "comparisons can't be chained, but can be combined with `&` or `|`",
+                    ));
+                }
+                rest.into_iter().map(|(rhs, _)| rhs).fold(lhs, fold_binary)
+            });
+
         let and_op = just(Token::Amp).to(BinOp::And);
-        let and = sum.clone().foldl(and_op.then(sum).repeated(), fold_binary);
+        let and = comparison
+            .clone()
+            .foldl(and_op.then(comparison).repeated(), fold_binary);
 
         let or_op = just(Token::Pipe).to(BinOp::Or);
         and.clone()
@@ -884,6 +911,48 @@ mod tests {
                 BinOp::And,
                 bin(var("c"), BinOp::Mul, var("d")),
             )
+        );
+    }
+
+    #[test]
+    fn parses_comparisons() {
+        assert_eq!(parse_expr("a == b"), *bin(var("a"), BinOp::Eq, var("b")));
+        assert_eq!(parse_expr("a != b"), *bin(var("a"), BinOp::Ne, var("b")));
+    }
+
+    #[test]
+    fn comparisons_bind_between_arithmetic_and_boolean_operators() {
+        assert_eq!(
+            parse_expr("a + 1 == b & c != d * 2"),
+            *bin(
+                bin(bin(var("a"), BinOp::Add, int(1)), BinOp::Eq, var("b")),
+                BinOp::And,
+                bin(var("c"), BinOp::Ne, bin(var("d"), BinOp::Mul, int(2))),
+            )
+        );
+        assert_eq!(
+            parse_expr("!a == b | c"),
+            *bin(bin(not(var("a")), BinOp::Eq, var("b")), BinOp::Or, var("c"))
+        );
+    }
+
+    #[test]
+    fn rejects_chained_comparisons() {
+        for src in ["x = a == b == c", "x = a != b == c", "x = a == b != c != d"] {
+            let errs = parse_body(src).unwrap_err();
+            assert_eq!(
+                errs[0].to_string(),
+                "comparisons can't be chained, but can be combined with `&` or `|`",
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bracketed_comparisons_can_be_compared() {
+        assert_eq!(
+            parse_expr("(a == b) == c"),
+            *bin(bin(var("a"), BinOp::Eq, var("b")), BinOp::Eq, var("c"))
         );
     }
 

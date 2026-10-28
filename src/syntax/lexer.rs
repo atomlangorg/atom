@@ -118,6 +118,10 @@ pub enum Token<'src> {
     Underscore,
     #[token("=")]
     Eq,
+    #[token("==")]
+    EqEq,
+    #[token("!=")]
+    BangEq,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -238,6 +242,8 @@ impl fmt::Display for Token<'_> {
             Self::Arrow => write!(f, "->"),
             Self::Underscore => write!(f, "_"),
             Self::Eq => write!(f, "="),
+            Self::EqEq => write!(f, "=="),
+            Self::BangEq => write!(f, "!="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
             Self::LBrace => write!(f, "{{"),
@@ -286,6 +292,36 @@ mod tests {
                 Token::Bang,
                 Token::Amp,
                 Token::Pipe,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_comparisons() {
+        assert_eq!(
+            lex("a == b != c"),
+            vec![
+                Token::Ident("a"),
+                Token::EqEq,
+                Token::Ident("b"),
+                Token::BangEq,
+                Token::Ident("c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn comparisons_take_the_longest_match() {
+        assert_eq!(
+            lex("= === !!= ! ="),
+            vec![
+                Token::Eq,
+                Token::EqEq,
+                Token::Eq,
+                Token::Bang,
+                Token::BangEq,
+                Token::Bang,
+                Token::Eq,
             ]
         );
     }

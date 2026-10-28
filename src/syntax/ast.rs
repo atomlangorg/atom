@@ -111,6 +111,10 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `==`, which compares two `Int`s or two `Bool`s.
+    Eq,
+    /// `!=`, the opposite of `==`.
+    Ne,
     And,
     Or,
 }
@@ -122,6 +126,8 @@ impl BinOp {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Div => "/",
+            Self::Eq => "==",
+            Self::Ne => "!=",
             Self::And => "&",
             Self::Or => "|",
         }
