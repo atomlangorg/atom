@@ -39,3 +39,8 @@ impl Void {
         return Void {}
     }
 }
+
+// A value that can never exist, since it has no options to create it from. A
+// function with a `Never` parameter can never be called, and a `match` on a
+// `Never` has no options to match.
+choice Never {}

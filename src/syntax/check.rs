@@ -6571,7 +6571,6 @@ mod tests {
                     }}
                 }}
             }}
-            choice Never {{}}
             fn absurd(_ never: Never) -> Int {{
                 match never {{}}
             }}
@@ -6617,6 +6616,36 @@ mod tests {
             [
                 "`missing` is not declared",
                 "cannot assign `Int` to `x`, which has type `Bool`",
+            ]
+        );
+    }
+
+    #[test]
+    fn never_cannot_be_created() {
+        // It's from the standard library, and a `match` on it needs no
+        // options, since it doesn't have any.
+        let src = "
+            fn absurd(_ never: Never) -> Int {
+                match never {}
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        assert_eq!(
+            messages_top(
+                "
+                let a = Never.anything
+                let b = Never.anything(1)
+                impl Never {
+                    static fn new() -> Never {
+                        return Never {}
+                    }
+                }
+                "
+            ),
+            [
+                "`Never` has no option or static function `anything`",
+                "`Never` has no option or static function `anything`",
+                "`Never` is a choice, so it can only be created from one of its options",
             ]
         );
     }

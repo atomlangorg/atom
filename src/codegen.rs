@@ -1278,8 +1278,6 @@ mod tests {
                 }}
             }}
 
-            choice Never {{}}
-
             fn keep(_ shape: Shape) -> Shape {{
                 return shape
             }}
@@ -1358,8 +1356,6 @@ mod tests {
                     }}
                 }}
             }}
-
-            choice Never {{}}
 
             fn absurd(_ never: Never) -> Int {{
                 match never {{}}
