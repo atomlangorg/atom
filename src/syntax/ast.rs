@@ -251,6 +251,13 @@ pub enum Stmt {
         name: String,
         options: Vec<ChoiceOption>,
     },
+    /// `match value { Type.option(let name) => { ... } ... }`: runs the block
+    /// for the option of `value`, a choice. Every option of the choice must
+    /// be matched exactly once.
+    Match {
+        value: Expr,
+        options: Vec<MatchOption>,
+    },
     /// `return` or `return value`
     Return(Option<Expr>),
     /// An expression on its own line. Only function calls are allowed.
@@ -306,6 +313,19 @@ pub struct ChoiceOption {
     /// The name of the type of the value it holds. `empty` is the same as
     /// `empty: Void`, so this is `Void` when no type is written.
     pub ty: Name,
+}
+
+/// An option matched by a `match`, such as
+/// `Shape.circle(let radius) => { ... }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchOption {
+    /// The name of the choice, which must be the type of the matched value.
+    pub ty: Name,
+    /// The name of the option.
+    pub name: String,
+    /// The name given to the option's value with `(let name)`, if any.
+    pub binding: Option<String>,
+    pub body: Block,
 }
 
 /// A sequence of statements with its own scope, written `{ ... }`.

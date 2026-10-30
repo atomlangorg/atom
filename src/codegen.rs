@@ -47,7 +47,7 @@ use inkwell::{
 };
 
 use crate::{
-    ir::{Builtin, Expr, Program, Stmt, TypeDef},
+    ir::{Builtin, Expr, MatchOption, Program, Stmt, TypeDef},
     syntax::ast::{BinOp, UnOp},
 };
 
@@ -394,6 +394,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
                 self.builder.position_at_end(after);
             }
+            Stmt::Match {
+                value,
+                choice,
+                options,
+            } => {
+                let value = self.expr(value)?;
+                let ty = self.types[*choice].into_struct_type();
+                self.match_(ty, value, options)?;
+            }
             Stmt::Return(value) => {
                 let value = self.expr(value)?;
                 self.builder.build_return(Some(&value))?;
@@ -508,6 +517,55 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let payload = self.builder.build_struct_gep(ty, slot, 1, "")?;
         self.builder.build_store(payload, value)?;
         self.builder.build_load(ty, slot, "")
+    }
+
+    /// Runs the block of the option in `options` that `value`, a choice of
+    /// type `ty`, is, by switching on its tag. A choice's payload can only be read as
+    /// one of its options' values through memory, like it's written.
+    fn match_(
+        &mut self,
+        ty: StructType<'ctx>,
+        value: BasicValueEnum<'ctx>,
+        options: &[MatchOption],
+    ) -> Result<(), BuilderError> {
+        let slot = self.entry_alloca(ty)?;
+        self.builder.build_store(slot, value)?;
+        let tag_slot = self.builder.build_struct_gep(ty, slot, 0, "")?;
+        let tag = self
+            .builder
+            .build_load(self.tag_type(), tag_slot, "")?
+            .into_int_value();
+        let payload = self.builder.build_struct_gep(ty, slot, 1, "")?;
+
+        let function = self.current_function();
+        let starts: Vec<_> = options
+            .iter()
+            .map(|option| {
+                let tag = self.tag_type().const_int(option.index as u64, false);
+                (tag, self.context.append_basic_block(function, "option"))
+            })
+            .collect();
+        // Every option is matched, so no other tag can be found.
+        let unmatched = self.context.append_basic_block(function, "unmatched");
+        let after = self.context.append_basic_block(function, "after");
+        self.builder.build_switch(tag, unmatched, &starts)?;
+        self.builder.position_at_end(unmatched);
+        self.builder.build_unreachable()?;
+
+        for (option, &(_, start)) in options.iter().zip(&starts) {
+            self.builder.position_at_end(start);
+            if let Some(binding) = option.binding {
+                let (local, local_ty) = self.locals[binding];
+                let value = self.builder.build_load(local_ty, payload, "")?;
+                self.builder.build_store(local, value)?;
+            }
+            self.block(&option.body)?;
+            if !self.is_terminated() {
+                self.builder.build_unconditional_branch(after)?;
+            }
+        }
+        self.builder.position_at_end(after);
+        Ok(())
     }
 
     /// Allocates space for a `ty` at the start of the function being built,
@@ -1241,5 +1299,129 @@ mod tests {
             "
         );
         assert_eq!(run(&src), 44);
+    }
+
+    #[test]
+    fn match_runs_the_block_for_the_option() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn describe(_ shape: Shape) -> Int {{
+                var result = 0
+                match shape {{
+                    Shape.circle(let radius) => {{
+                        result = radius * 10
+                    }}
+                    Shape.empty => {{
+                        result = 1
+                    }}
+                    Shape.flag(let flag) => {{
+                        if flag {{
+                            result = 2
+                        }} else {{
+                            result = 3
+                        }}
+                    }}
+                }}
+                return result
+            }}
+
+            fn main() -> Int {{
+                let a = describe(Shape.circle(5))
+                let b = describe(Shape.empty)
+                let c = describe(Shape.flag(true))
+                let d = describe(Shape.flag(false))
+                return a * 1000 + b * 100 + c * 10 + d
+            }}
+            "
+        );
+        assert_eq!(run(&src), 50123);
+    }
+
+    #[test]
+    fn match_options_can_return() {
+        let src = format!(
+            "
+            {SHAPE}
+            impl Shape {{
+                fn size() -> Int {{
+                    match self {{
+                        Shape.circle(let radius) => {{
+                            return radius
+                        }}
+                        Shape.empty => {{
+                            return 0
+                        }}
+                        Shape.flag => {{
+                            return 1
+                        }}
+                    }}
+                }}
+            }}
+
+            choice Never {{}}
+
+            fn absurd(_ never: Never) -> Int {{
+                match never {{}}
+            }}
+
+            fn main() -> Int {{
+                return Shape.circle(7).size() * 10 + Shape.flag(true).size()
+            }}
+            "
+        );
+        assert_eq!(run(&src), 71);
+    }
+
+    #[test]
+    fn match_reads_values_of_any_type() {
+        let src = format!(
+            "
+            {SHAPE}
+            group Point {{
+                let x: Int
+                let y: Int
+            }}
+
+            impl Point {{
+                static fn at(x: Int, y: Int) -> Point {{
+                    return Point {{ x: x, y: y }}
+                }}
+            }}
+
+            choice Drawing {{
+                shape: Shape
+                point: Point
+            }}
+
+            fn total(of drawing: Drawing) -> Int {{
+                match drawing {{
+                    Drawing.shape(let shape) => {{
+                        match shape {{
+                            Shape.circle(let radius) => {{
+                                return radius
+                            }}
+                            Shape.empty => {{
+                                return 0
+                            }}
+                            Shape.flag => {{
+                                return 0
+                            }}
+                        }}
+                    }}
+                    Drawing.point(let point) => {{
+                        return point.x + point.y
+                    }}
+                }}
+            }}
+
+            fn main() -> Int {{
+                let circle = total(of: Drawing.shape(Shape.circle(4)))
+                let point = total(of: Drawing.point(Point.at(x: 20, y: 30)))
+                return circle + point
+            }}
+            "
+        );
+        assert_eq!(run(&src), 54);
     }
 }

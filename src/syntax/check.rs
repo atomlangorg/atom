@@ -47,7 +47,7 @@ use std::{
 use super::{
     ast::{
         Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
-        ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
+        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
     },
     parser::parse,
 };
@@ -241,6 +241,16 @@ pub enum CheckError {
     },
     /// A choice was constructed like a group, rather than from an option.
     ConstructedChoice(Type),
+    /// A `match` was used on a value that isn't a choice.
+    MatchNotChoice(Type),
+    /// A `match` names an option of a different type to the matched value's.
+    WrongPatternType { expected: Type, found: Type },
+    /// A `match` names an option that the choice doesn't have.
+    UnknownOption { ty: Type, option: String },
+    /// A `match` matches an option more than once, such as `Shape.circle`.
+    DuplicateOption(String),
+    /// A `match` doesn't match some options, such as `Shape.circle`.
+    MissingOptions(Vec<String>),
     /// A field was called like a method.
     FieldNotMethod { ty: Type, field: String },
     /// A method or static function was used without calling it.
@@ -490,6 +500,25 @@ impl fmt::Display for CheckError {
             }
             Self::NoOption { ty, option } => {
                 write!(f, "`{ty}` has no option or static function `{option}`")
+            }
+            Self::MatchNotChoice(ty) => write!(f, "`match` needs a choice, found `{ty}`"),
+            Self::WrongPatternType { expected, found } => write!(
+                f,
+                "`match` is on `{expected}`, so it can't match an option of `{found}`"
+            ),
+            Self::UnknownOption { ty, option } => {
+                write!(f, "`{ty}` has no option `{option}`")
+            }
+            Self::DuplicateOption(option) => {
+                write!(f, "`{option}` is matched more than once")
+            }
+            Self::MissingOptions(options) => {
+                let s = if options.len() == 1 { "" } else { "s" };
+                write!(
+                    f,
+                    "`match` is missing the option{s} {}",
+                    quoted_list(options, "and")
+                )
             }
             Self::OptionNeedsValue {
                 ty,
@@ -1716,6 +1745,7 @@ impl<'a> Checker<'a> {
                 self.check_not_recursive(id, name);
                 None
             }
+            Stmt::Match { value, options } => self.match_(value, options),
             Stmt::Return(value) => {
                 let found = value.as_ref().map(|value| self.expr(value));
                 let FnContext { name, returns, .. } = self
@@ -1752,6 +1782,97 @@ impl<'a> Checker<'a> {
                 found.expr.map(ir::Stmt::Expr)
             }
         }
+    }
+
+    /// Checks a `match` on `value`, which must be a choice whose every option
+    /// is matched exactly once by `options`, returning what it compiles to.
+    fn match_(&mut self, value: &Expr, options: &'a [MatchOption]) -> Option<ir::Stmt> {
+        let Typed { ty, expr } = self.expr(value);
+        let choice = match ty {
+            Some(ty) if self.choice_options.contains_key(&ty.id) => Some(ty),
+            Some(found) => {
+                self.error(CheckError::MatchNotChoice(found));
+                None
+            }
+            None => None,
+        };
+
+        let mut matched = HashSet::new();
+        let mut lowered = vec![];
+        for option in options {
+            // Options are still checked when the choice is unknown, so the
+            // errors in their blocks are found.
+            let found = choice
+                .as_ref()
+                .and_then(|choice| self.matched_option(choice, option, &mut matched));
+
+            // The binding is only visible in its option's block.
+            self.scopes.push(HashMap::new());
+            let binding = option.binding.as_ref().map(|name| {
+                let ty = found.as_ref().and_then(|(_, ty)| ty.clone());
+                self.declare_local(name, Mutability::Let, ty)
+            });
+            let body = option
+                .body
+                .iter()
+                .filter_map(|stmt| self.stmt(stmt))
+                .collect();
+            self.scopes.pop();
+
+            if let Some((index, _)) = found {
+                lowered.push(ir::MatchOption {
+                    index,
+                    binding,
+                    body,
+                });
+            }
+        }
+
+        let choice = choice?;
+        let missing: Vec<_> = self.choice_options[&choice.id]
+            .iter()
+            .filter(|option| !matched.contains(option.name))
+            .map(|option| format!("{choice}.{}", option.name))
+            .collect();
+        if !missing.is_empty() {
+            self.error(CheckError::MissingOptions(missing));
+        }
+
+        Some(ir::Stmt::Match {
+            value: expr?,
+            choice: choice.id,
+            options: lowered,
+        })
+    }
+
+    /// Finds the option of `choice` that `option` from a `match` names,
+    /// returning its index and the type of its value, as `Checker::option`
+    /// does, or `None` if it has an error. `matched` holds the names of the
+    /// options matched before it.
+    fn matched_option(
+        &mut self,
+        choice: &Type,
+        option: &'a MatchOption,
+        matched: &mut HashSet<&'a str>,
+    ) -> Option<(usize, Option<Type>)> {
+        let ty = self.resolve_type(&option.ty)?;
+        if ty != *choice {
+            self.error(CheckError::WrongPatternType {
+                expected: choice.clone(),
+                found: ty,
+            });
+            return None;
+        }
+        let Some(found) = self.option(&ty, &option.name) else {
+            let option = option.name.clone();
+            self.error(CheckError::UnknownOption { ty, option });
+            return None;
+        };
+        if !matched.insert(&option.name) {
+            self.error(CheckError::DuplicateOption(format!("{ty}.{}", option.name)));
+            return None;
+        }
+        Some(found)
     }
 
     /// Checks `expr`, returning its type, or `None` if it can't be determined
@@ -2432,10 +2553,12 @@ fn unwrap_builtin(expr: ir::Expr) -> ir::Expr {
 }
 
 /// Whether `stmts` returns on every path. Both branches of an `if` must return
-/// for it to count, so an `if` without an `else` never does.
+/// for it to count, so an `if` without an `else` never does. Every option of
+/// a `match` must return, which is enough since every option is matched.
 fn always_returns(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|stmt| match stmt {
         Stmt::Return(_) => true,
+        Stmt::Match { options, .. } => options.iter().all(|option| always_returns(&option.body)),
         Stmt::If {
             then_block,
             else_block: Some(else_block),
@@ -6281,6 +6404,220 @@ mod tests {
                 "
             )),
             ["operator `==` expects `Int` or `Bool`, found `Shape`"]
+        );
+    }
+
+    #[test]
+    fn accepts_match() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn area(of shape: Shape) -> Int {{
+                var area = 0
+                match shape {{
+                    Shape.circle(let radius) => {{
+                        area = radius * radius * 3
+                    }}
+                    // The value doesn't have to be given a name.
+                    Shape.empty => {{}}
+                    Shape.nothing(let nothing) => {{
+                        let void: Void = nothing
+                    }}
+                }}
+                return area
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn match_bindings_have_their_options_types() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f(shape: Shape) {{
+                    match shape {{
+                        Shape.circle(let value) => {{
+                            let wrong: Bool = value
+                        }}
+                        Shape.empty(let value) => {{
+                            let wrong: Int = value
+                        }}
+                        Shape.nothing => {{}}
+                    }}
+                }}
+                "
+            )),
+            [
+                "cannot assign `Int` to `wrong`, which has type `Bool`",
+                "cannot assign `Void` to `wrong`, which has type `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn match_bindings_are_constants_in_their_own_option() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f(shape: Shape, taken: Int) {{
+                    match shape {{
+                        Shape.circle(let radius) => {{
+                            radius = 1
+                        }}
+                        Shape.empty(let taken) => {{}}
+                        Shape.nothing => {{
+                            let x = radius
+                        }}
+                    }}
+                    let y = radius
+                }}
+                "
+            )),
+            [
+                "cannot assign to `radius` because it was declared with `let`",
+                "`taken` is already declared",
+                "`radius` is not declared",
+                "`radius` is not declared",
+            ]
+        );
+    }
+
+    #[test]
+    fn match_needs_a_choice() {
+        assert_eq!(
+            check_body("match 1 {}"),
+            Err(vec![CheckError::MatchNotChoice(ty("Int"))])
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_options_in_match() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                choice Other {{
+                    circle: Int
+                }}
+                fn f(shape: Shape) {{
+                    match shape {{
+                        Other.circle => {{}}
+                        Shape.square => {{}}
+                        Missing.circle => {{}}
+                        Shape.circle => {{}}
+                        Shape.circle(let radius) => {{}}
+                        Shape.empty => {{}}
+                        Shape.nothing => {{}}
+                    }}
+                }}
+                "
+            )),
+            [
+                "`match` is on `Shape`, so it can't match an option of `Other`",
+                "`Shape` has no option `square`",
+                "unknown type `Missing`",
+                "`Shape.circle` is matched more than once",
+            ]
+        );
+    }
+
+    #[test]
+    fn match_needs_every_option() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f(shape: Shape) {{
+                    match shape {{
+                        Shape.empty => {{}}
+                    }}
+                    match shape {{
+                        Shape.empty => {{}}
+                        Shape.circle => {{}}
+                    }}
+                }}
+                "
+            )),
+            [
+                "`match` is missing the options `Shape.circle` and `Shape.nothing`",
+                "`match` is missing the option `Shape.nothing`",
+            ]
+        );
+    }
+
+    #[test]
+    fn match_returns_if_every_option_does() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn f(shape: Shape) -> Int {{
+                match shape {{
+                    Shape.circle(let radius) => {{
+                        return radius
+                    }}
+                    Shape.empty => {{
+                        if true {{
+                            return 1
+                        }} else {{
+                            return 2
+                        }}
+                    }}
+                    Shape.nothing => {{
+                        return 3
+                    }}
+                }}
+            }}
+            choice Never {{}}
+            fn absurd(_ never: Never) -> Int {{
+                match never {{}}
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f(shape: Shape) -> Int {{
+                    match shape {{
+                        Shape.circle(let radius) => {{
+                            return radius
+                        }}
+                        Shape.empty => {{}}
+                        Shape.nothing => {{
+                            return 3
+                        }}
+                    }}
+                }}
+                "
+            )),
+            ["`f` must return a value of type `Int` on every path"]
+        );
+    }
+
+    #[test]
+    fn match_options_are_checked_when_the_value_has_an_error() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f() {{
+                    match missing {{
+                        Shape.circle(let radius) => {{
+                            let x: Bool = 1
+                        }}
+                    }}
+                }}
+                "
+            )),
+            [
+                "`missing` is not declared",
+                "cannot assign `Int` to `x`, which has type `Bool`",
+            ]
         );
     }
 }

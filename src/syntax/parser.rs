@@ -25,7 +25,7 @@ use chumsky::{
 use super::{
     ast::{
         Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
-        ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
+        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
     },
     lexer::{self, Token},
 };
@@ -317,9 +317,9 @@ where
             .boxed(),
     )));
 
-    // An `if` condition can't construct a group outside of parentheses or
-    // arguments, since in `if done { ... }`, the `{` starts the `if`'s block
-    // rather than constructing `done`.
+    // An `if` condition, or the value of a `match`, can't construct a group
+    // outside of parentheses or arguments, since in `if done { ... }`, the
+    // `{` starts the `if`'s block rather than constructing `done`.
     let condition = operators(with_members(
         literal
             .or(self_value)
@@ -445,6 +445,44 @@ where
                 })
         });
 
+        // `Type.option` or `Type.option(let name)`, then the option's block,
+        // with the `{` on the same line.
+        let match_option = type_name
+            .clone()
+            .then_ignore(just(Token::Dot))
+            .then(ident)
+            .then(
+                just(Token::Let)
+                    .ignore_then(ident)
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not(),
+            )
+            .then_ignore(just(Token::FatArrow))
+            .then(block.clone())
+            .map(|(((ty, name), binding), body)| MatchOption {
+                ty,
+                name,
+                binding,
+                body,
+            });
+
+        // Like a block, one option per line with blank lines allowed, and the
+        // `{` on the same line as `match`.
+        let match_ = just(Token::Match)
+            .ignore_then(condition.clone())
+            .then(
+                newlines
+                    .clone()
+                    .ignore_then(
+                        match_option
+                            .separated_by(newlines.clone().at_least(1))
+                            .allow_trailing()
+                            .collect(),
+                    )
+                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+            )
+            .map(|(value, options)| Stmt::Match { value, options });
+
         // `label name: Type`, `_ name: Type`, or `name: Type`, where the name
         // is also the label.
         let param = just(Token::Underscore)
@@ -493,6 +531,7 @@ where
             decl.clone()
                 .or(assign)
                 .or(if_)
+                .or(match_)
                 .or(function.clone().map(Stmt::Fn))
                 .or(group_)
                 .or(choice_)
@@ -1740,6 +1779,152 @@ mod tests {
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
+    }
+
+    fn match_option(ty: &str, name: &str, binding: Option<&str>, body: Vec<Stmt>) -> MatchOption {
+        MatchOption {
+            ty: Name::new(ty),
+            name: name.to_string(),
+            binding: binding.map(str::to_string),
+            body,
+        }
+    }
+
+    #[test]
+    fn parses_match() {
+        assert_eq!(
+            parse_body(
+                "
+                match shape {
+                    Shape.circle(let radius) => {
+                        draw(radius)
+                    }
+                    Shape.empty => {}
+                }
+                "
+            ),
+            Ok(vec![Stmt::Match {
+                value: *var("shape"),
+                options: vec![
+                    match_option(
+                        "Shape",
+                        "circle",
+                        Some("radius"),
+                        vec![Stmt::Expr(*call("draw", vec![arg(None, *var("radius"))]))],
+                    ),
+                    match_option("Shape", "empty", None, vec![]),
+                ],
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_match_layouts() {
+        assert_eq!(
+            parse_body("match s {}"),
+            Ok(vec![Stmt::Match {
+                value: *var("s"),
+                options: vec![],
+            }])
+        );
+        assert_eq!(
+            parse_body("match s { A.a => {} }"),
+            Ok(vec![Stmt::Match {
+                value: *var("s"),
+                options: vec![match_option("A", "a", None, vec![])],
+            }])
+        );
+        assert_eq!(
+            parse_body(
+                "
+                match s.shape() { // A comment.
+
+                    // Another comment.
+                    other::Shape.circle( let r ) => { return r }
+
+                    Shape.empty => {
+                    }
+                }
+                "
+            ),
+            Ok(vec![Stmt::Match {
+                value: method_call(*var("s"), "shape", vec![]),
+                options: vec![
+                    MatchOption {
+                        ty: qualified(ModulePath::Named("other".to_string()), "Shape"),
+                        name: "circle".to_string(),
+                        binding: Some("r".to_string()),
+                        body: vec![Stmt::Return(Some(*var("r")))],
+                    },
+                    match_option("Shape", "empty", None, vec![]),
+                ],
+            }])
+        );
+    }
+
+    #[test]
+    fn match_values_need_parentheses_to_construct() {
+        // The `{` starts the options, not a constructor.
+        assert_eq!(
+            parse_body("match s {}"),
+            Ok(vec![Stmt::Match {
+                value: *var("s"),
+                options: vec![],
+            }])
+        );
+        assert_eq!(
+            parse_body("match (S {}) {}"),
+            Ok(vec![Stmt::Match {
+                value: construct(Name::new("S"), vec![]),
+                options: vec![],
+            }])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_matches() {
+        for src in [
+            // Missing parts.
+            "match {}",
+            "match s",
+            "match s {",
+            "match s { Shape.a }",
+            "match s { Shape.a => }",
+            "match s { Shape.a {} }",
+            "match s { Shape => {} }",
+            "match s { .a => {} }",
+            "match s { => {} }",
+            // Only `let` bindings of a name are allowed.
+            "match s { Shape.a(r) => {} }",
+            "match s { Shape.a(var r) => {} }",
+            "match s { Shape.a(let) => {} }",
+            "match s { Shape.a() => {} }",
+            "match s { Shape.a(let r, let t) => {} }",
+            // Options need blocks.
+            "match s { Shape.a => f() }",
+            // Separators.
+            "match s { Shape.a => {} Shape.b => {} }",
+            "match s { Shape.a => {}, Shape.b => {} }",
+            // `{` must be on the same line.
+            "match s\n{}",
+            "match s { Shape.a =>\n{} }",
+            // Statements after `}` need their own line.
+            "match s {} x = 1",
+            // Keywords.
+            "let match = 1",
+            "match s { Shape.match => {} }",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_match_at_the_top_level() {
+        let errs = parse("match s {}").unwrap_err();
+        assert_eq!(
+            errs[0].to_string(),
+            "only declarations can be used at the top level"
+        );
     }
 
     #[test]

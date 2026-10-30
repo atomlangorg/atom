@@ -98,8 +98,24 @@ pub enum Stmt {
         then_block: Vec<Stmt>,
         else_block: Vec<Stmt>,
     },
+    /// Runs the block for the option of `value`, a choice, as an index into
+    /// `Program::types`. Every option of the choice is matched exactly once.
+    Match {
+        value: Expr,
+        choice: usize,
+        options: Vec<MatchOption>,
+    },
     Return(Expr),
     Expr(Expr),
+}
+
+#[derive(Debug)]
+pub struct MatchOption {
+    /// The option's index, in the order they're declared.
+    pub index: usize,
+    /// The local the option's value is stored in, if it's given a name.
+    pub binding: Option<usize>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug)]

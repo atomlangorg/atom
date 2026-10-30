@@ -77,6 +77,8 @@ pub enum Token<'src> {
     Group,
     #[token("choice")]
     Choice,
+    #[token("match")]
+    Match,
     #[token("use")]
     Use,
     #[token("impl")]
@@ -115,6 +117,9 @@ pub enum Token<'src> {
     Dot,
     #[token("->")]
     Arrow,
+    /// Separates an option in a `match` from its block.
+    #[token("=>")]
+    FatArrow,
     /// Marks a parameter as having no label. Not a valid identifier.
     #[token("_", priority = 3)]
     Underscore,
@@ -226,6 +231,7 @@ impl fmt::Display for Token<'_> {
             Self::Return => write!(f, "return"),
             Self::Group => write!(f, "group"),
             Self::Choice => write!(f, "choice"),
+            Self::Match => write!(f, "match"),
             Self::Use => write!(f, "use"),
             Self::Impl => write!(f, "impl"),
             Self::Static => write!(f, "static"),
@@ -243,6 +249,7 @@ impl fmt::Display for Token<'_> {
             Self::Comma => write!(f, ","),
             Self::Dot => write!(f, "."),
             Self::Arrow => write!(f, "->"),
+            Self::FatArrow => write!(f, "=>"),
             Self::Underscore => write!(f, "_"),
             Self::Eq => write!(f, "="),
             Self::EqEq => write!(f, "=="),
@@ -427,6 +434,32 @@ mod tests {
                 Token::Ident("Int"),
                 Token::RBrace,
                 Token::Ident("choices"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_match() {
+        assert_eq!(
+            lex("match s { Shape.circle(let r) => {} } matches =>="),
+            vec![
+                Token::Match,
+                Token::Ident("s"),
+                Token::LBrace,
+                Token::Ident("Shape"),
+                Token::Dot,
+                Token::Ident("circle"),
+                Token::LParen,
+                Token::Let,
+                Token::Ident("r"),
+                Token::RParen,
+                Token::FatArrow,
+                Token::LBrace,
+                Token::RBrace,
+                Token::RBrace,
+                Token::Ident("matches"),
+                Token::FatArrow,
+                Token::Eq,
             ]
         );
     }
