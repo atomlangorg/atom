@@ -26,7 +26,7 @@ use crate::syntax::ast::{BinOp, UnOp};
 #[derive(Debug)]
 pub struct Program {
     /// Every type, indexed by its `id`.
-    pub groups: Vec<Group>,
+    pub types: Vec<TypeDef>,
     /// Every function, including methods, static functions and functions
     /// nested in other functions.
     pub functions: Vec<Function>,
@@ -41,12 +41,15 @@ pub struct Program {
 }
 
 #[derive(Debug)]
-pub enum Group {
+pub enum TypeDef {
     /// A type from `stdlib/builtin`, which the compiler represents itself.
     Builtin(Builtin),
-    /// A group made of its fields' types, as indexes into `Program::groups`,
+    /// A group made of its fields' types, as indexes into `Program::types`,
     /// in the order they're declared.
-    Fields { name: String, fields: Vec<usize> },
+    Group { name: String, fields: Vec<usize> },
+    /// A choice, with the types of the values its options hold, as indexes
+    /// into `Program::types`, in the order they're declared.
+    Choice { name: String, options: Vec<usize> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +64,12 @@ pub struct Function {
     /// Its full name, such as `/main::f`, `/main::f::nested`, or
     /// `/main::Int.doubled` for a method from an `impl Int` in `/main`.
     pub name: String,
-    /// The types of its local values, as indexes into `Program::groups`. A
+    /// The types of its local values, as indexes into `Program::types`. A
     /// method's `self` comes first, then the parameters in order.
     pub locals: Vec<usize>,
     /// How many of the first `locals` are given by the caller.
     pub params: usize,
-    /// The return type, as an index into `Program::groups`.
+    /// The return type, as an index into `Program::types`.
     pub returns: usize,
     /// Every path through the body ends with a `return`.
     pub body: Vec<Stmt>,
@@ -76,7 +79,7 @@ pub struct Function {
 pub struct Global {
     /// Its full name, such as `/main::x`.
     pub name: String,
-    /// Its type, as an index into `Program::groups`.
+    /// Its type, as an index into `Program::types`.
     pub ty: usize,
     pub value: Expr,
 }
@@ -118,11 +121,18 @@ pub enum Expr {
         function: usize,
         args: Vec<Expr>,
     },
-    /// Creates a group, as an index into `Program::groups`, from its fields'
+    /// Creates a group, as an index into `Program::types`, from its fields'
     /// values in the order they're declared.
     Construct {
         group: usize,
         fields: Vec<Expr>,
+    },
+    /// Creates a choice, as an index into `Program::types`, as the option at
+    /// `option` in the order they're declared, holding `value`.
+    Choose {
+        choice: usize,
+        option: usize,
+        value: Box<Expr>,
     },
     /// Reads the field at `index` in the order its group declares them.
     Field {

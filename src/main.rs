@@ -73,14 +73,21 @@ fn main() {
         return;
     }
 
+    let machine = match codegen::host_machine() {
+        Ok(machine) => machine,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return;
+        }
+    };
     let context = Context::create();
-    let module = codegen::compile(&context, &program);
+    let module = codegen::compile(&context, &program, &machine);
     let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/atom/example");
     if let Err(err) = fs::create_dir_all(output.parent().expect("has a parent directory")) {
         eprintln!("error creating {}: {err}", output.display());
         return;
     }
-    match codegen::write_executable(&module, &output) {
+    match codegen::write_executable(&module, &machine, &output) {
         Ok(()) => println!("built {}", output.display()),
         Err(err) => eprintln!("error: {err}"),
     }

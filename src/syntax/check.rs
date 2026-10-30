@@ -46,8 +46,8 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, Import, ModulePath,
-        Mutability, Name, Param, Program, Stmt, UnOp,
+        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
+        ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
     },
     parser::parse,
 };
@@ -79,8 +79,8 @@ pub struct Module {
     pub program: Program,
 }
 
-/// Every type is a group, including `Int`, `Bool` and `Void`, which are
-/// declared in the standard library. Groups in different scopes can share a
+/// Every type is a group or a choice. `Int`, `Bool` and `Void` are groups
+/// declared in the standard library. Types in different scopes can share a
 /// name, so they're told apart by `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
@@ -142,9 +142,9 @@ pub enum CheckError {
     AmbiguousModule { name: String, modules: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
-    /// A group contains itself, directly or through other groups, so it
-    /// would be infinitely large.
-    RecursiveGroup(String),
+    /// A group or choice contains itself, directly or through other types,
+    /// so it would be infinitely large.
+    RecursiveType(String),
     /// A name was declared twice.
     Redeclared(String),
     /// A `let` constant was assigned to.
@@ -231,6 +231,16 @@ pub enum CheckError {
     NoMember { ty: Type, member: String },
     /// A static function was used that the type doesn't have.
     NoStaticFunction { ty: Type, function: String },
+    /// An option or static function was used that the choice doesn't have.
+    NoOption { ty: Type, option: String },
+    /// An option holding a value other than `Void` was used without one.
+    OptionNeedsValue {
+        ty: Type,
+        option: String,
+        expected: Type,
+    },
+    /// A choice was constructed like a group, rather than from an option.
+    ConstructedChoice(Type),
     /// A field was called like a method.
     FieldNotMethod { ty: Type, field: String },
     /// A method or static function was used without calling it.
@@ -239,8 +249,13 @@ pub enum CheckError {
         member: String,
         kind: MemberKind,
     },
-    /// A static function was used on a value, rather than its type.
-    StaticOnValue { ty: Type, function: String },
+    /// A static function or option was used on a value, rather than its
+    /// type.
+    NeedsType {
+        ty: Type,
+        member: String,
+        kind: MemberKind,
+    },
     /// A field or method was used on a type, rather than a value of it.
     NeedsValue {
         ty: Type,
@@ -256,8 +271,9 @@ pub enum CheckError {
         member: String,
         module: String,
     },
-    /// A field or method was declared with the same name as another field or
-    /// method of its type, which share names.
+    /// A member was declared with the same name as another member of its
+    /// type that it shares names with. Fields share names with methods, and
+    /// options share names with static functions.
     MemberRedeclared {
         ty: Type,
         member: String,
@@ -269,12 +285,24 @@ pub enum CheckError {
     SelfInStatic,
 }
 
-/// Whether a member of a type is a field or a method.
+/// What kind of member of a type something is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberKind {
     Field,
     Method,
     StaticFunction,
+    /// An option of a choice.
+    Option,
+}
+
+impl MemberKind {
+    /// The kind with "a" or "an" before it, such as "an option".
+    fn with_article(self) -> String {
+        match self {
+            Self::Option => format!("an {self}"),
+            _ => format!("a {self}"),
+        }
+    }
 }
 
 impl fmt::Display for MemberKind {
@@ -283,6 +311,7 @@ impl fmt::Display for MemberKind {
             Self::Field => write!(f, "field"),
             Self::Method => write!(f, "method"),
             Self::StaticFunction => write!(f, "static function"),
+            Self::Option => write!(f, "option"),
         }
     }
 }
@@ -348,7 +377,7 @@ impl fmt::Display for CheckError {
                 quoted_list(modules, "or")
             ),
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
-            Self::RecursiveGroup(name) => write!(f, "`{name}` contains itself"),
+            Self::RecursiveType(name) => write!(f, "`{name}` contains itself"),
             Self::Redeclared(name) => write!(f, "`{name}` is already declared"),
             Self::AssignToConstant(name) => {
                 write!(
@@ -459,6 +488,21 @@ impl fmt::Display for CheckError {
             Self::NoStaticFunction { ty, function } => {
                 write!(f, "`{ty}` has no static function `{function}`")
             }
+            Self::NoOption { ty, option } => {
+                write!(f, "`{ty}` has no option or static function `{option}`")
+            }
+            Self::OptionNeedsValue {
+                ty,
+                option,
+                expected,
+            } => write!(
+                f,
+                "`{ty}.{option}` holds a value of type `{expected}`, so it must be given one, as in `{ty}.{option}(value)`"
+            ),
+            Self::ConstructedChoice(ty) => write!(
+                f,
+                "`{ty}` is a choice, so it can only be created from one of its options"
+            ),
             Self::NoMember { ty, member } => {
                 write!(f, "`{ty}` has no field or method `{member}`")
             }
@@ -466,15 +510,17 @@ impl fmt::Display for CheckError {
                 write!(f, "`{ty}.{field}` is a field, not a method")
             }
             Self::MemberNotValue { ty, member, kind } => {
-                write!(f, "`{ty}.{member}` is a {kind}, not a value")
+                write!(f, "`{ty}.{member}` is {}, not a value", kind.with_article())
             }
-            Self::StaticOnValue { ty, function } => write!(
+            Self::NeedsType { ty, member, kind } => write!(
                 f,
-                "`{ty}.{function}` is a static function, so it must be used on `{ty}` itself rather than a value"
+                "`{ty}.{member}` is {}, so it must be used on `{ty}` itself rather than a value",
+                kind.with_article()
             ),
             Self::NeedsValue { ty, member, kind } => write!(
                 f,
-                "`{ty}.{member}` is a {kind}, so it must be used on a value of `{ty}` rather than `{ty}` itself"
+                "`{ty}.{member}` is {}, so it must be used on a value of `{ty}` rather than `{ty}` itself",
+                kind.with_article()
             ),
             Self::ModuleNotValue { module, member } => write!(
                 f,
@@ -488,7 +534,11 @@ impl fmt::Display for CheckError {
                 ty,
                 member,
                 existing,
-            } => write!(f, "`{ty}` already has a {existing} `{member}`"),
+            } => write!(
+                f,
+                "`{ty}` already has {} `{member}`",
+                existing.with_article()
+            ),
             Self::SelfOutsideImpl => write!(f, "`self` can only be used inside an `impl`"),
             Self::SelfInStatic => write!(f, "`self` can't be used in a static function"),
         }
@@ -533,6 +583,13 @@ struct ParamSignature<'a> {
 struct FieldSignature<'a> {
     name: &'a str,
     /// `None` if the field's type is unknown.
+    ty: Option<Type>,
+}
+
+#[derive(Debug, Clone)]
+struct OptionSignature<'a> {
+    name: &'a str,
+    /// The type of the value it holds, or `None` if it's unknown.
     ty: Option<Type>,
 }
 
@@ -737,14 +794,18 @@ struct Checker<'a> {
     /// Indexes into `globals`, in the order their types were worked out, so
     /// that each comes after the values its initialiser uses.
     global_order: Vec<usize>,
-    /// For each group, indexed by `id`, its fields in the order they're
-    /// declared.
+    /// For each type, indexed by `id`, its fields in the order they're
+    /// declared. Choices don't have any.
     group_fields: Vec<Vec<FieldSignature<'a>>>,
-    /// For each group, indexed by `id`, the index in `modules` of the module
-    /// that declares it, which is the only one that can construct it.
+    /// For each type, indexed by `id`, the index in `modules` of the module
+    /// that declares it, which is the only one that can construct it if it's
+    /// a group.
     group_modules: Vec<usize>,
-    /// For each group, indexed by `id`, its full name, such as `/main::Point`.
-    group_names: Vec<String>,
+    /// For each type, indexed by `id`, its full name, such as `/main::Point`.
+    type_names: Vec<String>,
+    /// For each choice, by `id`, its options in the order they're declared.
+    /// Other types aren't in it.
+    choice_options: HashMap<usize, Vec<OptionSignature<'a>>>,
     errors: Vec<ModuleError>,
 }
 
@@ -804,24 +865,26 @@ impl<'a> Checker<'a> {
             self.resolve_imports();
         }
 
-        // Every group is declared before any fields are resolved, so groups
-        // can contain each other in any order.
-        let mut groups = vec![];
+        // Every group and choice is declared before any of their fields or
+        // options are resolved, so they can contain each other in any order.
+        let mut types = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
-                if let Stmt::Group { name, fields } = stmt {
-                    groups.push((module, self.declare_group(name), name, fields));
+                if let Stmt::Group { name, .. } | Stmt::Choice { name, .. } = stmt {
+                    types.push((module, self.declare_type(name), stmt));
                 }
             }
         }
-        for &(module, id, name, fields) in &groups {
+        for &(module, id, stmt) in &types {
             self.module = module;
-            self.define_group(id, name, fields);
+            self.define_type(id, stmt);
         }
-        for &(module, id, name, _) in &groups {
+        for &(module, id, stmt) in &types {
             self.module = module;
-            self.check_not_recursive(id, name);
+            if let Stmt::Group { name, .. } | Stmt::Choice { name, .. } = stmt {
+                self.check_not_recursive(id, name);
+            }
         }
 
         // Functions, methods and values come after groups, since their types
@@ -890,7 +953,7 @@ impl<'a> Checker<'a> {
                         self.declare(name, Binding::Global(index));
                         pending.push((module, Pending::Global(index)));
                     }
-                    Stmt::Use(_) | Stmt::Group { .. } => {}
+                    Stmt::Use(_) | Stmt::Group { .. } | Stmt::Choice { .. } => {}
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
@@ -1282,8 +1345,15 @@ impl<'a> Checker<'a> {
             // can't see each other, since a call can't say which module's
             // method it means.
             let existing = if is_static {
-                self.static_function(self_ty, &method.name)
-                    .map(|_| MemberKind::StaticFunction)
+                let name = &method.name;
+                match (
+                    self.option(self_ty, name),
+                    self.static_function(self_ty, name),
+                ) {
+                    (Some(_), _) => Some(MemberKind::Option),
+                    (None, Some(_)) => Some(MemberKind::StaticFunction),
+                    (None, None) => None,
+                }
             } else {
                 match self.member(self_ty, &method.name) {
                     Some(Member::Field(..)) => Some(MemberKind::Field),
@@ -1436,12 +1506,13 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Declares a group without its fields, returning its `id`.
-    fn declare_group(&mut self, name: &'a str) -> usize {
+    /// Declares a group or choice without its fields or options, returning
+    /// its `id`.
+    fn declare_type(&mut self, name: &'a str) -> usize {
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
         self.group_modules.push(self.module);
-        self.group_names.push(self.full_name(name));
+        self.type_names.push(self.full_name(name));
         let ty = Type {
             id,
             name: name.to_string(),
@@ -1458,6 +1529,40 @@ impl<'a> Checker<'a> {
         }
         self.declare(name, Binding::Type(ty));
         id
+    }
+
+    /// Resolves the fields or options of `stmt`, which declares the group or
+    /// choice with `id`.
+    fn define_type(&mut self, id: usize, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::Group { name, fields } => self.define_group(id, name, fields),
+            Stmt::Choice { name, options } => self.define_choice(id, name, options),
+            _ => unreachable!("only groups and choices declare types"),
+        }
+    }
+
+    /// Resolves the options of the choice called `name` with `id`.
+    fn define_choice(&mut self, id: usize, name: &str, options: &'a [ChoiceOption]) {
+        // Option names only need to be unique within their choice.
+        let mut option_names = HashSet::new();
+        let mut signatures = vec![];
+        for option in options {
+            if !option_names.insert(&option.name) {
+                self.error(CheckError::MemberRedeclared {
+                    ty: Type {
+                        id,
+                        name: name.to_string(),
+                    },
+                    member: option.name.clone(),
+                    existing: MemberKind::Option,
+                });
+            }
+            signatures.push(OptionSignature {
+                name: &option.name,
+                ty: self.resolve_type(&option.ty),
+            });
+        }
+        self.choice_options.insert(id, signatures);
     }
 
     /// Resolves the fields of the group called `name` with `id`.
@@ -1483,26 +1588,29 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The `id`s of the groups that the fields of the group with `id` have
-    /// as types.
-    fn contained_groups(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
+    /// The `id`s of the types that the type with `id` holds directly: a
+    /// group's fields, or the values of a choice's options.
+    fn contained_types(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
+        let options = self.choice_options.get(&id).into_iter().flatten();
         self.group_fields[id]
             .iter()
-            .filter_map(|field| field.ty.as_ref().map(|ty| ty.id))
+            .map(|field| &field.ty)
+            .chain(options.map(|option| &option.ty))
+            .filter_map(|ty| ty.as_ref().map(|ty| ty.id))
     }
 
-    /// Reports an error if the group with `id` contains itself, which would
-    /// make it infinitely large.
+    /// Reports an error if the group or choice with `id` contains itself,
+    /// which would make it infinitely large.
     fn check_not_recursive(&mut self, id: usize, name: &str) {
         let mut seen = HashSet::new();
-        let mut unvisited: Vec<_> = self.contained_groups(id).collect();
+        let mut unvisited: Vec<_> = self.contained_types(id).collect();
         while let Some(next) = unvisited.pop() {
             if next == id {
-                self.error(CheckError::RecursiveGroup(name.to_string()));
+                self.error(CheckError::RecursiveType(name.to_string()));
                 return;
             }
             if seen.insert(next) {
-                unvisited.extend(self.contained_groups(next));
+                unvisited.extend(self.contained_types(next));
             }
         }
     }
@@ -1602,9 +1710,9 @@ impl<'a> Checker<'a> {
                 self.fn_body(index, &function.name, &function.body, FnKind::Function);
                 None
             }
-            Stmt::Group { name, fields } => {
-                let id = self.declare_group(name);
-                self.define_group(id, name, fields);
+            Stmt::Group { name, .. } | Stmt::Choice { name, .. } => {
+                let id = self.declare_type(name);
+                self.define_type(id, stmt);
                 self.check_not_recursive(id, name);
                 None
             }
@@ -1819,22 +1927,41 @@ impl<'a> Checker<'a> {
             .copied()
     }
 
-    /// The error for `name` not being a field or method of `ty`, which points
-    /// out a static function with that name.
-    fn no_member(&self, ty: Type, name: &str) -> CheckError {
-        let name = name.to_string();
-        match self.static_function(&ty, &name) {
-            Some(_) => CheckError::StaticOnValue { ty, function: name },
-            None => CheckError::NoMember { ty, member: name },
-        }
+    /// Finds the option of `ty` called `name`, if `ty` is a choice, returning
+    /// its index in the order they're declared, and the type of the value it
+    /// holds, which is `None` if it's unknown.
+    fn option(&self, ty: &Type, name: &str) -> Option<(usize, Option<Type>)> {
+        let options = self.choice_options.get(&ty.id)?;
+        let index = options.iter().position(|option| option.name == name)?;
+        Some((index, options[index].ty.clone()))
     }
 
-    /// The error for `name` not being a static function of `ty`, which points
-    /// out a field or method with that name.
+    /// The error for `name` not being a field or method of `ty`, which points
+    /// out an option or static function with that name.
+    fn no_member(&self, ty: Type, name: &str) -> CheckError {
+        let member = name.to_string();
+        let kind = if self.option(&ty, name).is_some() {
+            MemberKind::Option
+        } else if self.static_function(&ty, name).is_some() {
+            MemberKind::StaticFunction
+        } else {
+            return CheckError::NoMember { ty, member };
+        };
+        CheckError::NeedsType { ty, member, kind }
+    }
+
+    /// The error for `name` not being an option or static function of `ty`,
+    /// which points out a field or method with that name.
     fn no_static_function(&self, ty: Type, name: &str) -> CheckError {
         let kind = match self.member(&ty, name) {
             Some(Member::Field(..)) => MemberKind::Field,
             Some(Member::Method(_)) => MemberKind::Method,
+            None if self.choice_options.contains_key(&ty.id) => {
+                return CheckError::NoOption {
+                    ty,
+                    option: name.to_string(),
+                };
+            }
             None => {
                 return CheckError::NoStaticFunction {
                     ty,
@@ -1873,6 +2000,33 @@ impl<'a> Checker<'a> {
                 },
                 None => self.no_member(ty, field),
             },
+            // An option holding `Void` can be created by naming it.
+            Receiver::Type(ty) if let Some((option, value_ty)) = self.option(&ty, field) => {
+                let void = self.std_type("Void");
+                match value_ty {
+                    Some(value_ty) if value_ty == void => {
+                        return Typed {
+                            expr: Some(ir::Expr::Choose {
+                                choice: ty.id,
+                                option,
+                                value: Box::new(self.void()),
+                            }),
+                            ty: Some(ty),
+                        };
+                    }
+                    Some(expected) => CheckError::OptionNeedsValue {
+                        ty: ty.clone(),
+                        option: field.to_string(),
+                        expected,
+                    },
+                    None => {
+                        return Typed {
+                            ty: Some(ty),
+                            expr: None,
+                        };
+                    }
+                }
+            }
             Receiver::Type(ty) => match self.static_function(&ty, field) {
                 Some(_) => CheckError::MemberNotValue {
                     ty,
@@ -1898,6 +2052,11 @@ impl<'a> Checker<'a> {
         let Some(receiver) = receiver else {
             return Typed::UNKNOWN;
         };
+        if let Receiver::Type(ty) = &receiver
+            && let Some(option) = self.option(ty, method)
+        {
+            return self.choose(ty, method, option, args, found, lowered_args);
+        }
         let (ty, found_method, lowered_receiver) = match receiver {
             Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
                 Some(Member::Method(found_method)) => (ty, found_method, Some(lowered_receiver)),
@@ -1956,6 +2115,42 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Checks the creation of the choice `ty` as the option called `name`,
+    /// given its index and the type of its value, as found by `option`.
+    /// Creating an option is like calling a function with one unlabelled
+    /// parameter. The argument has the type `found`, and compiles to
+    /// `lowered`.
+    fn choose(
+        &mut self,
+        ty: &Type,
+        name: &str,
+        (option, value_ty): (usize, Option<Type>),
+        args: &[Arg],
+        found: Vec<Option<Type>>,
+        lowered: Option<Vec<ir::Expr>>,
+    ) -> Typed {
+        let signature = Signature {
+            name: format!("{ty}.{name}"),
+            params: vec![ParamSignature {
+                label: None,
+                name: "value",
+                ty: value_ty,
+            }],
+            returns: Some(ty.clone()),
+        };
+        let returns = self.check_args(signature.name.clone(), args, found, signature);
+        Typed {
+            ty: returns,
+            expr: lowered
+                .and_then(|args| <[_; 1]>::try_from(args).ok())
+                .map(|[value]| ir::Expr::Choose {
+                    choice: ty.id,
+                    option,
+                    value: Box::new(value),
+                }),
+        }
+    }
+
     /// Whether `ty` can only be created by the compiler, because it's a type
     /// from `stdlib/builtin`, or holds one directly, as `Int` does.
     fn is_compiler_created(&self, ty: &Type) -> bool {
@@ -1979,6 +2174,10 @@ impl<'a> Checker<'a> {
             ty: Some(ty),
             expr: None,
         };
+        if self.choice_options.contains_key(&ty.id) {
+            self.error(CheckError::ConstructedChoice(ty.clone()));
+            return with_error(ty);
+        }
         if self.is_compiler_created(&ty) {
             self.error(CheckError::CompilerCreated(ty.clone()));
             return with_error(ty);
@@ -2146,16 +2345,25 @@ impl<'a> Checker<'a> {
         const NO_ERRORS: &str = "the program has no errors";
 
         let main = self.main();
-        let groups = (0..self.group_fields.len())
-            .map(|id| match self.builtin_types.get(&id) {
-                Some(&builtin) => ir::Group::Builtin(builtin),
-                None => ir::Group::Fields {
-                    name: self.group_names[id].clone(),
-                    fields: self.group_fields[id]
-                        .iter()
-                        .map(|field| field.ty.as_ref().expect(NO_ERRORS).id)
-                        .collect(),
-                },
+        let type_id = |ty: &Option<Type>| ty.as_ref().expect(NO_ERRORS).id;
+        let types = (0..self.group_fields.len())
+            .map(|id| {
+                let name = self.type_names[id].clone();
+                if let Some(&builtin) = self.builtin_types.get(&id) {
+                    ir::TypeDef::Builtin(builtin)
+                } else if let Some(options) = self.choice_options.get(&id) {
+                    let options = options.iter().map(|option| type_id(&option.ty));
+                    ir::TypeDef::Choice {
+                        name,
+                        options: options.collect(),
+                    }
+                } else {
+                    let fields = self.group_fields[id].iter().map(|field| type_id(&field.ty));
+                    ir::TypeDef::Group {
+                        name,
+                        fields: fields.collect(),
+                    }
+                }
             })
             .collect();
         let globals = self
@@ -2172,7 +2380,7 @@ impl<'a> Checker<'a> {
             .collect();
 
         ir::Program {
-            groups,
+            types,
             main,
             functions: self
                 .lowered_functions
@@ -3634,8 +3842,8 @@ mod tests {
                 "
             ),
             Err(vec![
-                CheckError::RecursiveGroup("Node".to_string()),
-                CheckError::RecursiveGroup("Inner".to_string()),
+                CheckError::RecursiveType("Node".to_string()),
+                CheckError::RecursiveType("Inner".to_string()),
             ])
         );
         // Every group in a cycle is reported, but not one that only contains
@@ -3658,9 +3866,9 @@ mod tests {
                 "
             ),
             Err(vec![
-                CheckError::RecursiveGroup("A".to_string()),
-                CheckError::RecursiveGroup("B".to_string()),
-                CheckError::RecursiveGroup("C".to_string()),
+                CheckError::RecursiveType("A".to_string()),
+                CheckError::RecursiveType("B".to_string()),
+                CheckError::RecursiveType("C".to_string()),
             ])
         );
     }
@@ -5827,6 +6035,252 @@ mod tests {
                 "
             ),
             ["unknown type `Missing`"]
+        );
+    }
+
+    /// A choice for tests, with options holding values of different types.
+    const SHAPE: &str = "
+        choice Shape {
+            circle: Int
+            empty
+            nothing: Void
+        }
+        ";
+
+    #[test]
+    fn accepts_choices() {
+        let src = format!(
+            "
+            {SHAPE}
+            let a: Shape = Shape.circle(3)
+            let b: Shape = Shape.empty
+            let c: Shape = Shape.empty(Void.new())
+            let d: Shape = Shape.nothing
+            fn f() -> Shape {{
+                choice Inner {{
+                    only
+                }}
+                let inner: Inner = Inner.only
+                return Shape.circle(1 + 2)
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn options_can_be_used_anywhere() {
+        // Unlike groups, choices can be created outside their `impl` and
+        // their module.
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /shapes
+                    let a = Shape.circle(1)
+                    fn f() -> Shape {
+                        return Shape.empty
+                    }
+                    ",
+                ),
+                ("/shapes", SHAPE),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn choices_can_have_impls() {
+        let src = format!(
+            "
+            {SHAPE}
+            impl Shape {{
+                static fn unit() -> Shape {{
+                    return Shape.circle(1)
+                }}
+
+                // Methods are used on values, so they can share names with
+                // options.
+                fn circle() -> Int {{
+                    return 1
+                }}
+            }}
+            let x: Int = Shape.unit().circle()
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn rejects_wrong_option_values() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                let a = Shape.circle(true)
+                let b = Shape.circle(value: 1)
+                let c = Shape.circle()
+                let d = Shape.circle(1, 2)
+                let e = Shape.empty(1)
+                let f = Shape.empty()
+                "
+            )),
+            [
+                "argument `value` of `Shape.circle` expects `Int`, found `Bool`",
+                "argument to `Shape.circle` should not have a label, found `value`",
+                "`Shape.circle` takes 1 argument, found 0",
+                "`Shape.circle` takes 1 argument, found 2",
+                "argument `value` of `Shape.empty` expects `Void`, found `Int`",
+                "`Shape.empty` takes 1 argument, found 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn options_holding_values_need_them() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                let a: Shape = Shape.circle
+                let b: Int = a
+                "
+            )),
+            [
+                "`Shape.circle` holds a value of type `Int`, so it must be given one, as in `Shape.circle(value)`",
+                // The value still has the choice's type.
+                "cannot assign `Shape` to `b`, which has type `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_options() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                let a = Shape.square(1)
+                let b = Shape.square
+                "
+            )),
+            [
+                "`Shape` has no option or static function `square`",
+                "`Shape` has no option or static function `square`",
+            ]
+        );
+    }
+
+    #[test]
+    fn options_are_used_on_types_not_values() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                let shape = Shape.empty
+                let a = shape.empty
+                let b = shape.circle(1)
+                "
+            )),
+            [
+                "`Shape.empty` is an option, so it must be used on `Shape` itself rather than a value",
+                "`Shape.circle` is an option, so it must be used on `Shape` itself rather than a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_constructing_choices_like_groups() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                impl Shape {{
+                    static fn new() -> Shape {{
+                        return Shape {{}}
+                    }}
+                }}
+                "
+            )),
+            ["`Shape` is a choice, so it can only be created from one of its options"]
+        );
+    }
+
+    #[test]
+    fn option_names_are_unique() {
+        assert_eq!(
+            messages_top(
+                "
+                choice Shape {
+                    circle: Int
+                    circle: Bool
+                }
+                impl Shape {
+                    static fn circle() -> Shape {
+                        return Shape.circle(1)
+                    }
+                }
+                "
+            ),
+            [
+                "`Shape` already has an option `circle`",
+                "`Shape` already has an option `circle`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_recursive_choices() {
+        assert_eq!(
+            check_top(
+                "
+                choice List {
+                    empty
+                    node: List
+                }
+                group Node {
+                    let next: Link
+                }
+                choice Link {
+                    none
+                    some: Node
+                }
+                "
+            ),
+            Err(vec![
+                CheckError::RecursiveType("List".to_string()),
+                CheckError::RecursiveType("Node".to_string()),
+                CheckError::RecursiveType("Link".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn unknown_option_types_do_not_cascade() {
+        assert_eq!(
+            check_top(
+                "
+                choice Shape {
+                    circle: Circle
+                }
+                let a = Shape.circle(1)
+                "
+            ),
+            Err(vec![CheckError::UnknownType("Circle".to_string())])
+        );
+    }
+
+    #[test]
+    fn choices_are_not_comparable() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                let a = Shape.empty == Shape.empty
+                "
+            )),
+            ["operator `==` expects `Int` or `Bool`, found `Shape`"]
         );
     }
 }

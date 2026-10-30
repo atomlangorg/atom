@@ -24,8 +24,8 @@ use chumsky::{
 
 use super::{
     ast::{
-        Arg, BinOp, Expr, Field, FieldValue, Function, ImplFunction, Import, ModulePath,
-        Mutability, Name, Param, Program, Stmt, UnOp,
+        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
+        ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
     },
     lexer::{self, Token},
 };
@@ -361,7 +361,7 @@ where
     // can be reported clearly.
     let field = mutability
         .then(ident)
-        .then(annotation)
+        .then(annotation.clone())
         .then(just(Token::Eq).ignore_then(expr.clone()).or_not())
         .validate(|(((mutability, name), ty), value), e, emitter| {
             if value.is_some() {
@@ -390,6 +390,30 @@ where
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
         .map(|(name, fields)| Stmt::Group { name, fields });
+
+    // `name: Type`, or just `name` for an option holding `Void`.
+    let option = ident
+        .then(annotation.or_not())
+        .map(|(name, ty)| ChoiceOption {
+            name,
+            ty: ty.unwrap_or_else(|| Name::new("Void")),
+        });
+
+    // Laid out like a group, with one option per line.
+    let choice_ = just(Token::Choice)
+        .ignore_then(ident)
+        .then(
+            newlines
+                .clone()
+                .ignore_then(
+                    option
+                        .separated_by(newlines.clone().at_least(1))
+                        .allow_trailing()
+                        .collect(),
+                )
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(name, options)| Stmt::Choice { name, options });
 
     // One statement per line; blank lines are allowed anywhere.
     let mut stmt = Recursive::declare();
@@ -471,6 +495,7 @@ where
                 .or(if_)
                 .or(function.clone().map(Stmt::Fn))
                 .or(group_)
+                .or(choice_)
                 .or(return_)
                 .or(call),
         );
@@ -530,7 +555,10 @@ where
     // just by being imported. Other statements are parsed only so that they
     // can be reported clearly.
     let top_level_stmt = use_.or(impl_).or(stmt.validate(|stmt, e, emitter| {
-        if !matches!(stmt, Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Group { .. }) {
+        if !matches!(
+            stmt,
+            Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Group { .. } | Stmt::Choice { .. }
+        ) {
             emitter.emit(Rich::custom(
                 e.span(),
                 "only declarations can be used at the top level",
@@ -1588,6 +1616,132 @@ mod tests {
         }
     }
 
+    fn choice_(name: &str, options: Vec<ChoiceOption>) -> Stmt {
+        Stmt::Choice {
+            name: name.to_string(),
+            options,
+        }
+    }
+
+    fn option(name: &str, ty: &str) -> ChoiceOption {
+        ChoiceOption {
+            name: name.to_string(),
+            ty: Name::new(ty),
+        }
+    }
+
+    #[test]
+    fn parses_choice() {
+        assert_eq!(
+            parse_body(
+                "
+                choice Shape {
+                    circle: Int
+                    empty
+                    flag: Bool
+                }
+                "
+            ),
+            Ok(vec![choice_(
+                "Shape",
+                vec![
+                    option("circle", "Int"),
+                    option("empty", "Void"),
+                    option("flag", "Bool"),
+                ],
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_choice_layouts() {
+        assert_eq!(
+            parse_body("choice Never {}"),
+            Ok(vec![choice_("Never", vec![])])
+        );
+        assert_eq!(
+            parse_body("choice Unit { only }"),
+            Ok(vec![choice_("Unit", vec![option("only", "Void")])])
+        );
+        assert_eq!(
+            parse_body(
+                "
+                choice Result { // A comment.
+
+                    // Another comment.
+                    success: Int
+
+                    failure : other::Error
+                }
+                "
+            ),
+            Ok(vec![choice_(
+                "Result",
+                vec![
+                    option("success", "Int"),
+                    ChoiceOption {
+                        name: "failure".to_string(),
+                        ty: qualified(ModulePath::Named("other".to_string()), "Error"),
+                    },
+                ],
+            )])
+        );
+    }
+
+    #[test]
+    fn parses_choice_inside_blocks() {
+        assert_eq!(
+            parse_body(
+                "
+                fn f() {
+                    choice Inner {}
+                }
+                "
+            ),
+            Ok(vec![Stmt::Fn(Function {
+                name: "f".to_string(),
+                params: vec![],
+                ret: Name::new("Void"),
+                body: vec![choice_("Inner", vec![])],
+            })])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_choices() {
+        for src in [
+            // Missing parts.
+            "choice {}",
+            "choice Shape",
+            "choice Shape {",
+            "choice Shape { circle: }",
+            "choice Shape { : Int }",
+            // Options aren't fields, and can't have values.
+            "choice Shape { let circle: Int }",
+            "choice Shape { circle = 1 }",
+            "choice Shape { circle: Int = 1 }",
+            // Only options are allowed.
+            "choice Shape { f() }",
+            "choice Shape { fn f() {} }",
+            "choice Shape { choice Inner {} }",
+            // Separators.
+            "choice Shape { circle square }",
+            "choice Shape { circle, square }",
+            "choice Shape { circle: Int square }",
+            "choice Shape { circle; }",
+            // `{` must be on the same line.
+            "choice Shape\n{}",
+            // Statements after `}` need their own line.
+            "choice Shape {} x = 1",
+            // Keywords.
+            "choice choice {}",
+            "let choice = 1",
+            "choice Shape { group }",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
     #[test]
     fn rejects_malformed_calls() {
         for src in [
@@ -1617,6 +1771,7 @@ mod tests {
                 var y: Int = 2
                 fn f() {}
                 group S {}
+                choice C {}
                 "
             ),
             Ok(vec![
@@ -1638,6 +1793,7 @@ mod tests {
                     body: vec![],
                 }),
                 group_("S", vec![]),
+                choice_("C", vec![]),
             ])
         );
     }

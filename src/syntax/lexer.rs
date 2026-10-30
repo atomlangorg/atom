@@ -75,6 +75,8 @@ pub enum Token<'src> {
     Return,
     #[token("group")]
     Group,
+    #[token("choice")]
+    Choice,
     #[token("use")]
     Use,
     #[token("impl")]
@@ -223,6 +225,7 @@ impl fmt::Display for Token<'_> {
             Self::Fn => write!(f, "fn"),
             Self::Return => write!(f, "return"),
             Self::Group => write!(f, "group"),
+            Self::Choice => write!(f, "choice"),
             Self::Use => write!(f, "use"),
             Self::Impl => write!(f, "impl"),
             Self::Static => write!(f, "static"),
@@ -407,6 +410,23 @@ mod tests {
                 Token::Colon,
                 Token::Ident("Int"),
                 Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_choice() {
+        assert_eq!(
+            lex("choice Shape { circle: Int } choices"),
+            vec![
+                Token::Choice,
+                Token::Ident("Shape"),
+                Token::LBrace,
+                Token::Ident("circle"),
+                Token::Colon,
+                Token::Ident("Int"),
+                Token::RBrace,
+                Token::Ident("choices"),
             ]
         );
     }

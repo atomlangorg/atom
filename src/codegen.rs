@@ -18,7 +18,9 @@
 //! a native executable.
 //!
 //! Every group is an LLVM struct of its fields, and the builtin integer and
-//! boolean are `i64` and `i1`, so `Int` is `{ i64 }` and `Void` is `{}`. Every
+//! boolean are `i64` and `i1`, so `Int` is `{ i64 }` and `Void` is `{}`. A
+//! choice is a struct of an `i32` tag, the index of its option, then space for
+//! the largest of its options' values, which they share. Every
 //! Atom function becomes an internal LLVM function, so only the C `main` is
 //! visible to the linker. It sets every top-level value, then calls Atom's
 //! `main`, whose result is the exit code.
@@ -27,7 +29,7 @@
 //! `abort`. `llvm.trap` would avoid needing C, but on macOS it can leave the
 //! process hanging instead of stopping it, depending on what launched it.
 
-use std::{fmt, io, path::Path, process::Command};
+use std::{fmt, io, num::NonZeroU32, path::Path, process::Command};
 
 use inkwell::{
     IntPredicate::{EQ, NE},
@@ -37,22 +39,47 @@ use inkwell::{
     context::Context,
     intrinsics::Intrinsic,
     module::{Linkage, Module},
-    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
-    types::{BasicType, BasicTypeEnum},
+    targets::{
+        CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
+    },
+    types::{BasicType, BasicTypeEnum, IntType, StructType},
     values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue},
 };
 
 use crate::{
-    ir::{Builtin, Expr, Group, Program, Stmt},
+    ir::{Builtin, Expr, Program, Stmt, TypeDef},
     syntax::ast::{BinOp, UnOp},
 };
 
-/// Compiles `program` into an LLVM module. The module only has a C `main`,
-/// so it can only be linked into an executable, if `program.main` is set.
+/// The target machine for the computer the compiler is running on, which
+/// decides how values are laid out in memory, and which instructions are used.
+pub fn host_machine() -> Result<TargetMachine, EmitError> {
+    Target::initialize_native(&InitializationConfig::default()).map_err(EmitError::Target)?;
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|err| EmitError::Target(err.to_string()))?;
+    target
+        .create_target_machine(
+            &triple,
+            &TargetMachine::get_host_cpu_name().to_string(),
+            &TargetMachine::get_host_cpu_features().to_string(),
+            OptimizationLevel::Default,
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| EmitError::Target(format!("no target machine for {triple}")))
+}
+
+/// Compiles `program` into an LLVM module for `machine`. The module only has
+/// a C `main`, so it can only be linked into an executable, if
+/// `program.main` is set.
 ///
 /// Panics if it builds invalid LLVM IR, which would be a bug in the compiler.
-pub fn compile<'ctx>(context: &'ctx Context, program: &Program) -> Module<'ctx> {
-    let mut codegen = Codegen::new(context, program);
+pub fn compile<'ctx>(
+    context: &'ctx Context,
+    program: &Program,
+    machine: &TargetMachine,
+) -> Module<'ctx> {
+    let mut codegen = Codegen::new(context, program, machine);
     codegen
         .build()
         .expect("instructions are only built inside a block");
@@ -66,25 +93,14 @@ pub fn compile<'ctx>(context: &'ctx Context, program: &Program) -> Module<'ctx> 
     codegen.module
 }
 
-/// Compiles `module` for this computer, then links it into an executable at
-/// `path` with the system's C compiler, `cc`.
-pub fn write_executable(module: &Module, path: &Path) -> Result<(), EmitError> {
-    Target::initialize_native(&InitializationConfig::default()).map_err(EmitError::Target)?;
-    let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|err| EmitError::Target(err.to_string()))?;
-    let machine = target
-        .create_target_machine(
-            &triple,
-            &TargetMachine::get_host_cpu_name().to_string(),
-            &TargetMachine::get_host_cpu_features().to_string(),
-            OptimizationLevel::Default,
-            RelocMode::PIC,
-            CodeModel::Default,
-        )
-        .ok_or_else(|| EmitError::Target(format!("no target machine for {triple}")))?;
-    module.set_triple(&triple);
-    module.set_data_layout(&machine.get_target_data().get_data_layout());
-
+/// Compiles `module`, which was compiled for `machine`, into an object file,
+/// then links it into an executable at `path` with the system's C compiler,
+/// `cc`.
+pub fn write_executable(
+    module: &Module,
+    machine: &TargetMachine,
+    path: &Path,
+) -> Result<(), EmitError> {
     let object = path.with_extension("o");
     machine
         .write_to_file(module, FileType::Object, &object)
@@ -129,7 +145,9 @@ struct Codegen<'a, 'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     program: &'a Program,
-    /// For each group in `program`, the LLVM type it's represented by.
+    /// How the target lays out values in memory.
+    target_data: TargetData,
+    /// For each type in `program`, the LLVM type it's represented by.
     types: Vec<BasicTypeEnum<'ctx>>,
     /// For each function in `program`, the LLVM function it compiles to.
     functions: Vec<FunctionValue<'ctx>>,
@@ -144,12 +162,17 @@ struct Codegen<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> Codegen<'a, 'ctx> {
-    fn new(context: &'ctx Context, program: &'a Program) -> Self {
+    fn new(context: &'ctx Context, program: &'a Program, machine: &TargetMachine) -> Self {
+        let module = context.create_module("atom");
+        let target_data = machine.get_target_data();
+        module.set_triple(&machine.get_triple());
+        module.set_data_layout(&target_data.get_data_layout());
         Self {
             context,
-            module: context.create_module("atom"),
+            module,
             builder: context.create_builder(),
             program,
+            target_data,
             types: vec![],
             functions: vec![],
             globals: vec![],
@@ -193,23 +216,68 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         Ok(())
     }
 
-    /// Creates the LLVM type for each group. Every group is named before any
-    /// are given fields, since groups can hold each other in any order.
+    /// Creates the LLVM type for each type. Every type is named before any
+    /// are given fields, since they can hold each other in any order.
     fn declare_types(&mut self) {
-        for group in &self.program.groups {
-            let ty = match group {
-                Group::Builtin(Builtin::Int) => self.context.i64_type().into(),
-                Group::Builtin(Builtin::Bool) => self.context.bool_type().into(),
-                Group::Fields { name, .. } => self.context.opaque_struct_type(name).into(),
+        for ty in &self.program.types {
+            let ty = match ty {
+                TypeDef::Builtin(Builtin::Int) => self.context.i64_type().into(),
+                TypeDef::Builtin(Builtin::Bool) => self.context.bool_type().into(),
+                TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
+                    self.context.opaque_struct_type(name).into()
+                }
             };
             self.types.push(ty);
         }
-        for (group, ty) in self.program.groups.iter().zip(&self.types) {
-            if let Group::Fields { fields, .. } = group {
-                let fields: Vec<_> = fields.iter().map(|&field| self.types[field]).collect();
-                ty.into_struct_type().set_body(&fields, false);
-            }
+        let mut defined = vec![false; self.types.len()];
+        for id in 0..self.types.len() {
+            self.define_type(id, &mut defined);
         }
+    }
+
+    /// Gives the type with `id` its fields, once the types it holds have
+    /// theirs, since a choice's size depends on the sizes of its options'
+    /// values. `defined` records which types have been done. Types can't hold
+    /// themselves, so this always finishes.
+    fn define_type(&self, id: usize, defined: &mut [bool]) {
+        if std::mem::replace(&mut defined[id], true) {
+            return;
+        }
+        let held = match &self.program.types[id] {
+            TypeDef::Builtin(_) => return,
+            TypeDef::Group { fields, .. } => fields,
+            TypeDef::Choice { options, .. } => options,
+        };
+        for &ty in held {
+            self.define_type(ty, defined);
+        }
+
+        let body = match &self.program.types[id] {
+            TypeDef::Choice { .. } => {
+                // LLVM has no unions, so the options' values share an array
+                // of integers that's big enough, and aligned enough, for
+                // any of them.
+                let (size, align) = held.iter().fold((0, 1), |(size, align), &ty| {
+                    let ty = &self.types[ty];
+                    let ty_size = self.target_data.get_abi_size(ty);
+                    let ty_align = self.target_data.get_abi_alignment(ty);
+                    (size.max(ty_size), align.max(ty_align))
+                });
+                let unit = NonZeroU32::new(align * 8)
+                    .and_then(|bits| self.context.custom_width_int_type(bits).ok())
+                    .expect("alignments are valid integer widths");
+                let units = size.div_ceil(u64::from(align));
+                let payload = unit.array_type(units as u32);
+                vec![self.tag_type().into(), payload.into()]
+            }
+            _ => held.iter().map(|&ty| self.types[ty]).collect(),
+        };
+        self.types[id].into_struct_type().set_body(&body, false);
+    }
+
+    /// The type of a choice's tag, which is the index of its option.
+    fn tag_type(&self) -> IntType<'ctx> {
+        self.context.i32_type()
     }
 
     /// Builds the body of the function at `index` in `program.functions`.
@@ -407,12 +475,54 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
                 value.as_basic_value_enum()
             }
+            Expr::Choose {
+                choice,
+                option,
+                value,
+            } => {
+                let value = self.expr(value)?;
+                let ty = self.types[*choice].into_struct_type();
+                self.choose(ty, *option, value)?
+            }
             Expr::Field { receiver, index } => {
                 let receiver = self.expr(receiver)?.into_struct_value();
                 self.builder
                     .build_extract_value(receiver, *index as u32, "")?
             }
         })
+    }
+
+    /// Creates a choice of type `ty`, as the option at `option`, holding
+    /// `value`. LLVM has no unions, so the value is written over the choice's
+    /// payload in memory.
+    fn choose(
+        &self,
+        ty: StructType<'ctx>,
+        option: usize,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+        let slot = self.entry_alloca(ty)?;
+        let tag = self.builder.build_struct_gep(ty, slot, 0, "")?;
+        let tag_value = self.tag_type().const_int(option as u64, false);
+        self.builder.build_store(tag, tag_value)?;
+        let payload = self.builder.build_struct_gep(ty, slot, 1, "")?;
+        self.builder.build_store(payload, value)?;
+        self.builder.build_load(ty, slot, "")
+    }
+
+    /// Allocates space for a `ty` at the start of the function being built,
+    /// so it's only allocated once, however often the code using it runs.
+    fn entry_alloca(&self, ty: StructType<'ctx>) -> Result<PointerValue<'ctx>, BuilderError> {
+        let entry = self
+            .current_function()
+            .get_first_basic_block()
+            .expect("functions start with an entry block");
+        let builder = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => builder.position_before(&first),
+            None => builder.position_at_end(entry),
+        }
+        builder.build_alloca(ty, "")
     }
 
     /// Calls `intrinsic`, an LLVM arithmetic intrinsic that reports overflow,
@@ -506,12 +616,22 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 mod tests {
     use std::{env, fs, os::unix::process::ExitStatusExt, process::ExitStatus};
 
+    use inkwell::execution_engine::ExecutionEngine;
+
     use super::*;
     use crate::syntax::{self, Module as AtomModule, parser::parse};
 
+    fn machine() -> TargetMachine {
+        host_machine().expect("LLVM should support this computer")
+    }
+
     /// Checks and compiles each `(path, src)` pair as a module, with paths
     /// like `/dir/other`.
-    fn compile_files<'ctx>(context: &'ctx Context, files: &[(&str, &str)]) -> Module<'ctx> {
+    fn compile_files<'ctx>(
+        context: &'ctx Context,
+        machine: &TargetMachine,
+        files: &[(&str, &str)],
+    ) -> Module<'ctx> {
         let modules: Vec<_> = files
             .iter()
             .map(|(path, src)| AtomModule {
@@ -521,25 +641,29 @@ mod tests {
             .collect();
         let program = syntax::check(&modules).expect("source should check");
         assert!(program.main.is_some(), "`/main` should declare `main`");
-        compile(context, &program)
+        compile(context, &program, machine)
     }
 
     /// Compiles the modules, then runs them with LLVM's JIT, returning the
     /// exit code. A program that traps would stop the tests, so those use
     /// `traps` instead.
     fn run_files(files: &[(&str, &str)]) -> i32 {
-        Target::initialize_native(&InitializationConfig::default())
-            .expect("LLVM should support this computer");
         let context = Context::create();
-        let module = compile_files(&context, files);
+        let module = compile_files(&context, &machine(), files);
         let engine = module
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("the JIT should start");
+        unsafe { call(&engine, "main") }
+    }
+
+    /// Calls the function called `name`, which takes no arguments, from code
+    /// compiled by `engine`.
+    unsafe fn call<T>(engine: &ExecutionEngine, name: &str) -> T {
         unsafe {
-            let main = engine
-                .get_function::<unsafe extern "C" fn() -> i32>("main")
-                .expect("the module should have a C `main`");
-            main.call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> T>(name)
+                .unwrap_or_else(|_| panic!("the module should have `{name}`"))
+                .call()
         }
     }
 
@@ -556,8 +680,9 @@ mod tests {
         let path = dir.join(name);
 
         let context = Context::create();
-        let module = compile_files(&context, &[("/main", src)]);
-        write_executable(&module, &path).expect("should build an executable");
+        let machine = machine();
+        let module = compile_files(&context, &machine, &[("/main", src)]);
+        write_executable(&module, &machine, &path).expect("should build an executable");
         let status = Command::new(&path).status().expect("should run");
         fs::remove_file(&path).expect("should remove the executable");
         status
@@ -962,5 +1087,159 @@ mod tests {
             &main_returning(&format!("{MIN} / -1"))
         ));
         assert!(!traps("min_by_one", &main_returning(&format!("{MIN} / 1"))));
+    }
+
+    /// Compiles `src` as the only module, `/main`, and runs it, then reads
+    /// its top-level value called `name`, a choice of type `ty`. Returns the
+    /// choice's tag, and the start of its payload as an integer `bits` wide.
+    ///
+    /// Nothing in Atom can look inside a choice yet, so this adds functions
+    /// to the module that read it.
+    fn read_choice(src: &str, name: &str, ty: &str, bits: u32) -> (u32, u64) {
+        let context = Context::create();
+        let module = compile_files(&context, &machine(), &[("/main", src)]);
+        let choice = module
+            .get_struct_type(&format!("/main::{ty}"))
+            .expect("should declare the choice");
+        let global = module
+            .get_global(&format!("/main::{name}"))
+            .expect("should declare the value")
+            .as_pointer_value();
+
+        let builder = context.create_builder();
+        let int = context.i64_type();
+        let reader = |reader: &str, index: u32, ty: IntType| -> Result<(), BuilderError> {
+            let function = module.add_function(reader, int.fn_type(&[], false), None);
+            builder.position_at_end(context.append_basic_block(function, "entry"));
+            let field = builder.build_struct_gep(choice, global, index, "")?;
+            let value = builder.build_load(ty, field, "")?.into_int_value();
+            let value = builder.build_int_z_extend(value, int, "")?;
+            builder.build_return(Some(&value))?;
+            Ok(())
+        };
+        reader("read_tag", 0, context.i32_type()).expect("should build the reader");
+        let payload = NonZeroU32::new(bits)
+            .and_then(|bits| context.custom_width_int_type(bits).ok())
+            .expect("should be a valid width");
+        reader("read_payload", 1, payload).expect("should build the reader");
+
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("the JIT should start");
+        unsafe {
+            call::<i32>(&engine, "main");
+            let tag: u64 = call(&engine, "read_tag");
+            (tag as u32, call(&engine, "read_payload"))
+        }
+    }
+
+    /// A choice for tests, with options holding values of different types.
+    const SHAPE: &str = "
+        choice Shape {
+            circle: Int
+            empty
+            flag: Bool
+        }
+        ";
+
+    #[test]
+    fn choices_hold_their_option_and_its_value() {
+        let src = format!(
+            "
+            {SHAPE}
+            let circle = Shape.circle(3)
+            let flag = Shape.flag(true)
+            let empty = Shape.empty
+            let emptyWithValue = Shape.empty(Void.new())
+            fn main() -> Int {{
+                return 0
+            }}
+            "
+        );
+        assert_eq!(read_choice(&src, "circle", "Shape", 64), (0, 3));
+        assert_eq!(read_choice(&src, "flag", "Shape", 8), (2, 1));
+        assert_eq!(read_choice(&src, "empty", "Shape", 8).0, 1);
+        assert_eq!(read_choice(&src, "emptyWithValue", "Shape", 8).0, 1);
+    }
+
+    #[test]
+    fn choices_can_hold_groups_and_choices() {
+        let src = format!(
+            "
+            {SHAPE}
+            group Point {{
+                let x: Int
+                let y: Int
+            }}
+
+            impl Point {{
+                static fn at(x: Int, y: Int) -> Point {{
+                    return Point {{ x: x, y: y }}
+                }}
+            }}
+
+            choice Drawing {{
+                shape: Shape
+                point: Point
+            }}
+
+            let shape = Drawing.shape(Shape.flag(false))
+            let point = Drawing.point(Point.at(x: 7, y: 8))
+            fn main() -> Int {{
+                return 0
+            }}
+            "
+        );
+        // The shape's payload starts with its own tag.
+        assert_eq!(read_choice(&src, "shape", "Drawing", 32), (0, 2));
+        assert_eq!(read_choice(&src, "point", "Drawing", 64), (1, 7));
+    }
+
+    #[test]
+    fn choices_can_be_passed_around() {
+        let src = format!(
+            "
+            {SHAPE}
+            impl Shape {{
+                static fn unit() -> Shape {{
+                    return Shape.circle(1)
+                }}
+
+                fn sides() -> Int {{
+                    return 4
+                }}
+            }}
+
+            group Canvas {{
+                let shape: Shape
+            }}
+
+            impl Canvas {{
+                static fn of(_ shape: Shape) -> Canvas {{
+                    return Canvas {{ shape: shape }}
+                }}
+            }}
+
+            choice Never {{}}
+
+            fn keep(_ shape: Shape) -> Shape {{
+                return shape
+            }}
+
+            fn absurd(_ never: Never) -> Int {{
+                return 0
+            }}
+
+            fn main() -> Int {{
+                choice Local {{
+                    only
+                }}
+                let local = Local.only
+                let canvas = Canvas.of(keep(Shape.unit()))
+                return canvas.shape.sides() * 10 + Shape.empty.sides()
+            }}
+            "
+        );
+        assert_eq!(run(&src), 44);
     }
 }

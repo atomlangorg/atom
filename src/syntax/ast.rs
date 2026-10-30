@@ -245,6 +245,12 @@ pub enum Stmt {
         name: String,
         fields: Vec<Field>,
     },
+    /// `choice Name { option: Type ... }`: a value that's exactly one of its
+    /// options, each holding a value of its own type.
+    Choice {
+        name: String,
+        options: Vec<ChoiceOption>,
+    },
     /// `return` or `return value`
     Return(Option<Expr>),
     /// An expression on its own line. Only function calls are allowed.
@@ -290,6 +296,15 @@ pub struct Field {
     pub mutability: Mutability,
     pub name: String,
     /// The name of the field's type.
+    pub ty: Name,
+}
+
+/// An option of a choice, such as `circle: Int` or `empty`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceOption {
+    pub name: String,
+    /// The name of the type of the value it holds. `empty` is the same as
+    /// `empty: Void`, so this is `Void` when no type is written.
     pub ty: Name,
 }
 
