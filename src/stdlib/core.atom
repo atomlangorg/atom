@@ -17,17 +17,12 @@
 // The standard library. Every program can use these names without importing
 // them.
 
-use ./builtin
-
-// Whole numbers, such as `42`.
-group Int {
-    let builtin: builtin::Int
-}
+// Whole numbers from -2^63 to 2^63 - 1, such as `42`. Arithmetic that goes
+// outside that range stops the program.
+primitive Int
 
 // `true` or `false`.
-group Bool {
-    let builtin: builtin::Bool
-}
+primitive Bool
 
 // The return type of a function that doesn't return anything useful.
 // Functions without an explicit return type return `Void`.

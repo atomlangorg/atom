@@ -17,11 +17,11 @@
 //! Back end of the compiler: turns a checked program into LLVM IR, then into
 //! a native executable.
 //!
-//! Every group is an LLVM struct of its fields, and the builtin integer and
-//! boolean are `i64` and `i1`, so `Int` is `{ i64 }` and `Void` is `{}`. A
-//! choice is a struct of an `i32` tag, the index of its option, then space for
-//! the largest of its options' values, which they share. Every
-//! Atom function becomes an internal LLVM function, so only the C `main` is
+//! The primitive types `Int` and `Bool` are `i64` and `i1`. Every group is an
+//! LLVM struct of its fields, so `Void` is `{}`. A choice is a struct of an
+//! `i32` tag, the index of its option, then space for the largest of its
+//! options' values, which they share. Every Atom function becomes an
+//! internal LLVM function, so only the C `main` is
 //! visible to the linker. It sets every top-level value, then calls Atom's
 //! `main`, whose result is the exit code.
 //!
@@ -47,7 +47,7 @@ use inkwell::{
 };
 
 use crate::{
-    ir::{Builtin, Expr, MatchOption, Program, Stmt, TypeDef},
+    ir::{Expr, MatchOption, Primitive, Program, Stmt, TypeDef},
     syntax::ast::{BinOp, UnOp},
 };
 
@@ -221,8 +221,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn declare_types(&mut self) {
         for ty in &self.program.types {
             let ty = match ty {
-                TypeDef::Builtin(Builtin::Int) => self.context.i64_type().into(),
-                TypeDef::Builtin(Builtin::Bool) => self.context.bool_type().into(),
+                TypeDef::Primitive(Primitive::Int) => self.context.i64_type().into(),
+                TypeDef::Primitive(Primitive::Bool) => self.context.bool_type().into(),
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
                     self.context.opaque_struct_type(name).into()
                 }
@@ -244,7 +244,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             return;
         }
         let held = match &self.program.types[id] {
-            TypeDef::Builtin(_) => return,
+            TypeDef::Primitive(_) => return,
             TypeDef::Group { fields, .. } => fields,
             TypeDef::Choice { options, .. } => options,
         };
@@ -310,7 +310,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     /// Builds the C `main`, which sets every top-level value, then returns
-    /// the result of `main`, a builtin integer, as the exit code.
+    /// the result of `main`, an `Int`, as the exit code.
     fn define_main(&mut self, main: &Expr) -> Result<(), BuilderError> {
         let exit_code = self.context.i32_type();
         let value = self
@@ -584,7 +584,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     /// Calls `intrinsic`, an LLVM arithmetic intrinsic that reports overflow,
-    /// on builtin integers, trapping if it overflows.
+    /// on `Int`s, trapping if it overflows.
     fn checked(
         &mut self,
         intrinsic: &str,
@@ -608,7 +608,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         Ok(value.into_int_value())
     }
 
-    /// Divides builtin integers, rounding towards zero. Dividing by zero, or
+    /// Divides `Int`s, rounding towards zero. Dividing by zero, or
     /// the smallest integer by -1, which overflows, traps.
     fn divide(
         &mut self,
@@ -631,7 +631,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.build_int_signed_div(lhs, rhs, "")
     }
 
-    /// Traps if the builtin boolean `cond` is true, then carries on building
+    /// Traps if the `Bool` `cond` is true, then carries on building
     /// in a new block.
     fn trap_if(&mut self, cond: IntValue<'ctx>) -> Result<(), BuilderError> {
         let function = self.current_function();

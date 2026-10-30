@@ -590,21 +590,29 @@ where
         )
         .map(|(ty, functions)| Stmt::Impl { ty, functions });
 
+    // `primitive Name`, which the checker only allows in the standard library.
+    let primitive = just(Token::Primitive)
+        .ignore_then(ident)
+        .map(|name| Stmt::Primitive { name });
+
     // The top level can only declare things, so a module never runs code
     // just by being imported. Other statements are parsed only so that they
     // can be reported clearly.
-    let top_level_stmt = use_.or(impl_).or(stmt.validate(|stmt, e, emitter| {
-        if !matches!(
-            stmt,
-            Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Group { .. } | Stmt::Choice { .. }
-        ) {
-            emitter.emit(Rich::custom(
-                e.span(),
-                "only declarations can be used at the top level",
-            ));
-        }
-        stmt
-    }));
+    let top_level_stmt = use_
+        .or(impl_)
+        .or(primitive)
+        .or(stmt.validate(|stmt, e, emitter| {
+            if !matches!(
+                stmt,
+                Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Group { .. } | Stmt::Choice { .. }
+            ) {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    "only declarations can be used at the top level",
+                ));
+            }
+            stmt
+        }));
 
     newlines
         .clone()
@@ -1981,6 +1989,32 @@ mod tests {
                 choice_("C", vec![]),
             ])
         );
+    }
+
+    #[test]
+    fn parses_primitives_only_at_the_top_level() {
+        assert_eq!(
+            parse("primitive Int\nprimitive Bool"),
+            Ok(vec![
+                Stmt::Primitive {
+                    name: "Int".to_string()
+                },
+                Stmt::Primitive {
+                    name: "Bool".to_string()
+                },
+            ])
+        );
+        for src in [
+            "primitive",
+            "primitive Int {}",
+            "primitive Int: Bool",
+            "primitive other::Int",
+            "primitive Int Bool",
+            "primitive primitive",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+        assert!(parse_body("primitive Int").is_err());
     }
 
     #[test]

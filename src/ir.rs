@@ -17,9 +17,6 @@
 //! The checked program, which the front end produces and the back end
 //! compiles. Every name has been resolved to what it refers to, so nothing
 //! needs looking up again.
-//!
-//! Operators only work on builtin values, so `Int` and `Bool` are taken apart
-//! and put back together around them, as their `builtin` field.
 
 use crate::syntax::ast::{BinOp, UnOp};
 
@@ -35,15 +32,15 @@ pub struct Program {
     /// Indexes into `globals`, ordered so that each value comes after the
     /// values its initialiser uses.
     pub global_order: Vec<usize>,
-    /// Calls `fn main() -> Int` from `/main`, giving its result as a builtin
-    /// integer, or `None` if the project doesn't declare one.
+    /// Calls `fn main() -> Int` from `/main`, or `None` if the project doesn't
+    /// declare one.
     pub main: Option<Expr>,
 }
 
 #[derive(Debug)]
 pub enum TypeDef {
-    /// A type from `stdlib/builtin`, which the compiler represents itself.
-    Builtin(Builtin),
+    /// A primitive type, such as `Int`, which the compiler represents itself.
+    Primitive(Primitive),
     /// A group made of its fields' types, as indexes into `Program::types`,
     /// in the order they're declared.
     Group { name: String, fields: Vec<usize> },
@@ -53,8 +50,8 @@ pub enum TypeDef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Builtin {
-    /// A 64-bit signed integer.
+pub enum Primitive {
+    /// `Int`, a 64-bit signed integer.
     Int,
     Bool,
 }
@@ -92,7 +89,7 @@ pub enum Stmt {
         local: usize,
         value: Expr,
     },
-    /// `cond` is a builtin boolean.
+    /// `cond` is a `Bool`.
     If {
         cond: Expr,
         then_block: Vec<Stmt>,
@@ -120,15 +117,13 @@ pub struct MatchOption {
 
 #[derive(Debug)]
 pub enum Expr {
-    /// A builtin integer.
     Int(i64),
-    /// A builtin boolean.
     Bool(bool),
     /// An index into the current function's `locals`.
     Local(usize),
     /// An index into `Program::globals`.
     Global(usize),
-    /// An operator on builtin values, producing another.
+    /// An operator on `Int`s or `Bool`s.
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
     /// Calls the function at an index into `Program::functions`. A method's

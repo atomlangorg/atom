@@ -245,6 +245,11 @@ pub enum Stmt {
         name: String,
         fields: Vec<Field>,
     },
+    /// `primitive Name`: a type that the compiler represents itself, such as
+    /// `Int`. Only allowed at the top level of the standard library.
+    Primitive {
+        name: String,
+    },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
     /// options, each holding a value of its own type.
     Choice {

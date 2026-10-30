@@ -32,8 +32,9 @@
 //! The standard library is a package called `stdlib`, whose files are modules
 //! named from the package, such as `stdlib/core`. Every program imports
 //! `stdlib/core` without needing a `use`, but only the standard library itself
-//! can import its other files. `stdlib/builtin` declares the types the compiler
-//! creates itself for literals, which can't be constructed.
+//! can import its other files. Only the standard library can declare
+//! primitive types, such as `Int`, which the compiler represents itself, and
+//! whose values only come from literals and operators.
 //!
 //! As it checks, the checker lowers the AST into an `ir::Program`. That program
 //! is only returned when there are no errors, so everything in it is known.
@@ -58,16 +59,14 @@ const STDLIB_PACKAGE: &str = "stdlib";
 
 /// The files of the standard library, by their paths within it.
 static STDLIB: LazyLock<Vec<Module>> = LazyLock::new(|| {
-    [
-        ("builtin", include_str!("../stdlib/builtin.atom")),
-        ("core", include_str!("../stdlib/core.atom")),
-    ]
-    .into_iter()
-    .map(|(name, src)| Module {
-        path: vec![name.to_string()],
-        program: parse(src).unwrap_or_else(|errs| panic!("`stdlib/{name}` should parse: {errs:?}")),
-    })
-    .collect()
+    [("core", include_str!("../stdlib/core.atom"))]
+        .into_iter()
+        .map(|(name, src)| Module {
+            path: vec![name.to_string()],
+            program: parse(src)
+                .unwrap_or_else(|errs| panic!("`stdlib/{name}` should parse: {errs:?}")),
+        })
+        .collect()
 });
 
 /// A parsed `.atom` file.
@@ -128,9 +127,11 @@ pub enum CheckError {
     /// A module was imported from outside its package, which doesn't export
     /// it.
     PrivateModule { module: String, package: String },
-    /// A type that only the compiler can create was constructed, such as
-    /// `Int`, whose values come from literals.
-    CompilerCreated(Type),
+    /// A primitive type was constructed, such as `Int`, whose values come
+    /// from literals.
+    ConstructedPrimitive(Type),
+    /// A primitive type was declared outside the standard library.
+    PrimitiveOutsideStdlib(String),
     /// A group was constructed outside the `impl`s of its type.
     ConstructedOutsideImpl(Type),
     /// A group was constructed outside the module that declares it.
@@ -373,9 +374,13 @@ impl fmt::Display for CheckError {
             Self::ConstructedOutsideImpl(ty) => {
                 write!(f, "`{ty}` can only be constructed inside an `impl {ty}`")
             }
-            Self::CompilerCreated(ty) => write!(
+            Self::ConstructedPrimitive(ty) => write!(
                 f,
-                "`{ty}` can only be created by the compiler, such as with a literal"
+                "`{ty}` is a primitive, so it can only be created by the compiler, such as with a literal"
+            ),
+            Self::PrimitiveOutsideStdlib(name) => write!(
+                f,
+                "`{name}` can't be a primitive, since only the standard library can declare them"
             ),
             Self::NotAModule(name) => write!(
                 f,
@@ -787,11 +792,8 @@ struct Checker<'a> {
     /// The index in `modules` of `stdlib/core`, which every project module
     /// imports, and which declares the types of literals.
     core: usize,
-    /// The index in `modules` of `stdlib/builtin`, whose types the compiler
-    /// creates itself.
-    builtin: usize,
-    /// The types declared in `stdlib/builtin`, by `id`.
-    builtin_types: HashMap<usize, ir::Builtin>,
+    /// The primitive types, by `id`.
+    primitives: HashMap<usize, ir::Primitive>,
     /// The index in `modules` of the module being checked.
     module: usize,
     /// One scope per enclosing block inside functions, innermost last. Empty
@@ -865,13 +867,9 @@ impl<'a> Checker<'a> {
     fn add_stdlib(&mut self) {
         for module in STDLIB.iter() {
             let index = self.add_module(Some(STDLIB_PACKAGE), module);
-            match module.path[0].as_str() {
-                "core" => {
-                    self.core = index;
-                    self.modules[index].exported = true;
-                }
-                "builtin" => self.builtin = index,
-                _ => {}
+            if module.path == ["core"] {
+                self.core = index;
+                self.modules[index].exported = true;
             }
         }
     }
@@ -894,13 +892,16 @@ impl<'a> Checker<'a> {
             self.resolve_imports();
         }
 
-        // Every group and choice is declared before any of their fields or
-        // options are resolved, so they can contain each other in any order.
+        // Every type is declared before any fields or options are resolved,
+        // so types can contain each other in any order.
         let mut types = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
-                if let Stmt::Group { name, .. } | Stmt::Choice { name, .. } = stmt {
+                if let Stmt::Group { name, .. }
+                | Stmt::Choice { name, .. }
+                | Stmt::Primitive { name } = stmt
+                {
                     types.push((module, self.declare_type(name), stmt));
                 }
             }
@@ -982,7 +983,10 @@ impl<'a> Checker<'a> {
                         self.declare(name, Binding::Global(index));
                         pending.push((module, Pending::Global(index)));
                     }
-                    Stmt::Use(_) | Stmt::Group { .. } | Stmt::Choice { .. } => {}
+                    Stmt::Use(_)
+                    | Stmt::Group { .. }
+                    | Stmt::Choice { .. }
+                    | Stmt::Primitive { .. } => {}
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
@@ -1535,8 +1539,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Declares a group or choice without its fields or options, returning
-    /// its `id`.
+    /// Declares a type without its fields or options, returning its `id`.
     fn declare_type(&mut self, name: &'a str) -> usize {
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
@@ -1546,28 +1549,34 @@ impl<'a> Checker<'a> {
             id,
             name: name.to_string(),
         };
-        // Groups in `stdlib/builtin` are the compiler's own, but only when
-        // they're declared at its top level.
-        if self.module == self.builtin && self.scopes.is_empty() {
-            let builtin = match name {
-                "Int" => ir::Builtin::Int,
-                "Bool" => ir::Builtin::Bool,
-                _ => panic!("the compiler doesn't know how to create `builtin::{name}`"),
-            };
-            self.builtin_types.insert(id, builtin);
-        }
         self.declare(name, Binding::Type(ty));
         id
     }
 
-    /// Resolves the fields or options of `stmt`, which declares the group or
-    /// choice with `id`.
+    /// Resolves the fields or options of `stmt`, which declares the type with
+    /// `id`.
     fn define_type(&mut self, id: usize, stmt: &'a Stmt) {
         match stmt {
             Stmt::Group { name, fields } => self.define_group(id, name, fields),
             Stmt::Choice { name, options } => self.define_choice(id, name, options),
-            _ => unreachable!("only groups and choices declare types"),
+            Stmt::Primitive { name } => self.define_primitive(id, name),
+            _ => unreachable!("only groups, choices and primitives declare types"),
         }
+    }
+
+    /// Records the primitive type called `name` with `id`, which must be
+    /// declared in the standard library.
+    fn define_primitive(&mut self, id: usize, name: &str) {
+        if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
+            self.error(CheckError::PrimitiveOutsideStdlib(name.to_string()));
+            return;
+        }
+        let primitive = match name {
+            "Int" => ir::Primitive::Int,
+            "Bool" => ir::Primitive::Bool,
+            _ => panic!("the compiler doesn't know how to represent `{name}`"),
+        };
+        self.primitives.insert(id, primitive);
     }
 
     /// Resolves the options of the choice called `name` with `id`.
@@ -1658,8 +1667,10 @@ impl<'a> Checker<'a> {
     /// separately, or if it has an error.
     fn stmt(&mut self, stmt: &'a Stmt) -> Option<ir::Stmt> {
         match stmt {
-            Stmt::Use(_) | Stmt::Impl { .. } => {
-                unreachable!("the parser only allows `use` and `impl` at the top level")
+            Stmt::Use(_) | Stmt::Impl { .. } | Stmt::Primitive { .. } => {
+                unreachable!(
+                    "the parser only allows `use`, `impl` and `primitive` at the top level"
+                )
             }
             Stmt::Decl {
                 mutability,
@@ -1726,7 +1737,7 @@ impl<'a> Checker<'a> {
                     None => vec![],
                 };
                 Some(ir::Stmt::If {
-                    cond: unwrap_builtin(cond.expr?),
+                    cond: cond.expr?,
                     then_block,
                     else_block,
                 })
@@ -1909,9 +1920,7 @@ impl<'a> Checker<'a> {
             Expr::Unary(op, operand) => {
                 let ty = self.std_type(unary_type(op));
                 let operand = self.operand(op.symbol(), operand, ty.clone());
-                let expr = operand.map(|operand| {
-                    wrap_builtin(&ty, ir::Expr::Unary(op.clone(), Box::new(operand)))
-                });
+                let expr = operand.map(|operand| ir::Expr::Unary(op.clone(), Box::new(operand)));
                 Typed { ty: Some(ty), expr }
             }
             Expr::Binary(lhs, op @ (BinOp::Eq | BinOp::Ne), rhs) => self.comparison(lhs, op, rhs),
@@ -1919,12 +1928,9 @@ impl<'a> Checker<'a> {
                 let ty = self.std_type(binary_type(op));
                 let lhs = self.operand(op.symbol(), lhs, ty.clone());
                 let rhs = self.operand(op.symbol(), rhs, ty.clone());
-                let expr = lhs.zip(rhs).map(|(lhs, rhs)| {
-                    wrap_builtin(
-                        &ty,
-                        ir::Expr::Binary(Box::new(lhs), op.clone(), Box::new(rhs)),
-                    )
-                });
+                let expr = lhs
+                    .zip(rhs)
+                    .map(|(lhs, rhs)| ir::Expr::Binary(Box::new(lhs), op.clone(), Box::new(rhs)));
                 Typed { ty: Some(ty), expr }
             }
             Expr::Call { callee, args } => self.call(callee, args),
@@ -1977,24 +1983,23 @@ impl<'a> Checker<'a> {
                 self.expr(rhs);
                 None
             }
-            None => self.expr(rhs).expr.map(unwrap_builtin),
+            None => self.expr(rhs).expr,
         };
 
-        let ty = self.std_type("Bool");
-        let expr = lhs.zip(rhs).map(|(lhs, rhs)| {
-            let lhs = Box::new(unwrap_builtin(lhs));
-            wrap_builtin(&ty, ir::Expr::Binary(lhs, op.clone(), Box::new(rhs)))
-        });
-        Typed { ty: Some(ty), expr }
+        let expr = lhs
+            .zip(rhs)
+            .map(|(lhs, rhs)| ir::Expr::Binary(Box::new(lhs), op.clone(), Box::new(rhs)));
+        Typed {
+            ty: Some(self.std_type("Bool")),
+            expr,
+        }
     }
 
-    /// A literal of the standard library type called `name`, which holds the
-    /// builtin `value`.
+    /// A literal of the standard library type called `name`, such as `Int`.
     fn literal(&self, name: &str, value: ir::Expr) -> Typed {
-        let ty = self.std_type(name);
         Typed {
-            expr: Some(wrap_builtin(&ty, value)),
-            ty: Some(ty),
+            ty: Some(self.std_type(name)),
+            expr: Some(value),
         }
     }
 
@@ -2272,16 +2277,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether `ty` can only be created by the compiler, because it's a type
-    /// from `stdlib/builtin`, or holds one directly, as `Int` does.
-    fn is_compiler_created(&self, ty: &Type) -> bool {
-        let is_builtin = |ty: &Type| self.builtin_types.contains_key(&ty.id);
-        is_builtin(ty)
-            || self.group_fields[ty.id]
-                .iter()
-                .any(|field| field.ty.as_ref().is_some_and(is_builtin))
-    }
-
     /// Checks the construction of a group, returning its type, or `None` if
     /// it can't be determined, along with what it compiles to.
     fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Typed {
@@ -2299,8 +2294,8 @@ impl<'a> Checker<'a> {
             self.error(CheckError::ConstructedChoice(ty.clone()));
             return with_error(ty);
         }
-        if self.is_compiler_created(&ty) {
-            self.error(CheckError::CompilerCreated(ty.clone()));
+        if self.primitives.contains_key(&ty.id) {
+            self.error(CheckError::ConstructedPrimitive(ty.clone()));
             return with_error(ty);
         }
         // Only the type's own module can construct it, and only in the type's
@@ -2444,8 +2439,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks an operand of `op`, returning the builtin value inside it, or
-    /// `None` if it has an error.
+    /// Checks an operand of `op`, returning what it compiles to, or `None` if
+    /// it has an error.
     fn operand(&mut self, op: &'static str, operand: &Expr, expected: Type) -> Option<ir::Expr> {
         let Typed { ty, expr } = self.expr(operand);
         if let Some(found) = ty
@@ -2457,7 +2452,7 @@ impl<'a> Checker<'a> {
                 found,
             });
         }
-        expr.map(unwrap_builtin)
+        expr
     }
 
     /// The program made of everything that's been checked, which must not have
@@ -2470,8 +2465,8 @@ impl<'a> Checker<'a> {
         let types = (0..self.group_fields.len())
             .map(|id| {
                 let name = self.type_names[id].clone();
-                if let Some(&builtin) = self.builtin_types.get(&id) {
-                    ir::TypeDef::Builtin(builtin)
+                if let Some(&primitive) = self.primitives.get(&id) {
+                    ir::TypeDef::Primitive(primitive)
                 } else if let Some(options) = self.choice_options.get(&id) {
                     let options = options.iter().map(|option| type_id(&option.ty));
                     ir::TypeDef::Choice {
@@ -2513,8 +2508,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Calls `fn main() -> Int` from `/main`, giving its result as a builtin
-    /// integer, or `None` if there isn't one.
+    /// Calls `fn main() -> Int` from `/main`, or `None` if there isn't one.
     fn main(&self) -> Option<ir::Expr> {
         let module = self
             .modules
@@ -2527,28 +2521,10 @@ impl<'a> Checker<'a> {
         if !signature.params.is_empty() || signature.returns != Some(self.std_type("Int")) {
             return None;
         }
-        Some(unwrap_builtin(ir::Expr::Call {
+        Some(ir::Expr::Call {
             function: index,
             args: vec![],
-        }))
-    }
-}
-
-/// A value of `ty` from the standard library, such as `Int`, holding the
-/// builtin `value` as its only field.
-fn wrap_builtin(ty: &Type, value: ir::Expr) -> ir::Expr {
-    ir::Expr::Construct {
-        group: ty.id,
-        fields: vec![value],
-    }
-}
-
-/// The builtin value inside `expr`, a value of a type from the standard
-/// library, such as `Int`, that holds it as its only field.
-fn unwrap_builtin(expr: ir::Expr) -> ir::Expr {
-    ir::Expr::Field {
-        receiver: Box::new(expr),
-        index: 0,
+        })
     }
 }
 
@@ -4747,15 +4723,15 @@ mod tests {
             messages(
                 "
                 let a = Int {}
-                let b = core::Bool { builtin: c }
-                let d: Int = 1.builtin
+                let b = core::Bool { value: c }
+                let d = 1.value
                 "
             ),
             [
-                "`Int` can only be created by the compiler, such as with a literal",
+                "`Int` is a primitive, so it can only be created by the compiler, such as with a literal",
                 "`c` is not declared",
-                "`Bool` can only be created by the compiler, such as with a literal",
-                "cannot assign `Int` to `d`, which has type `Int`",
+                "`Bool` is a primitive, so it can only be created by the compiler, such as with a literal",
+                "`Int` has no field or method `value`",
             ]
         );
     }
@@ -5839,34 +5815,33 @@ mod tests {
     }
 
     #[test]
-    fn only_the_stdlib_can_import_builtin() {
+    fn only_the_stdlib_can_declare_primitives() {
         assert_eq!(
-            file_messages(&[(
-                "/main",
-                "
-                use stdlib/builtin
-                let a: builtin::Int = 1
-                let b: stdlib/builtin::Int = 1
-                ",
-            )]),
-            [
-                "/main: `stdlib/builtin` can only be imported from inside the `stdlib` package",
-                "/main: `builtin` is not an imported module",
-                "/main: `stdlib/builtin` is not an imported module",
-            ]
+            check_top(
+                "primitive Int
+primitive Float"
+            ),
+            Err(vec![
+                CheckError::PrimitiveOutsideStdlib("Int".to_string()),
+                CheckError::PrimitiveOutsideStdlib("Float".to_string()),
+            ])
+        );
+        assert_eq!(
+            messages_top("primitive Int"),
+            ["`Int` can't be a primitive, since only the standard library can declare them"]
         );
     }
 
     #[test]
     fn relative_paths_stay_in_their_package() {
-        // `./builtin` from the project looks in the project, not the standard
-        // library, even though `stdlib/core` imports it the same way.
+        // `./core` from the project looks in the project, not the standard
+        // library.
         assert_eq!(
-            file_messages(&[("/main", "use ./builtin")]),
-            ["/main: cannot find module `./builtin`"]
+            file_messages(&[("/main", "use ./core")]),
+            ["/main: cannot find module `./core`"]
         );
         assert_eq!(
-            check_files(&[("/main", "use ./builtin"), ("/builtin", "group Int {}")]),
+            check_files(&[("/main", "use ./core"), ("/core", "group Int {}")]),
             Ok(())
         );
     }
@@ -6018,12 +5993,11 @@ mod tests {
     }
 
     #[test]
-    fn directory_imports_skip_private_modules() {
-        // Only `stdlib/core` can be imported from the project, which is
-        // imported anyway.
+    fn directory_imports_can_import_the_stdlib() {
+        // `stdlib/core` is imported anyway, so this changes nothing.
         assert_eq!(
-            file_messages(&[("/main", "use stdlib/*\nlet a: builtin::Int = 1")]),
-            ["/main: `builtin` is not an imported module"]
+            check_files(&[("/main", "use stdlib/*\nlet a: core::Int = 1")]),
+            Ok(())
         );
     }
 
