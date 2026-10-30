@@ -31,8 +31,9 @@
 //!
 //! The standard library is a package called `stdlib`, whose files are modules
 //! named from the package, such as `stdlib/core`. Every program imports
-//! `stdlib/core` without needing a `use`, but only the standard library itself
-//! can import its other files. Only the standard library can declare
+//! `stdlib/core` without needing a `use`, and can import the standard
+//! library's other modules like any other module. Only the standard library
+//! can declare
 //! primitive types, such as `Int`, which the compiler represents itself, and
 //! whose values only come from literals and operators.
 //!
@@ -124,9 +125,6 @@ pub enum CheckError {
     EmptyDirectory(String),
     /// A package was used where one of its modules was needed.
     PackageNotModule(String),
-    /// A module was imported from outside its package, which doesn't export
-    /// it.
-    PrivateModule { module: String, package: String },
     /// A primitive type was constructed, such as `Int`, whose values come
     /// from literals.
     ConstructedPrimitive(Type),
@@ -362,10 +360,6 @@ impl fmt::Display for CheckError {
             Self::PackageNotModule(package) => write!(
                 f,
                 "`{package}` is a package, so use one of its modules, such as `{package}/core`"
-            ),
-            Self::PrivateModule { module, package } => write!(
-                f,
-                "`{module}` can only be imported from inside the `{package}` package"
             ),
             Self::ConstructedOutsideModule { ty, module } => write!(
                 f,
@@ -708,8 +702,6 @@ struct ModuleInfo<'a> {
     package: Option<&'a str>,
     /// The module's path from the root of its package or the project.
     path: &'a [String],
-    /// Whether modules outside its package can import it.
-    exported: bool,
     /// The name used to qualify the module's names, such as `other` in
     /// `other::f`.
     name: &'a str,
@@ -853,7 +845,6 @@ impl<'a> Checker<'a> {
             display,
             package,
             path: &module.path,
-            exported: package.is_none(),
             name: module.path.last().expect("module paths aren't empty"),
             program: &module.program,
             scope: HashMap::new(),
@@ -862,14 +853,12 @@ impl<'a> Checker<'a> {
         self.modules.len() - 1
     }
 
-    /// Adds the standard library's modules. Only `stdlib/core` can be imported
-    /// from outside it.
+    /// Adds the standard library's modules.
     fn add_stdlib(&mut self) {
         for module in STDLIB.iter() {
             let index = self.add_module(Some(STDLIB_PACKAGE), module);
             if module.path == ["core"] {
                 self.core = index;
-                self.modules[index].exported = true;
             }
         }
     }
@@ -1036,26 +1025,12 @@ impl<'a> Checker<'a> {
             match self.resolve_path(path) {
                 // Importing a module twice, or importing itself, is harmless.
                 Some(module) if module == self.module || imports.contains(&module) => {}
-                Some(module) if !self.can_import(module) => {
-                    let module = self.modules[module].display.clone();
-                    self.error(CheckError::PrivateModule {
-                        module,
-                        package: STDLIB_PACKAGE.to_string(),
-                    });
-                }
                 Some(module) => imports.push(module),
                 None => self.error(self.unknown_module(path)),
             }
         }
 
         self.modules[self.module].imports = imports;
-    }
-
-    /// Whether the current module can import `module`, which must be in the
-    /// same package, or exported from its package.
-    fn can_import(&self, module: usize) -> bool {
-        let target = &self.modules[module];
-        target.exported || target.package == self.modules[self.module].package
     }
 
     /// The error for a module path that doesn't lead to a module.
@@ -1077,7 +1052,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Finds the modules in the directory at `path`, including in its
-    /// subdirectories, that the current module can import, other than itself.
+    /// subdirectories, other than the current module.
     fn resolve_directory(&self, path: &ModulePath) -> Vec<usize> {
         let Some((package, dir)) = self.full_path(path) else {
             return vec![];
@@ -1089,7 +1064,6 @@ impl<'a> Checker<'a> {
                     && module.path.len() > dir.len()
                     && module.path.iter().zip(&dir).all(|(a, b)| a == *b)
                     && index != self.module
-                    && self.can_import(index)
             })
             .collect()
     }
