@@ -94,6 +94,9 @@ pub enum Token<'src> {
     /// The value a method was called on, inside an `impl`.
     #[token("self")]
     SelfValue,
+    /// The type of the `impl` it's in.
+    #[token("Self")]
+    SelfType,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
@@ -264,6 +267,7 @@ impl fmt::Display for Token<'_> {
             Self::Impl => write!(f, "impl"),
             Self::Static => write!(f, "static"),
             Self::SelfValue => write!(f, "self"),
+            Self::SelfType => write!(f, "Self"),
             Self::Ident(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
@@ -447,6 +451,19 @@ mod tests {
                 Token::Eq,
                 Token::Dot,
                 Token::Bang,
+            ]
+        );
+    }
+
+    #[test]
+    fn self_type_is_a_keyword() {
+        assert_eq!(
+            lex("Self self Selfish selfish"),
+            vec![
+                Token::SelfType,
+                Token::SelfValue,
+                Token::Ident("Selfish"),
+                Token::Ident("selfish"),
             ]
         );
     }

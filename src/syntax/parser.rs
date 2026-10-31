@@ -169,13 +169,16 @@ where
     .boxed();
 
     // `f`, `other::f` or `/dir/other::f`. Which module a name comes from is
-    // decided by the checker.
-    let name = module_path
-        .clone()
-        .then_ignore(just(Token::ColonColon))
-        .or_not()
-        .then(ident)
-        .map(|(module, name)| Name { module, name })
+    // decided by the checker. `Self` is a keyword, so it can't be qualified,
+    // and the checker decides what it refers to.
+    let name = just(Token::SelfType)
+        .to(Name::new("Self"))
+        .or(module_path
+            .clone()
+            .then_ignore(just(Token::ColonColon))
+            .or_not()
+            .then(ident)
+            .map(|(module, name)| Name { module, name }))
         .boxed();
 
     // Unary and binary operators applied to `atom`, which is the tightest
@@ -3143,6 +3146,42 @@ mod tests {
             "f(self: 1)",
             "x = self::f()",
             "group self {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn self_type_is_a_keyword() {
+        assert_eq!(
+            parse_body("let p: Self = Self { x: 1 }"),
+            Ok(vec![Stmt::Decl {
+                mutability: Mutability::Let,
+                name: "p".to_string(),
+                ty: Some(Name::new("Self")),
+                value: construct(
+                    Name::new("Self"),
+                    vec![FieldValue {
+                        name: "x".to_string(),
+                        value: *int(1),
+                    }],
+                ),
+            }])
+        );
+        assert_eq!(
+            parse_expr("Self.new()"),
+            method_call(*var("Self"), "new", vec![])
+        );
+        for src in [
+            "let Self = 1",
+            "Self = 1",
+            "fn Self() {}",
+            "fn f(Self: Int) {}",
+            "x = other::Self",
+            "let x: other::Self = 1",
+            "group Self {}",
+            "choice Self {}",
+            "alias Self = Int",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }

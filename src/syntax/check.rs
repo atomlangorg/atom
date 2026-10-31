@@ -317,6 +317,8 @@ pub enum CheckError {
     },
     /// `self` was used outside the methods of an `impl`.
     SelfOutsideImpl,
+    /// `Self` was used outside an `impl`.
+    SelfTypeOutsideImpl,
     /// `self` was used in a static function, which isn't called on a value.
     SelfInStatic,
 }
@@ -620,6 +622,7 @@ impl fmt::Display for CheckError {
                 existing.with_article()
             ),
             Self::SelfOutsideImpl => write!(f, "`self` can only be used inside an `impl`"),
+            Self::SelfTypeOutsideImpl => write!(f, "`Self` can only be used inside an `impl`"),
             Self::SelfInStatic => write!(f, "`self` can't be used in a static function"),
         }
     }
@@ -786,9 +789,11 @@ enum LookupError {
     Ambiguous(Vec<String>),
     /// The name's module couldn't be found.
     Module(Box<CheckError>),
-    /// The name is an alias whose type couldn't be worked out, which has
-    /// already been reported.
+    /// The name is an alias whose type couldn't be worked out, or `Self` in
+    /// an `impl` whose type is unknown, which has already been reported.
     Reported,
+    /// The name is `Self`, outside an `impl`.
+    SelfTypeOutsideImpl,
 }
 
 /// A field or method of a type, which are found with `.name` on a value.
@@ -1015,6 +1020,8 @@ impl<'a> Checker<'a> {
                     }
                     Stmt::Impl { ty, functions } => {
                         let self_ty = self.resolve_type(ty);
+                        // Signatures can use `Self`, just like bodies.
+                        let outer_impl_type = self.impl_type.replace(self_ty.clone());
                         for ImplFunction {
                             is_static,
                             function,
@@ -1043,6 +1050,7 @@ impl<'a> Checker<'a> {
                                 },
                             ));
                         }
+                        self.impl_type = outer_impl_type;
                     }
                     Stmt::Decl {
                         name, ty, value, ..
@@ -1247,6 +1255,15 @@ impl<'a> Checker<'a> {
     /// Finds what `name` refers to. An alias is found as the type it's an
     /// alias of, which is worked out if it hasn't been yet.
     fn lookup(&mut self, name: &Name) -> Result<Binding, LookupError> {
+        // `Self` is a keyword, so it's never declared, and always refers to
+        // the type of the `impl` it's in.
+        if *name == Name::new("Self") {
+            return match &self.impl_type {
+                Some(Some(ty)) => Ok(Binding::Type(ty.clone())),
+                Some(None) => Err(LookupError::Reported),
+                None => Err(LookupError::SelfTypeOutsideImpl),
+            };
+        }
         match self.lookup_binding(name)? {
             Binding::Alias(index) => {
                 let name = self.aliases[index].name.to_string();
@@ -1339,6 +1356,7 @@ impl<'a> Checker<'a> {
             },
             LookupError::Module(error) => *error,
             LookupError::Reported => return,
+            LookupError::SelfTypeOutsideImpl => CheckError::SelfTypeOutsideImpl,
         };
         self.error(error);
     }
@@ -6571,6 +6589,131 @@ mod tests {
                 "/main: cannot find module `stdlib/missing`",
                 "/main: `stdlib` is a package, so use one of its modules, such as `stdlib/core`",
             ]
+        );
+    }
+
+    #[test]
+    fn self_type_is_the_type_of_its_impl() {
+        let src = "
+            group Point {
+                let x: Int
+            }
+            choice Shape {
+                circle: Int
+                dot: Void
+            }
+
+            impl Point {
+                static fn origin() -> Self {
+                    return Self { x: 0 }
+                }
+
+                fn moved(by amount: Int) -> Self {
+                    let moved: Self = Self.origin()
+                    return Point { x: self.x + moved.x + amount }
+                }
+
+                fn is_same(as other: Self) -> Bool {
+                    fn origin() -> Self {
+                        return Self.origin()
+                    }
+                    return self.x == other.x & origin().x == 0
+                }
+            }
+
+            impl Shape {
+                fn size() -> Int {
+                    match self {
+                        Self.circle(let radius) => {
+                            return radius
+                        }
+                        Self.dot => {
+                            return 0
+                        }
+                    }
+                }
+
+                static fn unit() -> Self {
+                    return Self.circle(1)
+                }
+            }
+
+            impl Int {
+                fn doubled() -> Self {
+                    return self * 2
+                }
+            }
+
+            fn f(point: Point, shape: Shape) -> Bool {
+                let moved: Point = point.moved(by: 1)
+                let unit: Shape = Shape.unit()
+                return moved.is_same(as: point) & unit.size() == 1.doubled()
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn self_type_errors_use_the_impl_type() {
+        assert_eq!(
+            messages_top(
+                "
+                group Point {
+                    let x: Int
+                }
+                impl Point {
+                    fn f() -> Self {
+                        return 1
+                    }
+                }
+                "
+            ),
+            ["`f` must return `Point`, found `Int`"]
+        );
+    }
+
+    #[test]
+    fn rejects_self_type_outside_impl() {
+        assert_eq!(
+            messages_top(
+                "
+                group Node {
+                    let next: Self
+                }
+                alias Current = Self
+                impl Self {}
+                fn f(x: Self) -> Self {
+                    let y: Self = x
+                    return Self.new()
+                }
+                "
+            ),
+            [
+                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl`",
+            ]
+        );
+    }
+
+    #[test]
+    fn self_type_in_an_unknown_impl_is_not_reported_again() {
+        assert_eq!(
+            messages_top(
+                "
+                impl Missing {
+                    static fn new() -> Self {
+                        let x: Self = Self.new()
+                        return x
+                    }
+                }
+                "
+            ),
+            ["unknown type `Missing`"]
         );
     }
 

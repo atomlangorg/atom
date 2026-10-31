@@ -1789,6 +1789,30 @@ mod tests {
     }
 
     #[test]
+    fn self_type_is_the_type_of_its_impl() {
+        let src = "
+            group Counter {
+                let count: Int
+            }
+
+            impl Counter {
+                static fn new() -> Self {
+                    return Self { count: 0 }
+                }
+
+                fn plus(_ amount: Int) -> Self {
+                    return Self { count: self.count + amount }
+                }
+            }
+
+            fn main() -> Int {
+                return Counter.new().plus(5).plus(2).count
+            }
+            ";
+        assert_eq!(run(src), 7);
+    }
+
+    #[test]
     fn sized_integers_trap_when_they_overflow() {
         let cases = [
             ("u8_add", "let x: IntU8 = 255\nlet y = x + 1"),
