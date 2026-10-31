@@ -25,7 +25,7 @@ use chumsky::{
 use super::{
     ast::{
         Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
-        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
+        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction, UnOp,
     },
     lexer::{self, Token},
 };
@@ -624,8 +624,14 @@ where
             is_static: is_static.is_some(),
             function,
         });
+    // `with` is only special here, so it can still be a label.
     let impl_ = just(Token::Impl)
         .ignore_then(type_name.clone())
+        .then(
+            just(Token::Ident("with"))
+                .ignore_then(type_name.clone())
+                .or_not(),
+        )
         .then(
             newlines
                 .clone()
@@ -637,7 +643,35 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(ty, functions)| Stmt::Impl { ty, functions });
+        .map(|((ty, with), functions)| Stmt::Impl {
+            ty,
+            with,
+            functions,
+        });
+
+    // Like an `impl`, one function per line, but only their signatures.
+    let trait_function = just(Token::Static).or_not().then(signature.clone()).map(
+        |(is_static, ((name, params), ret))| TraitFunction {
+            is_static: is_static.is_some(),
+            name,
+            params,
+            ret,
+        },
+    );
+    let trait_ = just(Token::Trait)
+        .ignore_then(ident)
+        .then(
+            newlines
+                .clone()
+                .ignore_then(
+                    trait_function
+                        .separated_by(newlines.clone().at_least(1))
+                        .allow_trailing()
+                        .collect(),
+                )
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(name, functions)| Stmt::Trait { name, functions });
 
     // `primitive Name` or `primitive fn name(params) -> Type`, which the
     // checker only allows in the standard library.
@@ -650,25 +684,26 @@ where
     // The top level can only declare things, so a module never runs code
     // just by being imported. Other statements are parsed only so that they
     // can be reported clearly.
-    let top_level_stmt = use_
-        .or(impl_)
-        .or(primitive)
-        .or(stmt.validate(|stmt, e, emitter| {
-            if !matches!(
-                stmt,
-                Stmt::Decl { .. }
-                    | Stmt::Fn(_)
-                    | Stmt::Group { .. }
-                    | Stmt::Choice { .. }
-                    | Stmt::Alias { .. }
-            ) {
-                emitter.emit(Rich::custom(
-                    e.span(),
-                    "only declarations can be used at the top level",
-                ));
-            }
-            stmt
-        }));
+    let top_level_stmt =
+        use_.or(impl_)
+            .or(trait_)
+            .or(primitive)
+            .or(stmt.validate(|stmt, e, emitter| {
+                if !matches!(
+                    stmt,
+                    Stmt::Decl { .. }
+                        | Stmt::Fn(_)
+                        | Stmt::Group { .. }
+                        | Stmt::Choice { .. }
+                        | Stmt::Alias { .. }
+                ) {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        "only declarations can be used at the top level",
+                    ));
+                }
+                stmt
+            }));
 
     newlines
         .clone()
@@ -2989,6 +3024,7 @@ mod tests {
             Ok(vec![
                 Stmt::Impl {
                     ty: Name::new("User"),
+                    with: None,
                     functions: vec![
                         ImplFunction {
                             is_static: false,
@@ -3029,6 +3065,7 @@ mod tests {
                 },
                 Stmt::Impl {
                     ty: qualified(ModulePath::Named("user".to_string()), "User"),
+                    with: None,
                     functions: vec![],
                 },
             ])
@@ -3149,6 +3186,98 @@ mod tests {
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
+    }
+
+    #[test]
+    fn parses_traits() {
+        let param = |label: Option<&str>, name: &str, ty: &str| Param {
+            label: label.map(str::to_string),
+            name: name.to_string(),
+            ty: Name::new(ty),
+        };
+        assert_eq!(
+            parse(
+                "
+                trait And {
+                    fn and(_ rhs: Self) -> Bool
+
+                    static fn zero() -> Self
+                    fn reset(to value: Int)
+                }
+                trait Marker {}
+                "
+            ),
+            Ok(vec![
+                Stmt::Trait {
+                    name: "And".to_string(),
+                    functions: vec![
+                        TraitFunction {
+                            is_static: false,
+                            name: "and".to_string(),
+                            params: vec![param(None, "rhs", "Self")],
+                            ret: Name::new("Bool"),
+                        },
+                        TraitFunction {
+                            is_static: true,
+                            name: "zero".to_string(),
+                            params: vec![],
+                            ret: Name::new("Self"),
+                        },
+                        TraitFunction {
+                            is_static: false,
+                            name: "reset".to_string(),
+                            params: vec![param(Some("to"), "value", "Int")],
+                            ret: Name::new("Void"),
+                        },
+                    ],
+                },
+                Stmt::Trait {
+                    name: "Marker".to_string(),
+                    functions: vec![],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_impls_with_traits() {
+        assert_eq!(
+            parse("impl Custom with And {}\nimpl Int with logic::And {}"),
+            Ok(vec![
+                Stmt::Impl {
+                    ty: Name::new("Custom"),
+                    with: Some(Name::new("And")),
+                    functions: vec![],
+                },
+                Stmt::Impl {
+                    ty: Name::new("Int"),
+                    with: Some(qualified(ModulePath::Named("logic".to_string()), "And")),
+                    functions: vec![],
+                },
+            ])
+        );
+        // `with` is only special in an `impl`, so it can still be a label.
+        assert!(parse("fn f(with value: Int) {}\nlet x = f(with: 1)").is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_traits() {
+        for src in [
+            "trait",
+            "trait {}",
+            "trait And",
+            "trait And { fn and(_ rhs: Self) -> Bool {} }",
+            "trait And { let x: Int }",
+            "trait And { fn and(_ rhs: Self) -> Bool fn or() }",
+            "trait other::And {}",
+            "impl Custom with {}",
+            "impl Custom with And, Or {}",
+            "impl Custom with And with Or {}",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+        assert!(parse_body("trait And {}").is_err());
+        assert!(parse_body("trait Marker {}").is_err());
     }
 
     #[test]

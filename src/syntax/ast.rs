@@ -269,9 +269,19 @@ pub enum Stmt {
     Fn(Function),
     /// `impl Type { fn ... }`: adds methods and static functions to a type.
     /// Only allowed at the top level.
+    ///
+    /// `impl Type with Trait { fn ... }` implements a trait's functions, and
+    /// only those.
     Impl {
         ty: Name,
+        with: Option<Name>,
         functions: Vec<ImplFunction>,
+    },
+    /// `trait Name { fn ... }`: functions that a type can implement, declared
+    /// without bodies. Only allowed at the top level.
+    Trait {
+        name: String,
+        functions: Vec<TraitFunction>,
     },
     /// `group Name { let field: Type ... }`
     Group {
@@ -325,6 +335,18 @@ pub struct Function {
     /// so this is `Void` when no type is written.
     pub ret: Name,
     pub body: Block,
+}
+
+/// A function declared by a `trait`, such as `fn and(_ rhs: Self) -> Bool`,
+/// where `Self` is whichever type implements it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitFunction {
+    /// Whether it's a `static fn`, like in an `impl`.
+    pub is_static: bool,
+    pub name: String,
+    pub params: Vec<Param>,
+    /// `Void` when no type is written, like in a `fn`.
+    pub ret: Name,
 }
 
 /// A function in an `impl`.

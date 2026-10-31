@@ -89,6 +89,8 @@ pub enum Token<'src> {
     Use,
     #[token("impl")]
     Impl,
+    #[token("trait")]
+    Trait,
     #[token("static")]
     Static,
     /// The value a method was called on, inside an `impl`.
@@ -265,6 +267,7 @@ impl fmt::Display for Token<'_> {
             Self::Alias => write!(f, "alias"),
             Self::Use => write!(f, "use"),
             Self::Impl => write!(f, "impl"),
+            Self::Trait => write!(f, "trait"),
             Self::Static => write!(f, "static"),
             Self::SelfValue => write!(f, "self"),
             Self::SelfType => write!(f, "Self"),
@@ -452,6 +455,14 @@ mod tests {
                 Token::Dot,
                 Token::Bang,
             ]
+        );
+    }
+
+    #[test]
+    fn trait_is_a_keyword_but_with_is_not() {
+        assert_eq!(
+            lex("trait traits with"),
+            vec![Token::Trait, Token::Ident("traits"), Token::Ident("with")]
         );
     }
 

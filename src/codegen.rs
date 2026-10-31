@@ -1813,6 +1813,45 @@ mod tests {
     }
 
     #[test]
+    fn trait_functions_are_called_like_any_other() {
+        let src = "
+            group Counter {
+                let count: Int
+            }
+
+            trait Start {
+                static fn start() -> Self
+                fn next() -> Self
+            }
+
+            impl Counter with Start {
+                static fn start() -> Self {
+                    return Self { count: 1 }
+                }
+
+                fn next() -> Self {
+                    return Self { count: self.count * 3 }
+                }
+            }
+
+            impl Int with Start {
+                static fn start() -> Int {
+                    return 2
+                }
+
+                fn next() -> Int {
+                    return self + 1
+                }
+            }
+
+            fn main() -> Int {
+                return Counter.start().next().next().count + Int.start().next()
+            }
+            ";
+        assert_eq!(run(src), 12);
+    }
+
+    #[test]
     fn sized_integers_trap_when_they_overflow() {
         let cases = [
             ("u8_add", "let x: IntU8 = 255\nlet y = x + 1"),

@@ -50,7 +50,7 @@ use std::{
 use super::{
     ast::{
         Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
-        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, UnOp,
+        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction, UnOp,
     },
     parser::parse,
 };
@@ -321,6 +321,35 @@ pub enum CheckError {
     SelfTypeOutsideImpl,
     /// `self` was used in a static function, which isn't called on a value.
     SelfInStatic,
+    /// No trait has this name.
+    UnknownTrait(String),
+    /// An `impl` is `with` something that isn't a trait.
+    NotATrait(String),
+    /// A trait's name was used as a value.
+    TraitAsValue(String),
+    /// A trait declares more than one function with the same name.
+    TraitFnRedeclared {
+        trait_name: String,
+        function: String,
+    },
+    /// An `impl` with a trait has a function the trait doesn't declare.
+    NotInTrait {
+        trait_name: String,
+        function: String,
+    },
+    /// An `impl` with a trait implements one of its functions with a
+    /// different signature to the trait's, which is `expected`.
+    TraitFnMismatch {
+        trait_name: String,
+        expected: String,
+    },
+    /// An `impl` with a trait doesn't implement one of its functions, whose
+    /// signature is `expected`.
+    MissingTraitFn {
+        ty: String,
+        trait_name: String,
+        expected: String,
+    },
 }
 
 /// What kind of member of a type something is.
@@ -622,8 +651,33 @@ impl fmt::Display for CheckError {
                 existing.with_article()
             ),
             Self::SelfOutsideImpl => write!(f, "`self` can only be used inside an `impl`"),
-            Self::SelfTypeOutsideImpl => write!(f, "`Self` can only be used inside an `impl`"),
+            Self::SelfTypeOutsideImpl => {
+                write!(f, "`Self` can only be used inside an `impl` or a `trait`")
+            }
             Self::SelfInStatic => write!(f, "`self` can't be used in a static function"),
+            Self::UnknownTrait(name) => write!(f, "unknown trait `{name}`"),
+            Self::NotATrait(name) => write!(f, "`{name}` is not a trait"),
+            Self::TraitAsValue(name) => write!(f, "`{name}` is a trait, not a value"),
+            Self::TraitFnRedeclared {
+                trait_name,
+                function,
+            } => write!(f, "trait `{trait_name}` already declares `{function}`"),
+            Self::NotInTrait {
+                trait_name,
+                function,
+            } => write!(f, "`{function}` is not declared by trait `{trait_name}`"),
+            Self::TraitFnMismatch {
+                trait_name,
+                expected,
+            } => write!(
+                f,
+                "trait `{trait_name}` declares this function as `{expected}`"
+            ),
+            Self::MissingTraitFn {
+                ty,
+                trait_name,
+                expected,
+            } => write!(f, "`impl {ty} with {trait_name}` is missing `{expected}`"),
         }
     }
 }
@@ -694,6 +748,26 @@ enum Binding {
     /// An index into `Checker::aliases`. `Checker::lookup` finds aliases as
     /// the types they're aliases of.
     Alias(usize),
+    /// An index into `Checker::traits`.
+    Trait(usize),
+}
+
+/// A trait, whose functions an `impl` with it must implement exactly.
+struct TraitInfo<'a> {
+    name: &'a str,
+    module: usize,
+    functions: &'a [TraitFunction],
+    /// For each of `functions`, its parameter types and return type, which
+    /// are `None` if they're unknown. Worked out once types are defined.
+    signatures: Vec<(Vec<Option<TraitType>>, Option<TraitType>)>,
+}
+
+/// A type in a trait's function signature.
+#[derive(Debug, Clone)]
+enum TraitType {
+    /// `Self`, which is whichever type implements the trait.
+    SelfType,
+    Type(Type),
 }
 
 /// A value declared at the top level of a module. Its type is worked out when
@@ -875,6 +949,7 @@ struct Checker<'a> {
     /// if the `impl`'s type is unknown.
     impl_type: Option<Option<Type>>,
     functions: Vec<Signature<'a>>,
+    traits: Vec<TraitInfo<'a>>,
     /// For each of `functions`, what it compiles to, once its body has been
     /// checked, or `None` if it has an error.
     lowered_functions: Vec<Option<ir::Function>>,
@@ -976,6 +1051,7 @@ impl<'a> Checker<'a> {
                         types.push((module, self.declare_type(name), stmt));
                     }
                     Stmt::Alias { name, ty } => self.declare_alias(name, ty, LazyType::Unchecked),
+                    Stmt::Trait { name, functions } => self.declare_trait(name, functions),
                     _ => {}
                 }
             }
@@ -986,6 +1062,9 @@ impl<'a> Checker<'a> {
         for &(module, id, stmt) in &types {
             self.module = module;
             self.define_type(id, stmt);
+        }
+        for index in 0..self.traits.len() {
+            self.define_trait(index);
         }
         for &(module, id, stmt) in &types {
             self.module = module;
@@ -1018,10 +1097,15 @@ impl<'a> Checker<'a> {
                         let index = self.declare_fn(name, params, ret);
                         self.define_primitive_fn(index, name);
                     }
-                    Stmt::Impl { ty, functions } => {
+                    Stmt::Impl {
+                        ty,
+                        with,
+                        functions,
+                    } => {
                         let self_ty = self.resolve_type(ty);
                         // Signatures can use `Self`, just like bodies.
                         let outer_impl_type = self.impl_type.replace(self_ty.clone());
+                        let mut indexes = vec![];
                         for ImplFunction {
                             is_static,
                             function,
@@ -1035,6 +1119,7 @@ impl<'a> Checker<'a> {
                                 *is_static,
                                 full_name,
                             );
+                            indexes.push(index);
                             let kind = if *is_static {
                                 FnKind::Static(self_ty.clone())
                             } else {
@@ -1051,6 +1136,13 @@ impl<'a> Checker<'a> {
                             ));
                         }
                         self.impl_type = outer_impl_type;
+                        if let Some(with) = with {
+                            let trait_index = self.resolve_trait(with);
+                            if let Some((trait_index, self_ty)) = trait_index.zip(self_ty) {
+                                let implemented = functions.iter().zip(indexes).collect();
+                                self.check_implements(ty, &self_ty, with, trait_index, implemented);
+                            }
+                        }
                     }
                     Stmt::Decl {
                         name, ty, value, ..
@@ -1071,7 +1163,8 @@ impl<'a> Checker<'a> {
                     | Stmt::Group { .. }
                     | Stmt::Choice { .. }
                     | Stmt::Primitive { .. }
-                    | Stmt::Alias { .. } => {}
+                    | Stmt::Alias { .. }
+                    | Stmt::Trait { .. } => {}
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
@@ -1681,6 +1774,153 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Declares the trait called `name` in the current module. Its signatures
+    /// are worked out by `define_trait`, once types are defined.
+    fn declare_trait(&mut self, name: &'a str, functions: &'a [TraitFunction]) {
+        self.traits.push(TraitInfo {
+            name,
+            module: self.module,
+            functions,
+            signatures: vec![],
+        });
+        self.declare(name, Binding::Trait(self.traits.len() - 1));
+    }
+
+    /// Works out the types in the signatures of the trait at `index` in
+    /// `traits`, where `Self` stands for whichever type implements it.
+    fn define_trait(&mut self, index: usize) {
+        let TraitInfo {
+            name,
+            module,
+            functions,
+            ..
+        } = self.traits[index];
+        self.module = module;
+        let mut names = HashSet::new();
+        let mut signatures = vec![];
+        for function in functions {
+            if !names.insert(&function.name) {
+                self.error(CheckError::TraitFnRedeclared {
+                    trait_name: name.to_string(),
+                    function: function.name.clone(),
+                });
+            }
+            let params = function
+                .params
+                .iter()
+                .map(|param| self.trait_type(&param.ty))
+                .collect();
+            signatures.push((params, self.trait_type(&function.ret)));
+        }
+        self.traits[index].signatures = signatures;
+    }
+
+    /// Resolves the type called `name` in a trait's signature.
+    fn trait_type(&mut self, name: &Name) -> Option<TraitType> {
+        if *name == Name::new("Self") {
+            return Some(TraitType::SelfType);
+        }
+        self.resolve_type(name).map(TraitType::Type)
+    }
+
+    /// Finds the trait called `name`, returning its index into `traits`.
+    fn resolve_trait(&mut self, name: &Name) -> Option<usize> {
+        match self.lookup(name) {
+            Ok(Binding::Trait(index)) => Some(index),
+            Ok(_) | Err(LookupError::Captured) => {
+                self.error(CheckError::NotATrait(name.to_string()));
+                None
+            }
+            Err(LookupError::Undeclared) => {
+                self.error(CheckError::UnknownTrait(name.to_string()));
+                None
+            }
+            Err(error) => {
+                self.lookup_error(name, error);
+                None
+            }
+        }
+    }
+
+    /// Checks that `functions`, from `impl ty with trait_name`, each with its
+    /// index into `functions`, are exactly the functions of the trait at
+    /// `index` in `traits`, which `self_ty` implements. Labels and types must
+    /// match, but parameter names don't need to, since callers never see
+    /// them.
+    fn check_implements(
+        &mut self,
+        ty: &Name,
+        self_ty: &Type,
+        trait_name: &Name,
+        index: usize,
+        functions: Vec<(&ImplFunction, usize)>,
+    ) {
+        let trait_ = &self.traits[index];
+        let matches = |found: &Option<Type>, expected: &Option<TraitType>| match (found, expected) {
+            (Some(found), Some(TraitType::SelfType)) => found == self_ty,
+            (Some(found), Some(TraitType::Type(expected))) => found == expected,
+            // An unknown type has already been reported.
+            _ => true,
+        };
+
+        let mut errors = vec![];
+        for &(
+            ImplFunction {
+                is_static,
+                function,
+            },
+            implemented,
+        ) in &functions
+        {
+            let Some(position) = trait_
+                .functions
+                .iter()
+                .position(|declared| declared.name == function.name)
+            else {
+                errors.push(CheckError::NotInTrait {
+                    trait_name: trait_name.to_string(),
+                    function: function.name.clone(),
+                });
+                continue;
+            };
+            let declared = &trait_.functions[position];
+            let (params, returns) = &trait_.signatures[position];
+            let signature = &self.functions[implemented];
+            let same = *is_static == declared.is_static
+                && signature.params.len() == params.len()
+                && signature
+                    .params
+                    .iter()
+                    .zip(&declared.params)
+                    .zip(params)
+                    .all(|((found, declared), expected)| {
+                        found.label == declared.label.as_deref() && matches(&found.ty, expected)
+                    })
+                && matches(&signature.returns, returns);
+            if !same {
+                errors.push(CheckError::TraitFnMismatch {
+                    trait_name: trait_name.to_string(),
+                    expected: signature_text(declared),
+                });
+            }
+        }
+        for declared in trait_.functions {
+            if !functions
+                .iter()
+                .any(|(implemented, _)| implemented.function.name == declared.name)
+            {
+                errors.push(CheckError::MissingTraitFn {
+                    ty: ty.to_string(),
+                    trait_name: trait_name.to_string(),
+                    expected: signature_text(declared),
+                });
+            }
+        }
+        for error in errors {
+            self.error(error);
+        }
+    }
+
     /// Records the primitive function called `name`, at `index` in
     /// `functions`, which must be declared in the standard library.
     fn define_primitive_fn(&mut self, index: usize, name: &str) {
@@ -1889,10 +2129,11 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Use(_)
             | Stmt::Impl { .. }
+            | Stmt::Trait { .. }
             | Stmt::Primitive { .. }
             | Stmt::PrimitiveFn { .. } => {
                 unreachable!(
-                    "the parser only allows `use`, `impl` and `primitive` at the top level"
+                    "the parser only allows `use`, `impl`, `trait` and `primitive` at the top level"
                 )
             }
             Stmt::Decl {
@@ -1944,6 +2185,9 @@ impl<'a> Checker<'a> {
                     }
                     Ok(Binding::Type(_) | Binding::Alias(_)) => {
                         self.error(CheckError::TypeAsValue(name.clone()));
+                    }
+                    Ok(Binding::Trait(_)) => {
+                        self.error(CheckError::TraitAsValue(name.clone()));
                     }
                     // `lookup` never finds top-level values from inside a
                     // function, which is the only place assignments can be.
@@ -2187,6 +2431,10 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Binding::Type(_) | Binding::Alias(_)) => {
                     self.error(CheckError::TypeAsValue(name.to_string()));
+                    Typed::UNKNOWN
+                }
+                Ok(Binding::Trait(_)) => {
+                    self.error(CheckError::TraitAsValue(name.to_string()));
                     Typed::UNKNOWN
                 }
                 Err(error) => {
@@ -2897,7 +3145,11 @@ impl<'a> Checker<'a> {
         let index = match binding {
             Ok(Binding::Function(index)) => index,
             Ok(
-                Binding::Value { .. } | Binding::Global(_) | Binding::Type(_) | Binding::Alias(_),
+                Binding::Value { .. }
+                | Binding::Global(_)
+                | Binding::Type(_)
+                | Binding::Alias(_)
+                | Binding::Trait(_),
             ) => {
                 self.error(CheckError::NotAFunction(callee.to_string()));
                 return Typed::UNKNOWN;
@@ -3079,6 +3331,31 @@ impl<'a> Checker<'a> {
             args: vec![],
         })
     }
+}
+
+/// How `function` is written in its trait, such as `fn and(_ rhs: Self) ->
+/// Bool`, for messages.
+fn signature_text(function: &TraitFunction) -> String {
+    let params: Vec<_> = function
+        .params
+        .iter()
+        .map(|param| match &param.label {
+            None => format!("_ {}: {}", param.name, param.ty),
+            Some(label) if *label == param.name => format!("{}: {}", param.name, param.ty),
+            Some(label) => format!("{label} {}: {}", param.name, param.ty),
+        })
+        .collect();
+    let static_ = if function.is_static { "static " } else { "" };
+    let returns = if function.ret == Name::new("Void") {
+        String::new()
+    } else {
+        format!(" -> {}", function.ret)
+    };
+    format!(
+        "{static_}fn {}({}){returns}",
+        function.name,
+        params.join(", ")
+    )
 }
 
 /// The smallest and largest values of an integer type `bits` wide.
@@ -6689,13 +6966,13 @@ mod tests {
                 "
             ),
             [
-                "`Self` can only be used inside an `impl`",
-                "`Self` can only be used inside an `impl`",
-                "`Self` can only be used inside an `impl`",
-                "`Self` can only be used inside an `impl`",
-                "`Self` can only be used inside an `impl`",
-                "`Self` can only be used inside an `impl`",
-                "`Self` can only be used inside an `impl`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
             ]
         );
     }
@@ -6714,6 +6991,211 @@ mod tests {
                 "
             ),
             ["unknown type `Missing`"]
+        );
+    }
+
+    /// `Custom` and the `And` trait, for trait tests.
+    const AND: &str = "
+        group Custom {
+            let value: Int
+        }
+
+        trait And {
+            fn and(_ rhs: Self) -> Bool
+            static fn zero() -> Self
+        }
+        ";
+
+    #[test]
+    fn impls_can_implement_traits() {
+        // Parameter names don't need to match, and `Self` is the type being
+        // implemented, however it's written.
+        let src = format!(
+            "
+            {AND}
+            impl Custom with And {{
+                fn and(_ other: Self) -> Bool {{
+                    return self.value == other.value
+                }}
+
+                static fn zero() -> Custom {{
+                    return Custom {{ value: 0 }}
+                }}
+            }}
+
+            impl Int with And {{
+                fn and(_ rhs: Int) -> Bool {{
+                    return self == rhs
+                }}
+
+                static fn zero() -> Self {{
+                    return 0
+                }}
+            }}
+
+            fn f(custom: Custom) -> Bool {{
+                return custom.and(Custom.zero()) & 1.and(Int.zero())
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn traits_can_be_implemented_from_other_modules() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/logic",
+                    "
+                    trait Not {
+                        fn not() -> Self
+                    }
+                    ",
+                ),
+                (
+                    "/main",
+                    "
+                    use /logic
+                    impl Bool with Not {
+                        fn not() -> Bool {
+                            return !self
+                        }
+                    }
+                    impl Int with logic::Not {
+                        fn not() -> Int {
+                            return .!self
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn trait_functions_must_match_their_declarations() {
+        let src = format!(
+            "
+            {AND}
+            trait Reset {{
+                fn reset(to value: Int)
+            }}
+
+            impl Custom with And {{
+                fn and(rhs: Self) -> Bool {{
+                    return true
+                }}
+
+                fn zero() -> Self {{
+                    return self
+                }}
+            }}
+
+            impl Int with And {{
+                fn and(_ rhs: Bool) -> Bool {{
+                    return true
+                }}
+
+                static fn zero() -> Bool {{
+                    return true
+                }}
+            }}
+
+            impl Bool with Reset {{
+                fn reset(to value: Int, twice: Bool) {{}}
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "trait `And` declares this function as `fn and(_ rhs: Self) -> Bool`",
+                "trait `And` declares this function as `static fn zero() -> Self`",
+                "trait `And` declares this function as `fn and(_ rhs: Self) -> Bool`",
+                "trait `And` declares this function as `static fn zero() -> Self`",
+                "trait `Reset` declares this function as `fn reset(to value: Int)`",
+            ]
+        );
+    }
+
+    #[test]
+    fn impls_with_traits_have_exactly_their_functions() {
+        let src = format!(
+            "
+            {AND}
+            impl Custom with And {{
+                fn and(_ rhs: Self) -> Bool {{
+                    return true
+                }}
+
+                fn or(_ rhs: Self) -> Bool {{
+                    return true
+                }}
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`or` is not declared by trait `And`",
+                "`impl Custom with And` is missing `static fn zero() -> Self`",
+            ]
+        );
+    }
+
+    #[test]
+    fn traits_are_not_types_or_values() {
+        let src = format!(
+            "
+            {AND}
+            impl Custom with Missing {{}}
+            impl Custom with Int {{}}
+            impl And {{}}
+            fn f(x: And) {{
+                let y = And
+                And()
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "unknown trait `Missing`",
+                "`Int` is not a trait",
+                "`And` is not a type",
+                "`And` is not a type",
+                "`And` is a trait, not a value",
+                "`And` is not a function",
+            ]
+        );
+    }
+
+    #[test]
+    fn traits_report_their_own_errors_once() {
+        assert_eq!(
+            messages_top(
+                "
+                trait Broken {
+                    fn f(_ x: Missing)
+                    fn f()
+                }
+                trait Twice {}
+                group Twice {}
+                impl Int with Broken {
+                    fn f(_ x: Int) {}
+                }
+                impl Bool with Broken {
+                    fn f(_ x: Bool) {}
+                }
+                "
+            ),
+            [
+                "`Twice` is already declared",
+                "unknown type `Missing`",
+                "trait `Broken` already declares `f`",
+            ]
         );
     }
 
