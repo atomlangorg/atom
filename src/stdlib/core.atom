@@ -85,25 +85,19 @@ trait Not {
     fn not() -> Output
 }
 
+// Each `impl` infers its trait's aliases from its signatures, such as
+// `alias Rhs = Self` and `alias Output = Bool` from `and`.
 impl Bool with And {
-    alias Rhs = Self
-    alias Output = Bool
-
     // `true` if both are `true`.
-    primitive fn and(_ rhs: Rhs) -> Output
+    primitive fn and(_ rhs: Self) -> Bool
 }
 
 impl Bool with Or {
-    alias Rhs = Self
-    alias Output = Bool
-
     // `true` if either is `true`.
-    primitive fn or(_ rhs: Rhs) -> Output
+    primitive fn or(_ rhs: Self) -> Bool
 }
 
 impl Bool with Not {
-    alias Output = Bool
-
     // `true` if it's `false`, and `false` if it's `true`.
-    primitive fn not() -> Output
+    primitive fn not() -> Bool
 }

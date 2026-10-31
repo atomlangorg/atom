@@ -1963,6 +1963,27 @@ mod tests {
     }
 
     #[test]
+    fn operators_work_with_inferred_aliases() {
+        // `Rhs` and `Output` are inferred from `and`, so `Int & Bool` is an
+        // `Int`.
+        let src = "
+            impl Int with And {
+                fn and(_ keep: Bool) -> Int {
+                    if keep {
+                        return self
+                    }
+                    return 0
+                }
+            }
+
+            fn main() -> Int {
+                return (40 & true) + (7 & false) + (2 & !false)
+            }
+            ";
+        assert_eq!(run(src), 42);
+    }
+
+    #[test]
     fn trait_functions_are_called_like_any_other() {
         let src = "
             group Counter {

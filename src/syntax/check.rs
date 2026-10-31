@@ -336,6 +336,16 @@ pub enum CheckError {
     /// An `impl` without a trait has an alias, which only a trait can
     /// declare.
     ImplAliasWithoutTrait(String),
+    /// An alias that's inferred from an `impl`'s signatures was used in them,
+    /// or in another of its aliases, without being given.
+    InferredAliasUsed(String),
+    /// An `impl` doesn't give one of its trait's aliases, which can't be
+    /// inferred since none of the trait's functions use it.
+    UninferableAlias {
+        ty: String,
+        trait_name: String,
+        alias: String,
+    },
     /// An `impl` with a trait implements one of its functions with a
     /// different signature to the trait's, which is `expected`.
     TraitFnMismatch {
@@ -349,8 +359,8 @@ pub enum CheckError {
         trait_name: &'static str,
         found: Type,
     },
-    /// An `impl` with a trait doesn't give one of its aliases, or implement
-    /// one of its functions, which is `expected`, as the trait writes it.
+    /// An `impl` with a trait doesn't implement one of its functions, which
+    /// is `expected`, as the trait writes it.
     MissingTraitMember {
         ty: String,
         trait_name: String,
@@ -674,6 +684,18 @@ impl fmt::Display for CheckError {
                 f,
                 "`alias {name}` can only be given in an `impl` with a trait that declares it"
             ),
+            Self::InferredAliasUsed(name) => write!(
+                f,
+                "`{name}` is inferred from this `impl`'s signatures, so they can't use it unless it's given with `alias {name} = ...`"
+            ),
+            Self::UninferableAlias {
+                ty,
+                trait_name,
+                alias,
+            } => write!(
+                f,
+                "`impl {ty} with {trait_name}` must give `alias {alias}`, since it can't be inferred when none of the trait's functions use it"
+            ),
             Self::TraitFnMismatch {
                 trait_name,
                 expected,
@@ -795,6 +817,16 @@ struct Implementation<'b, 'a> {
     alias_types: Option<usize>,
 }
 
+/// The type of an alias in an `impl`.
+#[derive(Debug, Clone)]
+enum ImplAliasType {
+    /// Given, or already inferred. `None` if it's unknown.
+    Known(Option<Type>),
+    /// Not given, so it's being inferred from the `impl`'s signatures, which
+    /// can't use it.
+    Inferring,
+}
+
 /// A type in a trait's function signature.
 #[derive(Debug, Clone)]
 enum TraitType {
@@ -904,6 +936,8 @@ enum LookupError {
     Reported,
     /// The name is `Self`, outside an `impl`.
     SelfTypeOutsideImpl,
+    /// The name is an `impl`'s alias that's still being inferred.
+    InferredAlias,
 }
 
 /// A field or method of a type, which are found with `.name` on a value.
@@ -987,9 +1021,9 @@ struct Checker<'a> {
     /// functions nested in its methods. Only it can be constructed. `Some(None)`
     /// if the `impl`'s type is unknown.
     impl_type: Option<Option<Type>>,
-    /// The aliases given by each `impl`, such as `alias Rhs = Self`, by name,
-    /// with types that are `None` if they're unknown.
-    impl_aliases: Vec<HashMap<&'a str, Option<Type>>>,
+    /// The aliases of each `impl` with a trait, by name, whether they're
+    /// given, such as `alias Rhs = Self`, or inferred.
+    impl_aliases: Vec<HashMap<&'a str, ImplAliasType>>,
     /// The index in `impl_aliases` of the aliases that the code being
     /// checked can use, if it's in an `impl` that gives any, including inside
     /// functions nested in its methods.
@@ -1168,7 +1202,7 @@ impl<'a> Checker<'a> {
                         // Signatures can use `Self` and the `impl`'s aliases,
                         // just like bodies.
                         let outer_impl_type = self.impl_type.replace(self_ty.clone());
-                        let impl_aliases = self.define_impl_aliases(aliases);
+                        let impl_aliases = self.define_impl_aliases(aliases, trait_index);
                         let mut indexes = vec![];
                         for ImplFunction {
                             is_static,
@@ -1207,6 +1241,12 @@ impl<'a> Checker<'a> {
                         }
                         self.impl_type = outer_impl_type;
                         self.current_impl_aliases = None;
+                        if let Some((with, (trait_index, aliases))) =
+                            with.as_ref().zip(trait_index.zip(impl_aliases))
+                        {
+                            let implemented: Vec<_> = functions.iter().zip(&indexes).collect();
+                            self.infer_impl_aliases(ty, with, trait_index, aliases, &implemented);
+                        }
                         if let Some((with, (trait_index, self_ty))) =
                             with.as_ref().zip(trait_index.zip(self_ty))
                         {
@@ -1483,7 +1523,12 @@ impl<'a> Checker<'a> {
                 if let Some(aliases) = self.current_impl_aliases
                     && let Some(ty) = self.impl_aliases[aliases].get(name.name.as_str())
                 {
-                    return ty.clone().map(Binding::Type).ok_or(LookupError::Reported);
+                    return match ty {
+                        ImplAliasType::Known(ty) => {
+                            ty.clone().map(Binding::Type).ok_or(LookupError::Reported)
+                        }
+                        ImplAliasType::Inferring => Err(LookupError::InferredAlias),
+                    };
                 }
 
                 // The current module's own names come first. Otherwise, a name
@@ -1539,6 +1584,7 @@ impl<'a> Checker<'a> {
             LookupError::Module(error) => *error,
             LookupError::Reported => return,
             LookupError::SelfTypeOutsideImpl => CheckError::SelfTypeOutsideImpl,
+            LookupError::InferredAlias => CheckError::InferredAliasUsed(name_string),
         };
         self.error(error);
     }
@@ -1960,21 +2006,99 @@ impl<'a> Checker<'a> {
 
     /// Works out the types of an `impl`'s `aliases`, which can use `Self`
     /// and the aliases before them, returning their index in `impl_aliases`
-    /// if there are any. While its functions are declared, they can be used.
-    fn define_impl_aliases(&mut self, aliases: &'a [ImplAlias]) -> Option<usize> {
-        if aliases.is_empty() {
+    /// if there are any, or it has a trait, whose index in `traits` is
+    /// `trait_index`. While its functions are declared, they can be used.
+    ///
+    /// The trait's aliases that aren't given are inferred by
+    /// `infer_impl_aliases` once its functions are declared, so until then,
+    /// they can't be used.
+    fn define_impl_aliases(
+        &mut self,
+        aliases: &'a [ImplAlias],
+        trait_index: Option<usize>,
+    ) -> Option<usize> {
+        if aliases.is_empty() && trait_index.is_none() {
             return None;
         }
-        self.impl_aliases.push(HashMap::new());
+        let inferred = trait_index
+            .map(|index| self.traits[index].aliases)
+            .unwrap_or_default()
+            .iter()
+            .filter(|declared| !aliases.iter().any(|alias| alias.name == **declared))
+            .map(|declared| (declared.as_str(), ImplAliasType::Inferring));
+        self.impl_aliases.push(inferred.collect());
         let index = self.impl_aliases.len() - 1;
         self.current_impl_aliases = Some(index);
         for alias in aliases {
-            let ty = self.resolve_type(&alias.ty);
+            let ty = ImplAliasType::Known(self.resolve_type(&alias.ty));
             if self.impl_aliases[index].insert(&alias.name, ty).is_some() {
                 self.error(CheckError::Redeclared(alias.name.clone()));
             }
         }
         Some(index)
+    }
+
+    /// Infers the types of the aliases of `impl ty with trait_name` that it
+    /// doesn't give, at `aliases` in `impl_aliases`. Each is the type that
+    /// `functions`, each with its index into `functions`, have where the
+    /// trait at `trait_index` in `traits` uses the alias, such as
+    /// `alias Rhs = Bool` from `fn and(_ rhs: Bool)` for `fn and(_ rhs: Rhs)`.
+    /// The first use decides it, and other uses must match it.
+    fn infer_impl_aliases(
+        &mut self,
+        ty: &Name,
+        trait_name: &Name,
+        trait_index: usize,
+        aliases: usize,
+        functions: &[(&ImplFunction, &usize)],
+    ) {
+        let trait_ = &self.traits[trait_index];
+        let mut inferred = vec![];
+        let mut errors = vec![];
+        for (alias, name) in trait_.aliases.iter().enumerate() {
+            if !matches!(
+                self.impl_aliases[aliases].get(name.as_str()),
+                Some(ImplAliasType::Inferring)
+            ) {
+                continue;
+            }
+            let is_alias = |expected: &Option<TraitType>| matches!(expected, Some(TraitType::Alias(found)) if *found == alias);
+            let used = trait_
+                .signatures
+                .iter()
+                .any(|(params, returns)| params.iter().any(is_alias) || is_alias(returns));
+            // Where the `impl`'s functions have the alias. A function that's
+            // missing or doesn't match is reported by `check_implements`.
+            let found = trait_.functions.iter().zip(&trait_.signatures).find_map(
+                |(declared, (params, returns))| {
+                    let &(_, &index) = functions
+                        .iter()
+                        .find(|(function, _)| function.function.name == declared.name)?;
+                    let signature = &self.functions[index];
+                    let found = signature.params.iter().map(|param| &param.ty);
+                    params
+                        .iter()
+                        .zip(found)
+                        .chain(iter::once((returns, &signature.returns)))
+                        .find(|(expected, _)| is_alias(expected))
+                        .map(|(_, found)| found.clone())
+                },
+            );
+            if !used {
+                errors.push(CheckError::UninferableAlias {
+                    ty: ty.to_string(),
+                    trait_name: trait_name.to_string(),
+                    alias: name.clone(),
+                });
+            }
+            inferred.push((name, found.flatten()));
+        }
+        for (name, ty) in inferred {
+            self.impl_aliases[aliases].insert(name, ImplAliasType::Known(ty));
+        }
+        for error in errors {
+            self.error(error);
+        }
     }
 
     /// Finds the trait called `name`, returning its index into `traits`.
@@ -2017,7 +2141,10 @@ impl<'a> Checker<'a> {
         let trait_ = &self.traits[index];
         let alias_type = |alias: usize| {
             let types = &self.impl_aliases[alias_types?];
-            types.get(trait_.aliases[alias].as_str())?.as_ref()
+            match types.get(trait_.aliases[alias].as_str())? {
+                ImplAliasType::Known(ty) => ty.as_ref(),
+                ImplAliasType::Inferring => None,
+            }
         };
         let matches = |found: &Option<Type>, expected: &Option<TraitType>| match (found, expected) {
             (Some(found), Some(TraitType::SelfType)) => found == self_ty,
@@ -2076,15 +2203,6 @@ impl<'a> Checker<'a> {
                 errors.push(CheckError::TraitFnMismatch {
                     trait_name: trait_name.to_string(),
                     expected: signature_text(declared),
-                });
-            }
-        }
-        for declared in trait_.aliases {
-            if !aliases.iter().any(|alias| alias.name == *declared) {
-                errors.push(CheckError::MissingTraitMember {
-                    ty: ty.to_string(),
-                    trait_name: trait_name.to_string(),
-                    expected: format!("alias {declared}"),
                 });
             }
         }
@@ -7556,6 +7674,139 @@ mod tests {
     }
 
     #[test]
+    fn impls_infer_aliases_they_do_not_give() {
+        // `Rhs` and `Output` are inferred from `combine`, so its body can use
+        // them, and given ones are still checked.
+        let src = format!(
+            "
+            {COMBINE}
+            impl Int with Combine {{
+                fn combine(with rhs: Bool) -> Self {{
+                    let keep: Rhs = rhs
+                    if keep {{
+                        let kept: Output = self
+                        return kept
+                    }}
+                    return 0
+                }}
+            }}
+
+            impl Bool with Combine {{
+                alias Output = Bool
+
+                fn combine(with rhs: Self) -> Bool {{
+                    return self & rhs
+                }}
+            }}
+
+            fn f() -> Int {{
+                let a: Bool = true.combine(with: false)
+                return 1.combine(with: a)
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn operators_work_with_inferred_aliases() {
+        let src = "
+            group Flags {
+                let bits: Int
+            }
+
+            impl Flags with And {
+                fn and(_ rhs: Self) -> Bool {
+                    return self.bits .& rhs.bits != 0
+                }
+            }
+
+            impl Flags with Not {
+                fn not() -> Self {
+                    return Flags { bits: .!self.bits }
+                }
+            }
+
+            fn f(a: Flags) -> Bool {
+                let b: Flags = !a
+                return a & b
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn inferred_aliases_must_be_used_consistently() {
+        // `first` decides `Item`, so `second` doesn't match.
+        let src = "
+            trait Pair {
+                alias Item
+                fn first() -> Item
+                fn second() -> Item
+            }
+
+            impl Int with Pair {
+                fn first() -> Int {
+                    return self
+                }
+                fn second() -> Bool {
+                    return true
+                }
+            }
+            ";
+        assert_eq!(
+            messages_top(src),
+            ["trait `Pair` declares this function as `fn second() -> Item`"]
+        );
+    }
+
+    #[test]
+    fn inferred_aliases_cannot_be_used_in_signatures() {
+        let src = format!(
+            "
+            {COMBINE}
+            trait Make {{
+                alias Output
+                alias Unused
+                fn make() -> Output
+            }}
+
+            impl Int with Combine {{
+                alias Copy = Rhs
+                fn combine(with rhs: Bool) -> Rhs {{
+                    return rhs
+                }}
+            }}
+
+            impl Bool with Make {{
+                fn make() -> Bool {{
+                    return true
+                }}
+            }}
+
+            impl Void with Combine {{}}
+            "
+        );
+        // A trait's alias that none of its functions use can't be inferred,
+        // but one whose function is missing is only reported as that.
+        let inferred = |name| {
+            format!(
+                "`{name}` is inferred from this `impl`'s signatures, so they can't use it unless it's given with `alias {name} = ...`"
+            )
+        };
+        assert_eq!(
+            messages_top(&src),
+            [
+                inferred("Rhs"),
+                inferred("Rhs"),
+                "`Copy` is not declared by trait `Combine`".to_string(),
+                "`impl Bool with Make` must give `alias Unused`, since it can't be inferred when none of the trait's functions use it".to_string(),
+                "`impl Void with Combine` is missing `fn combine(with rhs: Rhs) -> Output`".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn impl_aliases_are_only_visible_in_their_impl() {
         let src = format!(
             "
@@ -7583,7 +7834,7 @@ mod tests {
     }
 
     #[test]
-    fn impls_must_give_exactly_their_traits_aliases() {
+    fn impls_can_only_give_their_traits_aliases() {
         let src = format!(
             "
             {COMBINE}
@@ -7604,10 +7855,10 @@ mod tests {
         );
         assert_eq!(
             messages_top(&src),
+            // `Output` isn't given, so it's inferred from `combine`.
             [
                 "`Rhs` is already declared",
                 "`Extra` is not declared by trait `Combine`",
-                "`impl Int with Combine` is missing `alias Output`",
                 "`alias Output` can only be given in an `impl` with a trait that declares it",
             ]
         );
