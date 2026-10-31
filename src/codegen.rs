@@ -49,7 +49,7 @@ use inkwell::{
 };
 
 use crate::{
-    ir::{Expr, MatchOption, Primitive, Program, Stmt, TypeDef},
+    ir::{Body, Expr, MatchOption, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
     syntax::ast::{BinOp, UnOp},
 };
 
@@ -305,11 +305,27 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             self.builder.build_store(slot, param)?;
         }
 
-        self.block(&function.body)?;
-        // Every path returns, so the end can't be reached, such as after an
-        // `if` whose branches both return.
-        if !self.is_terminated() {
-            self.builder.build_unreachable()?;
+        match &function.body {
+            Body::Stmts(body) => {
+                self.block(body)?;
+                // Every path returns, so the end can't be reached, such as
+                // after an `if` whose branches both return, or a call to a
+                // function that never returns.
+                if !self.is_terminated() {
+                    self.builder.build_unreachable()?;
+                }
+            }
+            Body::Primitive(PrimitiveFn::Exit) => {
+                // C's `exit` never returns.
+                let exit = self.module.get_function("exit").unwrap_or_else(|| {
+                    let code = self.context.i32_type();
+                    let fn_type = self.context.void_type().fn_type(&[code.into()], false);
+                    self.module.add_function("exit", fn_type, None)
+                });
+                let code = self.context.i32_type().const_int(1, false);
+                self.builder.build_call(exit, &[code.into()], "")?;
+                self.builder.build_unreachable()?;
+            }
         }
         Ok(())
     }
@@ -1688,6 +1704,48 @@ mod tests {
         }
         let src = "fn main() -> Int {\nlet x: IntU8 = 127\nlet y = x .< 1 .> 7\nreturn 0\n}";
         assert!(!traps("shl_keeps", src));
+    }
+
+    #[test]
+    fn exit_stops_the_program_with_exit_code_1() {
+        let src = "
+            fn check(_ n: Int) -> Int {
+                if n > 5 {
+                    exit()
+                }
+                return n
+            }
+
+            fn stop() {
+                exit()
+            }
+
+            fn main() -> Int {
+                let a = check(3)
+                if a == 3 {
+                    stop()
+                }
+                return 7
+            }
+            ";
+        assert_eq!(run_executable("exit_in_void", src).code(), Some(1));
+
+        let src = "
+            fn check(_ n: Int) -> Int {
+                if n > 5 {
+                    exit()
+                }
+                return n
+            }
+
+            fn main() -> Int {
+                return check(3) + check(9)
+            }
+            ";
+        assert_eq!(run_executable("exit_in_int", src).code(), Some(1));
+
+        let src = "fn main() -> Int { exit() }";
+        assert_eq!(run_executable("exit_in_main", src).code(), Some(1));
     }
 
     #[test]

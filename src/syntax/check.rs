@@ -35,7 +35,8 @@
 //! library's other modules like any other module. Only the standard library
 //! can declare
 //! primitive types, such as `Int`, which the compiler represents itself, and
-//! whose values only come from literals and operators.
+//! whose values only come from literals and operators, and primitive
+//! functions, such as `exit`, which the compiler implements itself.
 //!
 //! As it checks, the checker lowers the AST into an `ir::Program`. That program
 //! is only returned when there are no errors, so everything in it is known.
@@ -872,6 +873,9 @@ struct Checker<'a> {
     /// For each of `functions`, what it compiles to, once its body has been
     /// checked, or `None` if it has an error.
     lowered_functions: Vec<Option<ir::Function>>,
+    /// The call statements whose result is a `Never`, which never finish, so
+    /// count as returning.
+    never_returns: HashSet<*const Stmt>,
     /// For each type `id`, its methods by name. Methods aren't names in any
     /// scope, and are only found through the type of the value they're called
     /// on, in the modules that can see the module declaring them. They share
@@ -1001,6 +1005,10 @@ impl<'a> Checker<'a> {
                                 kind: FnKind::Function,
                             },
                         ));
+                    }
+                    Stmt::PrimitiveFn { name, params, ret } => {
+                        let index = self.declare_fn(name, params, ret);
+                        self.define_primitive_fn(index, name);
                     }
                     Stmt::Impl { ty, functions } => {
                         let self_ty = self.resolve_type(ty);
@@ -1603,7 +1611,7 @@ impl<'a> Checker<'a> {
         self.impl_type = outer_impl_type;
 
         // A `Void` function can finish without an explicit `return`.
-        if !always_returns(body) {
+        if !self.always_returns(body) {
             match &returns {
                 Some(expected) if *expected != self.std_type("Void") => {
                     self.error(CheckError::MissingReturn {
@@ -1625,8 +1633,58 @@ impl<'a> Checker<'a> {
                 locals,
                 params: param_count,
                 returns: returns.id,
-                body: lowered,
+                body: ir::Body::Stmts(lowered),
             });
+    }
+
+    /// Whether `stmts`, which have been checked, return on every path. A call
+    /// that results in a `Never` counts, since it never finishes. Both
+    /// branches of an `if` must return for it to count, so an `if` without an
+    /// `else` never does. Every option of a `match` must return, which is
+    /// enough since every option is matched.
+    fn always_returns(&self, stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            Stmt::Return(_) => true,
+            Stmt::Expr(_) => self.never_returns.contains(&(stmt as *const Stmt)),
+            Stmt::Match { options, .. } => options
+                .iter()
+                .all(|option| self.always_returns(&option.body)),
+            Stmt::If {
+                then_block,
+                else_block: Some(else_block),
+                ..
+            } => self.always_returns(then_block) && self.always_returns(else_block),
+            _ => false,
+        })
+    }
+
+    /// Records the primitive function called `name`, at `index` in
+    /// `functions`, which must be declared in the standard library.
+    fn define_primitive_fn(&mut self, index: usize, name: &str) {
+        if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
+            self.error(CheckError::PrimitiveOutsideStdlib(name.to_string()));
+            return;
+        }
+        let primitive = match name {
+            "exit" => ir::PrimitiveFn::Exit,
+            _ => panic!("the compiler doesn't know how to implement `{name}`"),
+        };
+        let Signature {
+            name: full_name,
+            params,
+            returns,
+        } = self.functions[index].clone();
+        let locals: Option<Vec<_>> = params
+            .iter()
+            .map(|param| Some(param.ty.as_ref()?.id))
+            .collect();
+        self.lowered_functions[index] = locals.zip(returns).map(|(locals, returns)| ir::Function {
+            name: full_name,
+            params: locals.len(),
+            locals,
+            returns: returns.id,
+            body: ir::Body::Primitive(primitive),
+        });
     }
 
     /// Declares a value in the current function, returning its index among
@@ -1806,7 +1864,10 @@ impl<'a> Checker<'a> {
     /// separately, or if it has an error.
     fn stmt(&mut self, stmt: &'a Stmt) -> Option<ir::Stmt> {
         match stmt {
-            Stmt::Use(_) | Stmt::Impl { .. } | Stmt::Primitive { .. } => {
+            Stmt::Use(_)
+            | Stmt::Impl { .. }
+            | Stmt::Primitive { .. }
+            | Stmt::PrimitiveFn { .. } => {
                 unreachable!(
                     "the parser only allows `use`, `impl` and `primitive` at the top level"
                 )
@@ -1945,6 +2006,9 @@ impl<'a> Checker<'a> {
                     Expr::Call { callee, args } => self.call(callee, args),
                     _ => self.expr(expr),
                 };
+                if found.ty == Some(self.std_type("Never")) {
+                    self.never_returns.insert(stmt);
+                }
                 found.expr.map(ir::Stmt::Expr)
             }
         }
@@ -2970,22 +3034,6 @@ impl<'a> Checker<'a> {
             args: vec![],
         })
     }
-}
-
-/// Whether `stmts` returns on every path. Both branches of an `if` must return
-/// for it to count, so an `if` without an `else` never does. Every option of
-/// a `match` must return, which is enough since every option is matched.
-fn always_returns(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|stmt| match stmt {
-        Stmt::Return(_) => true,
-        Stmt::Match { options, .. } => options.iter().all(|option| always_returns(&option.body)),
-        Stmt::If {
-            then_block,
-            else_block: Some(else_block),
-            ..
-        } => always_returns(then_block) && always_returns(else_block),
-        _ => false,
-    })
 }
 
 /// The smallest and largest values of an integer type `bits` wide.
@@ -4271,6 +4319,60 @@ mod tests {
                 "
             ),
             Err(vec![missing("f")])
+        );
+    }
+
+    #[test]
+    fn calls_that_never_return_end_their_path() {
+        // `exit` returns `Never`, and so does `fail`, which calls it.
+        let src = "
+            fn fail() -> Never {
+                exit()
+            }
+            fn f() -> Int {
+                exit()
+            }
+            fn g(c: Bool) -> Int {
+                if c {
+                    return 1
+                } else {
+                    fail()
+                }
+            }
+            fn h(c: Bool) {
+                if c {
+                    exit()
+                }
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn calls_that_never_return_only_end_their_own_path() {
+        let missing = |function: &str| CheckError::MissingReturn {
+            function: function.to_string(),
+            expected: ty("Int"),
+        };
+        assert_eq!(
+            check_top(
+                "
+                fn f(c: Bool) -> Int {
+                    if c {
+                        exit()
+                    }
+                }
+                fn g() -> Int {
+                    fn nested() -> Never {
+                        exit()
+                    }
+                }
+                fn h() -> Int {
+                    Void.new()
+                }
+                "
+            ),
+            Err(vec![missing("f"), missing("g"), missing("h")])
         );
     }
 
@@ -6386,6 +6488,14 @@ mod tests {
                 "/main: cannot find module `stdlib/missing`",
                 "/main: `stdlib` is a package, so use one of its modules, such as `stdlib/core`",
             ]
+        );
+    }
+
+    #[test]
+    fn only_the_stdlib_can_declare_primitive_functions() {
+        assert_eq!(
+            messages_top("primitive fn stop() -> Never"),
+            ["`stop` can't be a primitive, since only the standard library can declare them"]
         );
     }
 

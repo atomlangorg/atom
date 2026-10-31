@@ -289,6 +289,14 @@ pub enum Stmt {
     Primitive {
         name: String,
     },
+    /// `primitive fn name(params) -> Type`: a function that the compiler
+    /// implements itself, such as `exit`. Only allowed at the top level of
+    /// the standard library.
+    PrimitiveFn {
+        name: String,
+        params: Vec<Param>,
+        ret: Name,
+    },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
     /// options, each holding a value of its own type.
     Choice {

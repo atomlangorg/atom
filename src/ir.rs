@@ -71,8 +71,22 @@ pub struct Function {
     pub params: usize,
     /// The return type, as an index into `Program::types`.
     pub returns: usize,
-    /// Every path through the body ends with a `return`.
-    pub body: Vec<Stmt>,
+    pub body: Body,
+}
+
+#[derive(Debug)]
+pub enum Body {
+    /// Every path through the statements ends with a `return`, or a call to
+    /// a function that never returns.
+    Stmts(Vec<Stmt>),
+    /// A function that the compiler implements itself, such as `exit`.
+    Primitive(PrimitiveFn),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimitiveFn {
+    /// Stops the program with exit code 1.
+    Exit,
 }
 
 #[derive(Debug)]

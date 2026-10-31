@@ -455,6 +455,30 @@ where
         )
         .map(|(name, options)| Stmt::Choice { name, options });
 
+    // `label name: Type`, `_ name: Type`, or `name: Type`, where the name is
+    // also the label.
+    let param = just(Token::Underscore)
+        .ignore_then(ident)
+        .map(|name| (None, name))
+        .or(ident.then(ident).map(|(label, name)| (Some(label), name)))
+        .or(ident.map(|name| (Some(name.clone()), name)))
+        .then_ignore(just(Token::Colon))
+        .then(type_name.clone())
+        .map(|((label, name), ty)| Param { label, name, ty });
+    let params = comma_list(param, Token::LParen, Token::RParen);
+
+    // `fn name(params) -> Type`, or `fn name(params)`, which returns `Void`.
+    let signature = just(Token::Fn)
+        .ignore_then(ident)
+        .then(params)
+        .then(
+            just(Token::Arrow)
+                .ignore_then(type_name.clone())
+                .or_not()
+                .map(|ret| ret.unwrap_or_else(|| Name::new("Void"))),
+        )
+        .boxed();
+
     // One statement per line; blank lines are allowed anywhere.
     let mut stmt = Recursive::declare();
     let function = {
@@ -523,27 +547,8 @@ where
             )
             .map(|(value, options)| Stmt::Match { value, options });
 
-        // `label name: Type`, `_ name: Type`, or `name: Type`, where the name
-        // is also the label.
-        let param = just(Token::Underscore)
-            .ignore_then(ident)
-            .map(|name| (None, name))
-            .or(ident.then(ident).map(|(label, name)| (Some(label), name)))
-            .or(ident.map(|name| (Some(name.clone()), name)))
-            .then_ignore(just(Token::Colon))
-            .then(type_name.clone())
-            .map(|((label, name), ty)| Param { label, name, ty });
-        let params = comma_list(param, Token::LParen, Token::RParen);
-
-        let function = just(Token::Fn)
-            .ignore_then(ident)
-            .then(params)
-            .then(
-                just(Token::Arrow)
-                    .ignore_then(type_name.clone())
-                    .or_not()
-                    .map(|ret| ret.unwrap_or_else(|| Name::new("Void"))),
-            )
+        let function = signature
+            .clone()
             .then(block)
             .map(|(((name, params), ret), body)| Function {
                 name,
@@ -631,10 +636,13 @@ where
         )
         .map(|(ty, functions)| Stmt::Impl { ty, functions });
 
-    // `primitive Name`, which the checker only allows in the standard library.
-    let primitive = just(Token::Primitive)
-        .ignore_then(ident)
-        .map(|name| Stmt::Primitive { name });
+    // `primitive Name` or `primitive fn name(params) -> Type`, which the
+    // checker only allows in the standard library.
+    let primitive = just(Token::Primitive).ignore_then(
+        signature
+            .map(|((name, params), ret)| Stmt::PrimitiveFn { name, params, ret })
+            .or(ident.map(|name| Stmt::Primitive { name })),
+    );
 
     // The top level can only declare things, so a module never runs code
     // just by being imported. Other statements are parsed only so that they
@@ -2206,6 +2214,39 @@ mod tests {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
         assert!(parse_body("primitive Int").is_err());
+    }
+
+    #[test]
+    fn parses_primitive_functions_only_at_the_top_level() {
+        assert_eq!(
+            parse("primitive fn exit() -> Never\nprimitive fn wait(for seconds: Int)"),
+            Ok(vec![
+                Stmt::PrimitiveFn {
+                    name: "exit".to_string(),
+                    params: vec![],
+                    ret: Name::new("Never"),
+                },
+                Stmt::PrimitiveFn {
+                    name: "wait".to_string(),
+                    params: vec![Param {
+                        label: Some("for".to_string()),
+                        name: "seconds".to_string(),
+                        ty: Name::new("Int"),
+                    }],
+                    ret: Name::new("Void"),
+                },
+            ])
+        );
+        for src in [
+            "primitive fn",
+            "primitive fn exit",
+            "primitive fn exit() {}",
+            "primitive fn exit() -> Never {}",
+            "primitive fn other::exit()",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+        assert!(parse_body("primitive fn exit()").is_err());
     }
 
     #[test]

@@ -54,3 +54,7 @@ impl Void {
 // function with a `Never` parameter can never be called, and a `match` on a
 // `Never` has no options to match.
 choice Never {}
+
+// Stops the program immediately with exit code 1. It never finishes, so a
+// call to it ends its path through a function like a `return` would.
+primitive fn exit() -> Never
