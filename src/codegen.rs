@@ -17,7 +17,9 @@
 //! Back end of the compiler: turns a checked program into LLVM IR, then into
 //! a native executable.
 //!
-//! The primitive types `Int` and `Bool` are `i64` and `i1`. Every group is an
+//! The primitive integer types are LLVM integers of their width, such as `i8`
+//! for `IntU8` and `IntS8`, since LLVM leaves signedness to the operations
+//! used on them. `Bool` is `i1`. Every group is an
 //! LLVM struct of its fields, so `Void` is `{}`. A choice is a struct of an
 //! `i32` tag, the index of its option, then space for the largest of its
 //! options' values, which they share. Every Atom function becomes an
@@ -221,7 +223,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn declare_types(&mut self) {
         for ty in &self.program.types {
             let ty = match ty {
-                TypeDef::Primitive(Primitive::Int) => self.context.i64_type().into(),
+                &TypeDef::Primitive(Primitive::Int { bits, .. }) => NonZeroU32::new(bits)
+                    .and_then(|bits| self.context.custom_width_int_type(bits).ok())
+                    .expect("integer types have valid widths")
+                    .into(),
                 TypeDef::Primitive(Primitive::Bool) => self.context.bool_type().into(),
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
                     self.context.opaque_struct_type(name).into()
@@ -416,10 +421,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     fn expr(&mut self, expr: &Expr) -> Result<BasicValueEnum<'ctx>, BuilderError> {
         Ok(match expr {
-            Expr::Int(value) => self
-                .context
-                .i64_type()
-                .const_int(*value as u64, true)
+            Expr::Int { value, ty } => self.types[*ty]
+                .into_int_type()
+                .const_int(*value, false)
                 .into(),
             Expr::Bool(value) => self
                 .context
@@ -438,23 +442,36 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             Expr::Unary(op, operand) => {
                 let operand = self.expr(operand)?.into_int_value();
                 match op {
-                    // Negating the smallest integer overflows.
+                    // Negating the smallest integer overflows. Only signed
+                    // integers can be negated.
                     UnOp::Neg => {
-                        let zero = self.context.i64_type().const_zero();
+                        let zero = operand.get_type().const_zero();
                         self.checked("llvm.ssub.with.overflow", zero, operand)?
                     }
                     UnOp::Not => self.builder.build_not(operand, "")?,
                 }
                 .into()
             }
-            Expr::Binary(lhs, op, rhs) => {
+            Expr::Binary {
+                lhs,
+                op,
+                rhs,
+                signed,
+            } => {
                 let lhs = self.expr(lhs)?.into_int_value();
                 let rhs = self.expr(rhs)?.into_int_value();
+                let sign = if *signed { "s" } else { "u" };
                 match op {
-                    BinOp::Add => self.checked("llvm.sadd.with.overflow", lhs, rhs)?,
-                    BinOp::Sub => self.checked("llvm.ssub.with.overflow", lhs, rhs)?,
-                    BinOp::Mul => self.checked("llvm.smul.with.overflow", lhs, rhs)?,
-                    BinOp::Div => self.divide(lhs, rhs)?,
+                    BinOp::Add => {
+                        self.checked(&format!("llvm.{sign}add.with.overflow"), lhs, rhs)?
+                    }
+                    BinOp::Sub => {
+                        self.checked(&format!("llvm.{sign}sub.with.overflow"), lhs, rhs)?
+                    }
+                    BinOp::Mul => {
+                        self.checked(&format!("llvm.{sign}mul.with.overflow"), lhs, rhs)?
+                    }
+                    BinOp::Div => self.divide(lhs, rhs, *signed)?,
                     BinOp::Eq => self.builder.build_int_compare(EQ, lhs, rhs, "")?,
                     BinOp::Ne => self.builder.build_int_compare(NE, lhs, rhs, "")?,
                     BinOp::And => self.builder.build_and(lhs, rhs, "")?,
@@ -584,14 +601,14 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     /// Calls `intrinsic`, an LLVM arithmetic intrinsic that reports overflow,
-    /// on `Int`s, trapping if it overflows.
+    /// on integers of the same type, trapping if it overflows.
     fn checked(
         &mut self,
         intrinsic: &str,
         lhs: IntValue<'ctx>,
         rhs: IntValue<'ctx>,
     ) -> Result<IntValue<'ctx>, BuilderError> {
-        let int = self.context.i64_type();
+        let int = lhs.get_type();
         let function = Intrinsic::find(intrinsic)
             .and_then(|intrinsic| intrinsic.get_declaration(&self.module, &[int.into()]))
             .unwrap_or_else(|| panic!("LLVM should have `{intrinsic}`"));
@@ -608,23 +625,30 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         Ok(value.into_int_value())
     }
 
-    /// Divides `Int`s, rounding towards zero. Dividing by zero, or
-    /// the smallest integer by -1, which overflows, traps.
+    /// Divides integers of the same type, rounding towards zero. Dividing by
+    /// zero traps, and so does dividing the smallest signed integer by -1,
+    /// which overflows.
     fn divide(
         &mut self,
         lhs: IntValue<'ctx>,
         rhs: IntValue<'ctx>,
+        signed: bool,
     ) -> Result<IntValue<'ctx>, BuilderError> {
-        let int = self.context.i64_type();
+        let int = lhs.get_type();
         let by_zero = self
             .builder
             .build_int_compare(EQ, rhs, int.const_zero(), "")?;
-        let is_min =
-            self.builder
-                .build_int_compare(EQ, lhs, int.const_int(i64::MIN as u64, true), "")?;
-        let by_minus_one =
-            self.builder
-                .build_int_compare(EQ, rhs, int.const_int(-1i64 as u64, true), "")?;
+        if !signed {
+            self.trap_if(by_zero)?;
+            return self.builder.build_int_unsigned_div(lhs, rhs, "");
+        }
+
+        // The smallest signed integer is just its top bit.
+        let min = int.const_int(1 << (int.get_bit_width() - 1), false);
+        let is_min = self.builder.build_int_compare(EQ, lhs, min, "")?;
+        let by_minus_one = self
+            .builder
+            .build_int_compare(EQ, rhs, int.const_all_ones(), "")?;
         let overflows = self.builder.build_and(is_min, by_minus_one, "")?;
         let invalid = self.builder.build_or(by_zero, overflows, "")?;
         self.trap_if(invalid)?;
@@ -1451,5 +1475,56 @@ mod tests {
             "
         );
         assert_eq!(run(&src), 41);
+    }
+
+    #[test]
+    fn integer_types_have_their_own_ranges_and_signs() {
+        // Each check is one bit of the result. As a signed `i8`, 200 would
+        // be -56, so dividing it shows the division is unsigned.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let byte: IntU8 = 200
+                let small: IntS8 = -128
+                let huge: IntU64 = 18446744073709551615
+                let a = bit(byte / 3 == 66, at: 1)
+                let b = bit(byte + 55 == 255, at: 2)
+                let c = bit(small / 2 == -64, at: 4)
+                let d = bit(-(small + 1) == 127, at: 8)
+                let e = bit(huge / 2 == 9223372036854775807, at: 16)
+                let f = bit(huge != 0, at: 32)
+                return a + b + c + d + e + f
+            }
+            ";
+        assert_eq!(run(src), 63);
+    }
+
+    #[test]
+    fn sized_integers_trap_when_they_overflow() {
+        let cases = [
+            ("u8_add", "let x: IntU8 = 255\nlet y = x + 1"),
+            ("u8_sub", "let x: IntU8 = 0\nlet y = x - 1"),
+            ("u8_mul", "let x: IntU8 = 16\nlet y = x * 16"),
+            ("u8_div", "let x: IntU8 = 1\nlet y = x / 0"),
+            ("s8_add", "let x: IntS8 = 127\nlet y = x + 1"),
+            ("s8_neg", "let x: IntS8 = -128\nlet y = -x"),
+            ("s8_div", "let x: IntS8 = -128\nlet y = x / -1"),
+            (
+                "u64_add",
+                "let x: IntU64 = 18446744073709551615\nlet y = x + 1",
+            ),
+        ];
+        for (name, body) in cases {
+            let src = format!("fn main() -> Int {{\n{body}\nreturn 0\n}}");
+            assert!(traps(name, &src), "{name} should trap");
+        }
+        let src = "fn main() -> Int {\nlet x: IntU8 = 254\nlet y = x + 1\nreturn 0\n}";
+        assert!(!traps("u8_max", src));
     }
 }

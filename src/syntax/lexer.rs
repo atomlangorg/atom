@@ -54,8 +54,10 @@ pub enum Token<'src> {
     /// parsing can continue and report errors with spans.
     Error,
 
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
-    Int(i64),
+    /// Big enough for any integer type's largest value. Negative literals
+    /// are a `-` before one of these.
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<u64>().ok())]
+    Int(u64),
 
     #[token("true", |_| true)]
     #[token("false", |_| false)]
@@ -622,7 +624,8 @@ mod tests {
 
     #[test]
     fn overflowing_integers_are_errors() {
-        assert_eq!(lex("99999999999999999999"), vec![Token::Error]);
+        assert_eq!(lex("18446744073709551615"), vec![Token::Int(u64::MAX)]);
+        assert_eq!(lex("18446744073709551616"), vec![Token::Error]);
     }
 
     #[test]

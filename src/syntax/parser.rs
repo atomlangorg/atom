@@ -653,7 +653,7 @@ mod tests {
         }
     }
 
-    fn int(n: i64) -> Box<Expr> {
+    fn int(n: u64) -> Box<Expr> {
         Box::new(Expr::Int(n))
     }
 

@@ -151,7 +151,8 @@ impl UnOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
-    Int(i64),
+    /// An integer literal, whose type comes from where it's used.
+    Int(u64),
     Bool(bool),
     Var(Name),
     Unary(UnOp, Box<Expr>),

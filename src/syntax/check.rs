@@ -79,14 +79,23 @@ pub struct Module {
     pub program: Program,
 }
 
-/// Every type is a group or a choice. `Int`, `Bool` and `Void` are groups
-/// declared in the standard library. Types in different scopes can share a
-/// name, so they're told apart by `id`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Every type is a group, a choice or a primitive. Types in different scopes
+/// can share a name, and aliases give a type more names, so they're told
+/// apart by `id`, and `name` is only for messages. It's the name the type was
+/// found by, so a type found through an alias is named after the alias.
+#[derive(Debug, Clone)]
 pub struct Type {
     id: usize,
     name: String,
 }
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Type {}
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -156,8 +165,20 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// A comparison's left operand has a type that can't be compared.
+    /// A comparison's operands have a type that can't be compared.
     IncomparableOperand { op: &'static str, found: Type },
+    /// An arithmetic operator was used on something that isn't an integer.
+    NotInteger { op: &'static str, found: Type },
+    /// `-` was used on something that isn't a signed integer.
+    NotSignedInteger { op: &'static str, found: Type },
+    /// An integer literal doesn't fit in its type, which holds `min` to
+    /// `max`.
+    IntOutOfRange {
+        value: i128,
+        ty: Type,
+        min: i128,
+        max: i128,
+    },
     /// A name was given a value of a different type to its declared type,
     /// either in an explicitly typed declaration or a later assignment.
     AssignTypeMismatch {
@@ -402,10 +423,28 @@ impl fmt::Display for CheckError {
                 expected,
                 found,
             } => write!(f, "operator `{op}` expects `{expected}`, found `{found}`"),
+            Self::NotInteger { op, found } => {
+                write!(f, "operator `{op}` expects an integer, found `{found}`")
+            }
+            Self::NotSignedInteger { op, found } => {
+                write!(
+                    f,
+                    "operator `{op}` expects a signed integer, found `{found}`"
+                )
+            }
+            Self::IntOutOfRange {
+                value,
+                ty,
+                min,
+                max,
+            } => write!(
+                f,
+                "`{value}` doesn't fit in `{ty}`, which holds `{min}` to `{max}`"
+            ),
             Self::IncomparableOperand { op, found } => {
                 write!(
                     f,
-                    "operator `{op}` expects `Int` or `Bool`, found `{found}`"
+                    "operator `{op}` expects an integer or `Bool`, found `{found}`"
                 )
             }
             Self::AssignTypeMismatch {
@@ -736,7 +775,7 @@ enum LookupError {
     /// The name was found in each of these modules.
     Ambiguous(Vec<String>),
     /// The name's module couldn't be found.
-    Module(CheckError),
+    Module(Box<CheckError>),
     /// The name is an alias whose type couldn't be worked out, which has
     /// already been reported.
     Reported,
@@ -1168,9 +1207,20 @@ impl<'a> Checker<'a> {
     /// A type from `stdlib/core`, such as `Int` for integer literals. Found in
     /// the standard library itself, so it can't be shadowed.
     fn std_type(&self, name: &str) -> Type {
-        match self.modules[self.core].scope.get(name) {
-            Some(Binding::Type(ty)) => ty.clone(),
-            _ => panic!("the standard library should declare `{name}`"),
+        let ty = match self.modules[self.core].scope.get(name) {
+            Some(Binding::Type(ty)) => Some(ty),
+            // The standard library's aliases are worked out before any code
+            // that needs them is checked.
+            Some(Binding::Alias(index)) => match &self.aliases[*index].state {
+                LazyType::Checked(ty) => ty.as_ref(),
+                _ => None,
+            },
+            _ => None,
+        };
+        let ty = ty.unwrap_or_else(|| panic!("the standard library should declare `{name}`"));
+        Type {
+            id: ty.id,
+            name: name.to_string(),
         }
     }
 
@@ -1178,10 +1228,11 @@ impl<'a> Checker<'a> {
     /// alias of, which is worked out if it hasn't been yet.
     fn lookup(&mut self, name: &Name) -> Result<Binding, LookupError> {
         match self.lookup_binding(name)? {
-            Binding::Alias(index) => self
-                .alias_type(index)
-                .map(Binding::Type)
-                .ok_or(LookupError::Reported),
+            Binding::Alias(index) => {
+                let name = self.aliases[index].name.to_string();
+                let ty = self.alias_type(index).ok_or(LookupError::Reported)?;
+                Ok(Binding::Type(Type { name, ..ty }))
+            }
             binding => Ok(binding),
         }
     }
@@ -1190,7 +1241,9 @@ impl<'a> Checker<'a> {
     fn lookup_binding(&self, name: &Name) -> Result<Binding, LookupError> {
         let binding = match &name.module {
             Some(path) => {
-                let module = self.resolve_qualifier(path).map_err(LookupError::Module)?;
+                let module = self
+                    .resolve_qualifier(path)
+                    .map_err(|error| LookupError::Module(Box::new(error)))?;
                 self.modules[module]
                     .scope
                     .get(name.name.as_str())
@@ -1264,7 +1317,7 @@ impl<'a> Checker<'a> {
                 name: name_string,
                 modules,
             },
-            LookupError::Module(error) => error,
+            LookupError::Module(error) => *error,
             LookupError::Reported => return,
         };
         self.error(error);
@@ -1292,6 +1345,15 @@ impl<'a> Checker<'a> {
             }
         };
         scope.insert(name, binding);
+    }
+
+    /// Finds the type called `name`, without reporting an error if there
+    /// isn't one.
+    fn find_type(&mut self, name: &Name) -> Option<Type> {
+        match self.lookup(name) {
+            Ok(Binding::Type(ty)) => Some(ty),
+            _ => None,
+        }
     }
 
     fn resolve_type(&mut self, name: &Name) -> Option<Type> {
@@ -1374,8 +1436,11 @@ impl<'a> Checker<'a> {
     /// Checks a `let` or `var` declaration's value, returning the type it's
     /// declared with, along with what the value compiles to.
     fn decl_type(&mut self, name: &str, type_name: Option<&Name>, value: &Expr) -> Typed {
-        // Checked first so that `let x = x` refers to an earlier `x`.
-        let Typed { ty: found, expr } = self.expr(value);
+        // Checked first so that `let x = x` refers to an earlier `x`. The
+        // explicit type is found first so the value can take its type from
+        // it, but its errors are reported after the value's.
+        let expected = type_name.and_then(|type_name| self.find_type(type_name));
+        let Typed { ty: found, expr } = self.expr_as(value, expected.as_ref());
 
         // An explicit type takes precedence over the value's type, so later
         // uses are checked against what the programmer wrote.
@@ -1628,8 +1693,16 @@ impl<'a> Checker<'a> {
             self.error(CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
+        let int = |bits, signed| ir::Primitive::Int { bits, signed };
         let primitive = match name {
-            "Int" => ir::Primitive::Int,
+            "IntU8" => int(8, false),
+            "IntU16" => int(16, false),
+            "IntU32" => int(32, false),
+            "IntU64" => int(64, false),
+            "IntS8" => int(8, true),
+            "IntS16" => int(16, true),
+            "IntS32" => int(32, true),
+            "IntS64" => int(64, true),
             "Bool" => ir::Primitive::Bool,
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
         };
@@ -1743,9 +1816,16 @@ impl<'a> Checker<'a> {
                 })
             }
             Stmt::Assign { name, value } => {
-                let found = self.expr(value);
+                // The target is found first so the value can take its type
+                // from it, but its errors are reported after the value's.
                 let target = Name::new(name);
-                match self.lookup(&target) {
+                let binding = self.lookup(&target);
+                let expected = match &binding {
+                    Ok(Binding::Value { ty, .. }) => ty.clone(),
+                    _ => None,
+                };
+                let found = self.expr_as(value, expected.as_ref());
+                match binding {
                     Ok(Binding::Value {
                         mutability: Mutability::Var,
                         ty: expected,
@@ -1822,11 +1902,13 @@ impl<'a> Checker<'a> {
             }
             Stmt::Match { value, options } => self.match_(value, options),
             Stmt::Return(value) => {
-                let found = value.as_ref().map(|value| self.expr(value));
                 let FnContext { name, returns, .. } = self
                     .current_fn
                     .clone()
                     .expect("statements are only checked inside functions");
+                let found = value
+                    .as_ref()
+                    .map(|value| self.expr_as(value, returns.as_ref()));
 
                 // A bare `return` returns `Void`.
                 let function = name.to_string();
@@ -1950,13 +2032,28 @@ impl<'a> Checker<'a> {
         Some(found)
     }
 
+    /// Checks `expr`, where no particular type is expected.
+    fn expr(&mut self, expr: &Expr) -> Typed {
+        self.expr_as(expr, None)
+    }
+
     /// Checks `expr`, returning its type, or `None` if it can't be determined
     /// because of an error that has already been reported, along with what it
-    /// compiles to.
-    fn expr(&mut self, expr: &Expr) -> Typed {
+    /// compiles to. `expected` is the type it's used as, if that's known,
+    /// which integer literals take as their type. It doesn't have to match:
+    /// whatever uses `expr` checks that.
+    fn expr_as(&mut self, expr: &Expr, expected: Option<&Type>) -> Typed {
         match expr {
-            Expr::Int(value) => self.literal("Int", ir::Expr::Int(*value)),
-            Expr::Bool(value) => self.literal("Bool", ir::Expr::Bool(*value)),
+            Expr::Int(value) => self.int_literal(i128::from(*value), expected),
+            // A negated literal is checked as one value, so the smallest
+            // signed integers can be written.
+            Expr::Unary(UnOp::Neg, operand) if let Expr::Int(value) = &**operand => {
+                self.int_literal(-i128::from(*value), expected)
+            }
+            Expr::Bool(value) => Typed {
+                ty: Some(self.std_type("Bool")),
+                expr: Some(ir::Expr::Bool(*value)),
+            },
             Expr::Var(name) => match self.lookup(name) {
                 Ok(Binding::Value { ty, local, .. }) => Typed {
                     ty,
@@ -1981,22 +2078,27 @@ impl<'a> Checker<'a> {
             },
             // Operators always produce their result type, even if an operand
             // is invalid, so one bad operand doesn't cause further errors.
-            Expr::Unary(op, operand) => {
-                let ty = self.std_type(unary_type(op));
+            Expr::Unary(UnOp::Neg, operand) => self.negation(operand, expected),
+            Expr::Unary(op @ UnOp::Not, operand) => {
+                let ty = self.std_type("Bool");
                 let operand = self.operand(op.symbol(), operand, ty.clone());
                 let expr = operand.map(|operand| ir::Expr::Unary(op.clone(), Box::new(operand)));
                 Typed { ty: Some(ty), expr }
             }
             Expr::Binary(lhs, op @ (BinOp::Eq | BinOp::Ne), rhs) => self.comparison(lhs, op, rhs),
-            Expr::Binary(lhs, op, rhs) => {
-                let ty = self.std_type(binary_type(op));
+            Expr::Binary(lhs, op @ (BinOp::And | BinOp::Or), rhs) => {
+                let ty = self.std_type("Bool");
                 let lhs = self.operand(op.symbol(), lhs, ty.clone());
                 let rhs = self.operand(op.symbol(), rhs, ty.clone());
-                let expr = lhs
-                    .zip(rhs)
-                    .map(|(lhs, rhs)| ir::Expr::Binary(Box::new(lhs), op.clone(), Box::new(rhs)));
+                let expr = lhs.zip(rhs).map(|(lhs, rhs)| ir::Expr::Binary {
+                    lhs: Box::new(lhs),
+                    op: op.clone(),
+                    rhs: Box::new(rhs),
+                    signed: false,
+                });
                 Typed { ty: Some(ty), expr }
             }
+            Expr::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::Construct { ty, fields } => self.construct(ty, fields),
             Expr::MethodCall {
@@ -2031,39 +2133,173 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a comparison of two `Int`s or two `Bool`s, which produces a
-    /// `Bool`. The right operand must have the same type as the left.
-    fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
-        let Typed { ty, expr: lhs } = self.expr(lhs);
-        let rhs = match ty {
-            Some(ty) if ty == self.std_type("Int") || ty == self.std_type("Bool") => {
-                self.operand(op.symbol(), rhs, ty)
-            }
-            // The right operand is still checked for its own errors, but
-            // there's nothing it could be compared to.
-            Some(found) => {
-                let op = op.symbol();
-                self.error(CheckError::IncomparableOperand { op, found });
-                self.expr(rhs);
-                None
-            }
-            None => self.expr(rhs).expr,
-        };
-
-        let expr = lhs
-            .zip(rhs)
-            .map(|(lhs, rhs)| ir::Expr::Binary(Box::new(lhs), op.clone(), Box::new(rhs)));
-        Typed {
-            ty: Some(self.std_type("Bool")),
-            expr,
+    /// The width and signedness of `ty`, if it's an integer type.
+    fn int_type(&self, ty: &Type) -> Option<(u32, bool)> {
+        match self.primitives.get(&ty.id) {
+            Some(&ir::Primitive::Int { bits, signed }) => Some((bits, signed)),
+            _ => None,
         }
     }
 
-    /// A literal of the standard library type called `name`, such as `Int`.
-    fn literal(&self, name: &str, value: ir::Expr) -> Typed {
+    /// The type of an integer that's used as `expected`, which is `expected`
+    /// itself if it's an integer type, and `Int` otherwise.
+    fn int_type_for(&self, expected: Option<&Type>) -> Type {
+        expected
+            .filter(|ty| self.int_type(ty).is_some())
+            .cloned()
+            .unwrap_or_else(|| self.std_type("Int"))
+    }
+
+    /// Checks an integer literal of `value`, which may be negated, used as
+    /// `expected`. It must fit in its type.
+    fn int_literal(&mut self, value: i128, expected: Option<&Type>) -> Typed {
+        let ty = self.int_type_for(expected);
+        let (bits, signed) = self.int_type(&ty).expect("literals have integer types");
+        let (min, max) = int_range(bits, signed);
+        if !(min..=max).contains(&value) {
+            self.error(CheckError::IntOutOfRange {
+                value,
+                ty: ty.clone(),
+                min,
+                max,
+            });
+            return Typed {
+                ty: Some(ty),
+                expr: None,
+            };
+        }
+
+        // Stored as its bits, so a negative value is in two's complement.
+        let bits = (value as u128 & (u128::MAX >> (128 - bits))) as u64;
         Typed {
-            ty: Some(self.std_type(name)),
-            expr: Some(value),
+            expr: Some(ir::Expr::Int {
+                value: bits,
+                ty: ty.id,
+            }),
+            ty: Some(ty),
+        }
+    }
+
+    /// Checks the operands of a binary operator, where `expected` is the
+    /// type the operator is used as. Each operand is used as the other's
+    /// type, so `x + 1` takes the type of `x`. An operand made only of
+    /// integer literals has no type of its own, so it's checked second.
+    fn operands(&mut self, lhs: &Expr, rhs: &Expr, expected: Option<&Type>) -> (Typed, Typed) {
+        if has_own_type(lhs) || !has_own_type(rhs) {
+            let lhs = self.expr_as(lhs, expected);
+            let rhs = self.expr_as(rhs, lhs.ty.as_ref().or(expected));
+            (lhs, rhs)
+        } else {
+            let rhs = self.expr_as(rhs, expected);
+            let lhs = self.expr_as(lhs, rhs.ty.as_ref().or(expected));
+            (lhs, rhs)
+        }
+    }
+
+    /// Checks `-operand`, which negates a signed integer, producing another
+    /// of the same type.
+    fn negation(&mut self, operand: &Expr, expected: Option<&Type>) -> Typed {
+        let Typed { ty, expr } = self.expr_as(operand, expected);
+        match ty {
+            Some(ty) if self.int_type(&ty).is_some_and(|(_, signed)| signed) => Typed {
+                expr: expr.map(|operand| ir::Expr::Unary(UnOp::Neg, Box::new(operand))),
+                ty: Some(ty),
+            },
+            found => {
+                if let Some(found) = found {
+                    self.error(CheckError::NotSignedInteger { op: "-", found });
+                }
+                Typed {
+                    ty: Some(self.int_type_for(expected)),
+                    expr: None,
+                }
+            }
+        }
+    }
+
+    /// Checks `lhs op rhs`, where `op` is `+`, `-`, `*` or `/`, whose operands
+    /// are integers of the same type, which it produces. The first operand
+    /// that's an integer decides the type.
+    fn arithmetic(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
+        let (lhs, rhs) = self.operands(lhs, rhs, expected);
+        let ty = [&lhs.ty, &rhs.ty]
+            .into_iter()
+            .flatten()
+            .find(|ty| self.int_type(ty).is_some())
+            .cloned()
+            .unwrap_or_else(|| self.int_type_for(expected));
+        let op_symbol = op.symbol();
+        for found in [&lhs.ty, &rhs.ty].into_iter().flatten() {
+            if self.int_type(found).is_none() {
+                let found = found.clone();
+                self.error(CheckError::NotInteger {
+                    op: op_symbol,
+                    found,
+                });
+            } else if *found != ty {
+                self.error(CheckError::InvalidOperand {
+                    op: op_symbol,
+                    expected: ty.clone(),
+                    found: found.clone(),
+                });
+            }
+        }
+
+        let (_, signed) = self.int_type(&ty).expect("found as an integer type");
+        let expr = lhs.expr.zip(rhs.expr).map(|(lhs, rhs)| ir::Expr::Binary {
+            lhs: Box::new(lhs),
+            op: op.clone(),
+            rhs: Box::new(rhs),
+            signed,
+        });
+        Typed { ty: Some(ty), expr }
+    }
+
+    /// Checks a comparison of two integers or two `Bool`s of the same type,
+    /// which produces a `Bool`. The first operand whose type is known decides
+    /// what's compared.
+    fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
+        let (lhs, rhs) = self.operands(lhs, rhs, None);
+        let bool_ty = self.std_type("Bool");
+        let op_symbol = op.symbol();
+        let compared = match lhs.ty.clone().or(rhs.ty.clone()) {
+            Some(ty) if self.int_type(&ty).is_some() || ty == bool_ty => Some(ty),
+            Some(found) => {
+                self.error(CheckError::IncomparableOperand {
+                    op: op_symbol,
+                    found,
+                });
+                None
+            }
+            None => None,
+        };
+        if let Some(compared) = &compared {
+            for found in [&lhs.ty, &rhs.ty].into_iter().flatten() {
+                if found != compared {
+                    self.error(CheckError::InvalidOperand {
+                        op: op_symbol,
+                        expected: compared.clone(),
+                        found: found.clone(),
+                    });
+                }
+            }
+        }
+
+        let signed = compared
+            .as_ref()
+            .and_then(|ty| self.int_type(ty))
+            .is_some_and(|(_, signed)| signed);
+        let expr = compared
+            .and(lhs.expr.zip(rhs.expr))
+            .map(|(lhs, rhs)| ir::Expr::Binary {
+                lhs: Box::new(lhs),
+                op: op.clone(),
+                rhs: Box::new(rhs),
+                signed,
+            });
+        Typed {
+            ty: Some(bool_ty),
+            expr,
         }
     }
 
@@ -2235,9 +2471,25 @@ impl<'a> Checker<'a> {
     /// with what it compiles to.
     fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Typed {
         // The receiver and arguments are checked first, so their errors come
-        // before the call's.
+        // before the call's. What's called is found in between, without
+        // reporting errors, so the arguments can take their types from its
+        // parameters.
         let receiver = self.receiver(receiver, method);
-        let (found, lowered_args) = split(args.iter().map(|arg| self.expr(&arg.value)).collect());
+        let params = match &receiver {
+            Some(Receiver::Type(ty)) => match self.option(ty, method) {
+                Some((_, value_ty)) => vec![value_ty],
+                None => self
+                    .static_function(ty, method)
+                    .map(|found| self.param_types(found.function))
+                    .unwrap_or_default(),
+            },
+            Some(Receiver::Value(ty, _)) => match self.member(ty, method) {
+                Some(Member::Method(found)) => self.param_types(found.function),
+                _ => vec![],
+            },
+            None => vec![],
+        };
+        let (found, lowered_args) = self.args(args, &params);
 
         let Some(receiver) = receiver else {
             return Typed::UNKNOWN;
@@ -2344,8 +2596,21 @@ impl<'a> Checker<'a> {
     /// Checks the construction of a group, returning its type, or `None` if
     /// it can't be determined, along with what it compiles to.
     fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Typed {
-        // Values are checked first, so their errors come before the group's.
-        let (found, lowered) = split(values.iter().map(|field| self.expr(&field.value)).collect());
+        // Values are checked first, so their errors come before the group's,
+        // but the group is found first, without reporting errors, so they
+        // can take their types from its fields.
+        let fields = match self.find_type(type_name) {
+            Some(ty) => self.group_fields[ty.id].clone(),
+            None => vec![],
+        };
+        let typed = values.iter().enumerate().map(|(index, value)| {
+            let expected = fields
+                .get(index)
+                .filter(|field| field.name == value.name)
+                .and_then(|field| field.ty.as_ref());
+            self.expr_as(&value.value, expected)
+        });
+        let (found, lowered) = split(typed.collect());
 
         let Some(ty) = self.resolve_type(type_name) else {
             return Typed::UNKNOWN;
@@ -2425,10 +2690,17 @@ impl<'a> Checker<'a> {
     /// Checks a call, returning the function's return type, or `None` if it
     /// can't be determined, along with what it compiles to.
     fn call(&mut self, callee: &Name, args: &[Arg]) -> Typed {
-        // Arguments are checked first, so their errors come before the call's.
-        let (found, lowered) = split(args.iter().map(|arg| self.expr(&arg.value)).collect());
+        // Arguments are checked first, so their errors come before the call's,
+        // but the function is found first so they can take their types from
+        // its parameters.
+        let binding = self.lookup(callee);
+        let params = match &binding {
+            Ok(Binding::Function(index)) => self.param_types(*index),
+            _ => vec![],
+        };
+        let (found, lowered) = self.args(args, &params);
 
-        let index = match self.lookup(callee) {
+        let index = match binding {
             Ok(Binding::Function(index)) => index,
             Ok(
                 Binding::Value { .. } | Binding::Global(_) | Binding::Type(_) | Binding::Alias(_),
@@ -2449,6 +2721,27 @@ impl<'a> Checker<'a> {
                 args,
             }),
         }
+    }
+
+    /// The types of the parameters of the function at `index` in `functions`.
+    fn param_types(&self, index: usize) -> Vec<Option<Type>> {
+        let params = &self.functions[index].params;
+        params.iter().map(|param| param.ty.clone()).collect()
+    }
+
+    /// Checks a call's arguments, where each is used as the parameter at the
+    /// same position in `params`, returning their types, and what they
+    /// compile to if none of them have errors.
+    fn args(
+        &mut self,
+        args: &[Arg],
+        params: &[Option<Type>],
+    ) -> (Vec<Option<Type>>, Option<Vec<ir::Expr>>) {
+        let typed = args.iter().enumerate().map(|(index, arg)| {
+            let expected = params.get(index).and_then(Option::as_ref);
+            self.expr_as(&arg.value, expected)
+        });
+        split(typed.collect())
     }
 
     /// Checks a call's arguments, whose types are `found`, against the
@@ -2610,23 +2903,25 @@ fn always_returns(stmts: &[Stmt]) -> bool {
     })
 }
 
-/// The name of the standard library type of a unary operator's operand,
-/// which is also its result type.
-fn unary_type(op: &UnOp) -> &'static str {
-    match op {
-        UnOp::Neg => "Int",
-        UnOp::Not => "Bool",
+/// The smallest and largest values of an integer type `bits` wide.
+fn int_range(bits: u32, signed: bool) -> (i128, i128) {
+    if signed {
+        (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+    } else {
+        (0, (1 << bits) - 1)
     }
 }
 
-/// The name of the standard library type of a binary operator's operands,
-/// which is also its result type. Comparisons don't have one, since they can
-/// compare more than one type.
-fn binary_type(op: &BinOp) -> &'static str {
-    match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => "Int",
-        BinOp::And | BinOp::Or => "Bool",
-        BinOp::Eq | BinOp::Ne => unreachable!("comparisons are checked by `comparison`"),
+/// Whether `expr` has a type of its own, rather than being made only of
+/// integer literals, which take their type from where they're used.
+fn has_own_type(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) => false,
+        Expr::Unary(UnOp::Neg, operand) => has_own_type(operand),
+        Expr::Binary(lhs, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, rhs) => {
+            has_own_type(lhs) || has_own_type(rhs)
+        }
+        _ => true,
     }
 }
 
@@ -2687,6 +2982,22 @@ mod tests {
         check_top(&format!("fn body() {{\n{src}\n}}"))
     }
 
+    /// The error for an arithmetic operator `op` used on a `Bool`.
+    fn not_integer(op: &'static str) -> CheckError {
+        CheckError::NotInteger {
+            op,
+            found: ty("Bool"),
+        }
+    }
+
+    /// The error for `-` used on a `Bool`.
+    fn not_signed_integer() -> CheckError {
+        CheckError::NotSignedInteger {
+            op: "-",
+            found: ty("Bool"),
+        }
+    }
+
     fn invalid_operand(op: &'static str) -> CheckError {
         CheckError::InvalidOperand {
             op,
@@ -2736,7 +3047,7 @@ mod tests {
     fn boolean_operators_produce_booleans() {
         assert_eq!(
             check_body("let x = (true | false) + 1"),
-            Err(vec![invalid_operand("+")])
+            Err(vec![not_integer("+")])
         );
         assert_eq!(
             check_body("var n = 0\nn = !false"),
@@ -2750,11 +3061,11 @@ mod tests {
 
     #[test]
     fn rejects_mixing_negations() {
-        // `-` needs an `Int` and `!` needs a `Bool`, so `-!x` and `!-x` can
-        // never be valid.
+        // `-` needs a signed integer and `!` needs a `Bool`, so `-!x` and
+        // `!-x` can never be valid.
         assert_eq!(
             check_body("let x = -!true"),
-            Err(vec![invalid_operand("-")])
+            Err(vec![not_signed_integer()])
         );
     }
 
@@ -2820,7 +3131,7 @@ mod tests {
     fn comparisons_produce_booleans() {
         assert_eq!(
             check_body("let x = (1 == 1) + 1"),
-            Err(vec![invalid_operand("+")])
+            Err(vec![not_integer("+")])
         );
     }
 
@@ -2857,7 +3168,7 @@ mod tests {
         );
         assert_eq!(
             messages("let x = Void.new() == Void.new()"),
-            vec!["operator `==` expects `Int` or `Bool`, found `Void`"]
+            vec!["operator `==` expects an integer or `Bool`, found `Void`"]
         );
     }
 
@@ -2870,33 +3181,27 @@ mod tests {
         assert_eq!(
             check_body("let x = Void.new() == y"),
             Err(vec![
+                CheckError::Undeclared("y".to_string()),
                 CheckError::IncomparableOperand {
                     op: "==",
                     found: ty("Void"),
                 },
-                CheckError::Undeclared("y".to_string()),
             ])
         );
     }
 
     #[test]
     fn rejects_arithmetic_on_booleans() {
-        assert_eq!(
-            check_body("let x = true + 1"),
-            Err(vec![invalid_operand("+")])
-        );
-        assert_eq!(
-            check_body("let x = 1 - false"),
-            Err(vec![invalid_operand("-")])
-        );
-        assert_eq!(check_body("let x = -true"), Err(vec![invalid_operand("-")]));
+        assert_eq!(check_body("let x = true + 1"), Err(vec![not_integer("+")]));
+        assert_eq!(check_body("let x = 1 - false"), Err(vec![not_integer("-")]));
+        assert_eq!(check_body("let x = -true"), Err(vec![not_signed_integer()]));
         assert_eq!(
             check_body("let x = 4 / (true)"),
-            Err(vec![invalid_operand("/")])
+            Err(vec![not_integer("/")])
         );
         assert_eq!(
             check_body("let b = true\nlet x = b * b"),
-            Err(vec![invalid_operand("*"), invalid_operand("*")])
+            Err(vec![not_integer("*"), not_integer("*")])
         );
     }
 
@@ -2929,7 +3234,7 @@ mod tests {
         );
         assert_eq!(
             check_body("let x = -true\nlet y = x + 1"),
-            Err(vec![invalid_operand("-")])
+            Err(vec![not_signed_integer()])
         );
     }
 
@@ -2945,7 +3250,7 @@ mod tests {
 
         assert_eq!(
             messages("let x = true + 1"),
-            ["operator `+` expects `Int`, found `Bool`"]
+            ["operator `+` expects an integer, found `Bool`"]
         );
         assert_eq!(
             messages("var b = false\nb = 1"),
@@ -3606,7 +3911,7 @@ mod tests {
                 "
             ),
             [
-                "operator `+` expects `Int`, found `Void`",
+                "operator `+` expects an integer, found `Void`",
                 "cannot assign `Void` to `w`, which has type `Int`",
                 "`if` condition must be `Bool`, found `Void`",
             ]
@@ -3626,7 +3931,7 @@ mod tests {
                 "
             ),
             [
-                "operator `+` expects `Int`, found `Bool`",
+                "operator `+` expects an integer, found `Bool`",
                 "cannot assign `Bool` to `y`, which has type `Int`",
             ]
         );
@@ -3851,7 +4156,7 @@ mod tests {
             ),
             [
                 "cannot assign `User` to `x`, which has type `Int`",
-                "operator `+` expects `Int`, found `User`",
+                "operator `+` expects an integer, found `User`",
                 "`if` condition must be `Bool`, found `User`",
                 "argument `user` of `f` expects `User`, found `Int`",
                 "`f` must return `User`, found `Bool`",
@@ -4502,7 +4807,7 @@ mod tests {
         // Their types are known wherever they're used first.
         assert_eq!(
             messages_top("let a = b + 1\nlet b = true"),
-            ["operator `+` expects `Int`, found `Bool`"]
+            ["operator `+` expects an integer, found `Bool`"]
         );
     }
 
@@ -4636,7 +4941,7 @@ mod tests {
             )),
             [
                 "cannot assign `User` to `x`, which has type `Int`",
-                "operator `+` expects `Int`, found `User`",
+                "operator `+` expects an integer, found `User`",
             ]
         );
     }
@@ -4703,7 +5008,7 @@ mod tests {
             [
                 "field `age` of `User` expects `Int`, found `Bool`",
                 "field `isAdmin` of `User` expects `Bool`, found `Int`",
-                "operator `-` expects `Int`, found `Bool`",
+                "operator `-` expects a signed integer, found `Bool`",
             ]
         );
     }
@@ -4961,7 +5266,7 @@ mod tests {
                 }
                 "
             ),
-            ["operator `+` expects `Int`, found `Bool`"]
+            ["operator `+` expects an integer, found `Bool`"]
         );
     }
 
@@ -5385,7 +5690,7 @@ mod tests {
             )),
             [
                 "cannot assign `Int` to `a`, which has type `Bool`",
-                "operator `+` expects `Int`, found `Bool`",
+                "operator `+` expects an integer, found `Bool`",
                 "cannot assign `User` to `c`, which has type `Int`",
             ]
         );
@@ -5429,7 +5734,7 @@ mod tests {
             ),
             [
                 "unknown type `Missing`",
-                "operator `+` expects `Int`, found `Bool`",
+                "operator `+` expects an integer, found `Bool`",
             ]
         );
     }
@@ -6443,7 +6748,7 @@ primitive Float"
                 let a = Shape.empty == Shape.empty
                 "
             )),
-            ["operator `==` expects `Int` or `Bool`, found `Shape`"]
+            ["operator `==` expects an integer or `Bool`, found `Shape`"]
         );
     }
 
@@ -6720,10 +7025,14 @@ primitive Float"
     }
 
     #[test]
-    fn errors_name_the_type_an_alias_is_of() {
+    fn errors_name_types_as_written() {
+        // A type found through an alias is named after the alias.
         assert_eq!(
-            messages_top("alias ID = Int\nlet a: ID = true"),
-            ["cannot assign `Bool` to `a`, which has type `Int`"]
+            messages_top("alias ID = Int\nlet a: ID = true\nlet b: IntS64 = true"),
+            [
+                "cannot assign `Bool` to `a`, which has type `ID`",
+                "cannot assign `Bool` to `b`, which has type `IntS64`",
+            ]
         );
     }
 
@@ -6873,5 +7182,147 @@ primitive Float"
         );
         // A module's own names come before the standard library's.
         assert_eq!(check_top("alias Int = Bool\nlet flag: Int = true"), Ok(()));
+    }
+
+    #[test]
+    fn accepts_every_integer_type() {
+        let src = "
+            let a: IntU8 = 255
+            let b: IntU16 = 65535
+            let c: IntU32 = 4294967295
+            let d: IntU64 = 18446744073709551615
+            let e: IntS8 = -128
+            let f: IntS16 = 32767
+            let g: IntS32 = -2147483648
+            let h: IntS64 = -9223372036854775808
+            // `Int` is `IntS64`, so they can be used in place of each other.
+            let i: Int = h
+            let j: IntS64 = i
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn literals_take_their_type_from_where_theyre_used() {
+        let src = "
+            group Pixel {
+                let red: IntU8
+            }
+
+            impl Pixel {
+                static fn new(red: IntU8) -> Pixel {
+                    return Pixel { red: 200 }
+                }
+
+                fn brighter(by amount: IntU8) -> IntU8 {
+                    return self.red + amount
+                }
+            }
+
+            choice Level {
+                exact: IntU8
+                none
+            }
+
+            fn half(of byte: IntU8) -> IntU8 {
+                return byte / 2
+            }
+
+            fn f() -> IntU8 {
+                var byte: IntU8 = 250
+                byte = 255
+                let level = Level.exact(255)
+                let pixel = Pixel.new(red: 255)
+                let sum: IntU8 = half(of: 255) + pixel.brighter(by: 1)
+                // The other operand gives the type, even when it's second,
+                // and even through other literals.
+                let a = byte + 1
+                let b = 1 + byte
+                let c = (1 + 2) * byte
+                let d: Bool = 255 == byte
+                let small: IntS8 = -(1 + 2) * -4
+                return a + b + c
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn literals_without_a_type_are_ints() {
+        assert_eq!(
+            messages_top("let a = 5\nlet b: IntU8 = a\nlet c: Bool = 1"),
+            [
+                "cannot assign `Int` to `b`, which has type `IntU8`",
+                "cannot assign `Int` to `c`, which has type `Bool`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_literals_that_dont_fit() {
+        assert_eq!(
+            messages_top(
+                "
+                fn byte(_ value: IntU8) {}
+                fn f() {
+                    let a: IntU8 = 256
+                    let b: IntU8 = -1
+                    let c: IntS8 = 128
+                    let d: IntS8 = -129
+                    let e = 9223372036854775808
+                    let g: IntU64 = 18446744073709551615
+                    byte(300)
+                }
+                "
+            ),
+            [
+                "`256` doesn't fit in `IntU8`, which holds `0` to `255`",
+                "`-1` doesn't fit in `IntU8`, which holds `0` to `255`",
+                "`128` doesn't fit in `IntS8`, which holds `-128` to `127`",
+                "`-129` doesn't fit in `IntS8`, which holds `-128` to `127`",
+                "`9223372036854775808` doesn't fit in `Int`, which holds `-9223372036854775808` to `9223372036854775807`",
+                "`300` doesn't fit in `IntU8`, which holds `0` to `255`",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_mixing_integer_types() {
+        assert_eq!(
+            messages_top(
+                "
+                fn f(small: IntU8, big: IntS64) {
+                    let a = small + big
+                    let b = big * small
+                    let c = small == big
+                    let d: IntU16 = small
+                    let e: Int = small + 1
+                }
+                "
+            ),
+            [
+                "operator `+` expects `IntU8`, found `IntS64`",
+                "operator `*` expects `IntS64`, found `IntU8`",
+                "operator `==` expects `IntU8`, found `IntS64`",
+                "cannot assign `IntU8` to `d`, which has type `IntU16`",
+                "cannot assign `IntU8` to `e`, which has type `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_signed_integers_can_be_negated() {
+        assert_eq!(
+            messages_top(
+                "
+                fn f(byte: IntU8, small: IntS8) {
+                    let a = -small
+                    let b = 0 - byte
+                    let c = -byte
+                }
+                "
+            ),
+            ["operator `-` expects a signed integer, found `IntU8`"]
+        );
     }
 }

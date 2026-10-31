@@ -51,8 +51,11 @@ pub enum TypeDef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Primitive {
-    /// `Int`, a 64-bit signed integer.
-    Int,
+    /// An integer type, such as `IntU8`, which is `bits` wide.
+    Int {
+        bits: u32,
+        signed: bool,
+    },
     Bool,
 }
 
@@ -117,15 +120,29 @@ pub struct MatchOption {
 
 #[derive(Debug)]
 pub enum Expr {
-    Int(i64),
+    /// An integer of the integer type at an index into `Program::types`.
+    /// `value` is its bits, so a negative value is in two's complement, and
+    /// it's never wider than the type.
+    Int {
+        value: u64,
+        ty: usize,
+    },
     Bool(bool),
     /// An index into the current function's `locals`.
     Local(usize),
     /// An index into `Program::globals`.
     Global(usize),
-    /// An operator on `Int`s or `Bool`s.
+    /// An operator on integers or `Bool`s. `-` is only used on signed
+    /// integers.
     Unary(UnOp, Box<Expr>),
-    Binary(Box<Expr>, BinOp, Box<Expr>),
+    Binary {
+        lhs: Box<Expr>,
+        op: BinOp,
+        rhs: Box<Expr>,
+        /// Whether the operands are signed integers, which decides when
+        /// arithmetic overflows, and how it divides.
+        signed: bool,
+    },
     /// Calls the function at an index into `Program::functions`. A method's
     /// receiver is its first argument.
     Call {
