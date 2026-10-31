@@ -93,6 +93,9 @@ pub enum PrimitiveFn {
     BoolOr,
     /// `Bool.not`, which is `true` if the `Bool` isn't.
     BoolNot,
+    /// `isEqual` on an integer or `Bool`, which is whether two of the same
+    /// type are equal.
+    Equal,
 }
 
 #[derive(Debug)]

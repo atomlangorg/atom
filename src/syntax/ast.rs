@@ -351,6 +351,9 @@ pub struct TraitFunction {
     pub params: Vec<Param>,
     /// `Void` when no type is written, like in a `fn`.
     pub ret: Name,
+    /// Its default implementation, which an `impl` uses unless it implements
+    /// the function itself, or `None` if every `impl` must implement it.
+    pub body: Option<Block>,
 }
 
 /// `alias Name = Type` in an `impl`, giving the type of its trait's alias.

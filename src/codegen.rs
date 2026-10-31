@@ -336,6 +336,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 };
                 self.builder.build_return(Some(&result))?;
             }
+            Body::Primitive(PrimitiveFn::Equal) => {
+                // `self`, then the other value of the same type.
+                let lhs = value.get_nth_param(0).expect("`self`").into_int_value();
+                let rhs = value.get_nth_param(1).expect("`rhs`").into_int_value();
+                let result = self.builder.build_int_compare(EQ, lhs, rhs, "")?;
+                self.builder.build_return(Some(&result))?;
+            }
             Body::Primitive(PrimitiveFn::BoolNot) => {
                 let operand = value.get_nth_param(0).expect("`self`").into_int_value();
                 let result = self.builder.build_not(operand, "")?;
@@ -504,8 +511,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         self.checked(&format!("llvm.{sign}mul.with.overflow"), lhs, rhs)?
                     }
                     BinOp::Div => self.divide(lhs, rhs, *signed)?,
-                    BinOp::Eq => self.builder.build_int_compare(EQ, lhs, rhs, "")?,
-                    BinOp::Ne => self.builder.build_int_compare(NE, lhs, rhs, "")?,
                     BinOp::Lt => {
                         let predicate = if *signed { SLT } else { ULT };
                         self.builder.build_int_compare(predicate, lhs, rhs, "")?
@@ -524,8 +529,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     }
                     BinOp::BitAnd => self.builder.build_and(lhs, rhs, "")?,
                     BinOp::BitOr => self.builder.build_or(lhs, rhs, "")?,
-                    BinOp::And | BinOp::Or => {
-                        unreachable!("`&` and `|` compile to calls to `and` and `or`")
+                    BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne => {
+                        unreachable!("`&`, `|`, `==` and `!=` compile to calls to trait functions")
                     }
                     BinOp::BitXor => self.builder.build_xor(lhs, rhs, "")?,
                     BinOp::ShiftLeft => self.shift_left(lhs, rhs)?,
@@ -1981,6 +1986,68 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 42);
+    }
+
+    #[test]
+    fn equality_operators_call_equal() {
+        // `Point` uses the default `isNotEqual`, and `Loose` implements its
+        // own, which is only `true` if they're far apart.
+        let src = "
+            group Point {
+                let x: Int
+            }
+
+            impl Point with Equal {
+                fn isEqual(to rhs: Self) -> Bool {
+                    return self.x == rhs.x
+                }
+            }
+
+            impl Point {
+                static fn at(_ x: Int) -> Self {
+                    return Self { x: x }
+                }
+            }
+
+            group Loose {
+                let x: Int
+            }
+
+            impl Loose with Equal {
+                fn isEqual(to rhs: Self) -> Bool {
+                    return self.x == rhs.x
+                }
+
+                fn isNotEqual(to rhs: Self) -> Bool {
+                    return self.x - rhs.x > 10 | rhs.x - self.x > 10
+                }
+            }
+
+            impl Loose {
+                static fn at(_ x: Int) -> Self {
+                    return Self { x: x }
+                }
+            }
+
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(Point.at(1) == Point.at(1), at: 1)
+                let b = bit(Point.at(1) != Point.at(2), at: 2)
+                let c = bit(Point.at(1) != Point.at(1), at: 4)
+                let d = bit(Loose.at(1) != Loose.at(2), at: 8)
+                let e = bit(Loose.at(1) != Loose.at(20), at: 16)
+                let byte: IntU8 = 200
+                let f = bit(200 == byte & byte != 0, at: 32)
+                return a + b + c + d + e + f
+            }
+            ";
+        assert_eq!(run(src), 51);
     }
 
     #[test]

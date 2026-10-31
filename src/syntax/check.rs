@@ -49,9 +49,8 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplAlias, ImplFunction,
-        Import, MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction,
-        UnOp,
+        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, ImplAlias, ImplFunction, Import,
+        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction, UnOp,
     },
     parser::parse,
 };
@@ -167,8 +166,6 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// A comparison's operands have a type that can't be compared.
-    IncomparableOperand { op: &'static str, found: Type },
     /// An arithmetic, bitwise or ordering operator was used on something
     /// that isn't an integer.
     NotInteger { op: &'static str, found: Type },
@@ -340,7 +337,7 @@ pub enum CheckError {
     /// or in another of its aliases, without being given.
     InferredAliasUsed(String),
     /// An `impl` doesn't give one of its trait's aliases, which can't be
-    /// inferred since none of the trait's functions use it.
+    /// inferred since none of the `impl`'s functions use it.
     UninferableAlias {
         ty: String,
         trait_name: String,
@@ -352,8 +349,9 @@ pub enum CheckError {
         trait_name: String,
         expected: String,
     },
-    /// `&`, `|` or `!` was used on a type that doesn't implement the
-    /// standard library's `And`, `Or` or `Not` trait, which they call.
+    /// `&`, `|`, `!`, `==` or `!=` was used on a type that doesn't implement
+    /// the standard library's `And`, `Or`, `Not` or `Equal` trait, which
+    /// they call.
     NotImplemented {
         op: &'static str,
         trait_name: &'static str,
@@ -498,12 +496,6 @@ impl fmt::Display for CheckError {
                 f,
                 "`{value}` doesn't fit in `{ty}`, which holds `{min}` to `{max}`"
             ),
-            Self::IncomparableOperand { op, found } => {
-                write!(
-                    f,
-                    "operator `{op}` expects an integer or `Bool`, found `{found}`"
-                )
-            }
             Self::AssignTypeMismatch {
                 name,
                 expected,
@@ -694,7 +686,7 @@ impl fmt::Display for CheckError {
                 alias,
             } => write!(
                 f,
-                "`impl {ty} with {trait_name}` must give `alias {alias}`, since it can't be inferred when none of the trait's functions use it"
+                "`impl {ty} with {trait_name}` must give `alias {alias}`, since it can't be inferred from the `impl`'s functions"
             ),
             Self::TraitFnMismatch {
                 trait_name,
@@ -1214,7 +1206,7 @@ impl<'a> Checker<'a> {
                             let full_name = self.full_name(&name);
                             let index = self.declare_method(
                                 self_ty.as_ref(),
-                                function,
+                                (&function.name, &function.params, &function.ret),
                                 *is_static,
                                 full_name,
                             );
@@ -1246,6 +1238,16 @@ impl<'a> Checker<'a> {
                         {
                             let implemented: Vec<_> = functions.iter().zip(&indexes).collect();
                             self.infer_impl_aliases(ty, with, trait_index, aliases, &implemented);
+                        }
+                        if let Some(trait_index) = trait_index {
+                            let defaults = self.declare_defaults(
+                                ty,
+                                self_ty.as_ref(),
+                                trait_index,
+                                functions,
+                                impl_aliases,
+                            );
+                            pending.extend(defaults.into_iter().map(|default| (module, default)));
                         }
                         if let Some((with, (trait_index, self_ty))) =
                             with.as_ref().zip(trait_index.zip(self_ty))
@@ -1744,17 +1746,17 @@ impl<'a> Checker<'a> {
     fn declare_method(
         &mut self,
         self_ty: Option<&Type>,
-        method: &'a Function,
+        method: (&'a String, &'a [Param], &Name),
         is_static: bool,
         full_name: String,
     ) -> usize {
-        let index = self.signature(&method.params, &method.ret, full_name);
+        let (name, params, ret) = method;
+        let index = self.signature(params, ret, full_name);
         if let Some(self_ty) = self_ty {
             // Methods must be unique across every module, even ones that
             // can't see each other, since a call can't say which module's
             // method it means.
             let existing = if is_static {
-                let name = &method.name;
                 match (
                     self.option(self_ty, name),
                     self.static_function(self_ty, name),
@@ -1764,7 +1766,7 @@ impl<'a> Checker<'a> {
                     (None, None) => None,
                 }
             } else {
-                match self.member(self_ty, &method.name) {
+                match self.member(self_ty, name) {
                     Some(Member::Field(..)) => Some(MemberKind::Field),
                     Some(Member::Method(_)) => Some(MemberKind::Method),
                     None => None,
@@ -1773,7 +1775,7 @@ impl<'a> Checker<'a> {
             if let Some(existing) = existing {
                 self.error(CheckError::MemberRedeclared {
                     ty: self_ty.clone(),
-                    member: method.name.clone(),
+                    member: name.clone(),
                     existing,
                 });
             } else {
@@ -1786,10 +1788,7 @@ impl<'a> Checker<'a> {
                 } else {
                     &mut self.methods
                 };
-                table
-                    .entry(self_ty.id)
-                    .or_default()
-                    .insert(&method.name, found);
+                table.entry(self_ty.id).or_default().insert(name, found);
             }
         }
         index
@@ -2063,12 +2062,24 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let is_alias = |expected: &Option<TraitType>| matches!(expected, Some(TraitType::Alias(found)) if *found == alias);
-            let used = trait_
-                .signatures
-                .iter()
-                .any(|(params, returns)| params.iter().any(is_alias) || is_alias(returns));
-            // Where the `impl`'s functions have the alias. A function that's
-            // missing or doesn't match is reported by `check_implements`.
+            let uses_alias =
+                |(params, returns): &(Vec<_>, _)| params.iter().any(is_alias) || is_alias(returns);
+            // A function that's missing is reported by `check_implements`,
+            // unless it has a default implementation, which can't show what
+            // the alias is.
+            let missing_use =
+                trait_
+                    .functions
+                    .iter()
+                    .zip(&trait_.signatures)
+                    .any(|(declared, signature)| {
+                        declared.body.is_none()
+                            && uses_alias(signature)
+                            && !functions
+                                .iter()
+                                .any(|(function, _)| function.function.name == declared.name)
+                    });
+            // Where the `impl`'s functions have the alias.
             let found = trait_.functions.iter().zip(&trait_.signatures).find_map(
                 |(declared, (params, returns))| {
                     let &(_, &index) = functions
@@ -2084,7 +2095,7 @@ impl<'a> Checker<'a> {
                         .map(|(_, found)| found.clone())
                 },
             );
-            if !used {
+            if found.is_none() && !missing_use {
                 errors.push(CheckError::UninferableAlias {
                     ty: ty.to_string(),
                     trait_name: trait_name.to_string(),
@@ -2099,6 +2110,66 @@ impl<'a> Checker<'a> {
         for error in errors {
             self.error(error);
         }
+    }
+
+    /// Declares the default implementations that `impl ty with` the trait at
+    /// `trait_index` in `traits` uses, since it doesn't implement them in
+    /// `functions`, returning their bodies to check. They're checked as if
+    /// they were written in the `impl`, so `Self`, which is `self_ty`, and
+    /// the aliases, at `aliases` in `impl_aliases`, are the `impl`'s, and
+    /// they can be used like its own functions.
+    fn declare_defaults(
+        &mut self,
+        ty: &Name,
+        self_ty: Option<&Type>,
+        trait_index: usize,
+        functions: &'a [ImplFunction],
+        aliases: Option<usize>,
+    ) -> Vec<Pending<'a>> {
+        let is_implemented = |declared: &TraitFunction| {
+            functions
+                .iter()
+                .any(|implemented| implemented.function.name == declared.name)
+        };
+        let declared = self.traits[trait_index].functions;
+        // A missing function is reported, so the defaults that might call it
+        // aren't checked.
+        let complete = declared
+            .iter()
+            .all(|declared| declared.body.is_some() || is_implemented(declared));
+
+        let outer_impl_type = self.impl_type.replace(self_ty.cloned());
+        self.current_impl_aliases = aliases;
+        let mut pending = vec![];
+        for declared in declared.iter().filter(|declared| !is_implemented(declared)) {
+            let Some(body) = &declared.body else {
+                continue;
+            };
+            let name = format!("{}.{}", ty.name, declared.name);
+            let index = self.declare_method(
+                self_ty,
+                (&declared.name, &declared.params, &declared.ret),
+                declared.is_static,
+                self.full_name(&name),
+            );
+            let kind = if declared.is_static {
+                FnKind::Static(self_ty.cloned())
+            } else {
+                FnKind::Method(self_ty.cloned())
+            };
+            if complete {
+                pending.push(Pending::Fn {
+                    index,
+                    name: &declared.name,
+                    body,
+                    kind,
+                    aliases,
+                });
+            }
+        }
+        self.impl_type = outer_impl_type;
+        self.current_impl_aliases = None;
+        pending
     }
 
     /// Finds the trait called `name`, returning its index into `traits`.
@@ -2206,7 +2277,12 @@ impl<'a> Checker<'a> {
                 });
             }
         }
-        for declared in trait_.functions {
+        // Functions with a default implementation don't need implementing.
+        for declared in trait_
+            .functions
+            .iter()
+            .filter(|declared| declared.body.is_none())
+        {
             if !functions
                 .iter()
                 .any(|(implemented, _)| implemented.function.name == declared.name)
@@ -2236,6 +2312,9 @@ impl<'a> Checker<'a> {
             "Bool.and" => ir::PrimitiveFn::BoolAnd,
             "Bool.or" => ir::PrimitiveFn::BoolOr,
             "Bool.not" => ir::PrimitiveFn::BoolNot,
+            "IntU8.isEqual" | "IntU16.isEqual" | "IntU32.isEqual" | "IntU64.isEqual"
+            | "IntS8.isEqual" | "IntS16.isEqual" | "IntS32.isEqual" | "IntS64.isEqual"
+            | "Bool.isEqual" => ir::PrimitiveFn::Equal,
             _ => panic!("the compiler doesn't know how to implement `{name}`"),
         };
         let Signature {
@@ -2766,12 +2845,10 @@ impl<'a> Checker<'a> {
                 self.integer_unary(op, operand, expected)
             }
             Expr::Unary(UnOp::Not, operand) => self.not(operand),
-            Expr::Binary(
-                lhs,
-                op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
-                rhs,
-            ) => self.comparison(lhs, op, rhs),
-            Expr::Binary(lhs, op @ (BinOp::And | BinOp::Or), rhs) => {
+            Expr::Binary(lhs, op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), rhs) => {
+                self.comparison(lhs, op, rhs)
+            }
+            Expr::Binary(lhs, op @ (BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne), rhs) => {
                 self.trait_operator(lhs, op, rhs)
             }
             Expr::Binary(lhs, op @ (BinOp::ShiftLeft | BinOp::ShiftRight), rhs) => {
@@ -3007,18 +3084,28 @@ impl<'a> Checker<'a> {
         Some(found.function)
     }
 
-    /// Checks `lhs & rhs` or `lhs | rhs`, which call `lhs.and(rhs)` or
-    /// `lhs.or(rhs)` from the standard library's `And` or `Or` trait, which
-    /// the type of `lhs` must implement. `rhs` must be its implementation's
-    /// `Rhs`, and the result is its `Output`.
+    /// Checks `lhs & rhs`, `lhs | rhs`, `lhs == rhs` or `lhs != rhs`, which
+    /// call `lhs.and(rhs)`, `lhs.or(rhs)`, `lhs.isEqual(to: rhs)` or
+    /// `lhs.isNotEqual(to: rhs)` from the standard library's `And`, `Or` or
+    /// `Equal` trait, which the type of `lhs` must implement. `rhs` must be
+    /// its implementation's `Rhs`, and the result is the method's.
     fn trait_operator(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
         let (trait_name, method) = match op {
             BinOp::And => ("And", "and"),
             BinOp::Or => ("Or", "or"),
-            _ => unreachable!("only `&` and `|` call trait functions"),
+            BinOp::Eq => ("Equal", "isEqual"),
+            BinOp::Ne => ("Equal", "isNotEqual"),
+            _ => unreachable!("only `&`, `|`, `==` and `!=` call trait functions"),
         };
         let op = op.symbol();
-        let lhs = self.expr(lhs);
+        // An operand made only of integer literals has no type of its own, so
+        // in `0 == byte`, the `0` takes its type from `byte`.
+        let (lhs, rhs_first) = if !has_own_type(lhs) && has_own_type(rhs) {
+            let rhs = self.expr(rhs);
+            (self.expr_as(lhs, rhs.ty.as_ref()), Some(rhs))
+        } else {
+            (self.expr(lhs), None)
+        };
         let signature = lhs
             .ty
             .as_ref()
@@ -3030,14 +3117,20 @@ impl<'a> Checker<'a> {
         let param = signature
             .as_ref()
             .and_then(|(_, signature)| signature.params.first()?.ty.clone());
-        let rhs = self.expr_as(rhs, param.as_ref());
+        let rhs = match rhs_first {
+            Some(rhs) => rhs,
+            None => self.expr_as(rhs, param.as_ref()),
+        };
         let mut function = signature.as_ref().map(|&(function, _)| function);
         if let Some((param, found)) = param.zip(rhs.ty)
             && param != found
         {
+            // Named as the left operand is when it's the same type, such as
+            // `Int` rather than the `IntS64` its `impl` is for.
+            let expected = lhs.ty.clone().filter(|ty| *ty == param).unwrap_or(param);
             self.error(CheckError::InvalidOperand {
                 op,
-                expected: param,
+                expected,
                 found,
             });
             function = None;
@@ -3100,28 +3193,19 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a comparison of two integers or two `Bool`s of the same type,
-    /// which produces a `Bool`. Only integers can be ordered with `<`, `<=`,
-    /// `>` and `>=`. The first operand whose type is known decides what's
-    /// compared.
+    /// Checks `<`, `<=`, `>` or `>=`, which order two integers of the same
+    /// type, producing a `Bool`. The first operand whose type is known
+    /// decides what's compared.
     fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
         let (lhs, rhs) = self.operands(lhs, rhs, None);
         let bool_ty = self.std_type("Bool");
         let op_symbol = op.symbol();
-        let is_equality = matches!(op, BinOp::Eq | BinOp::Ne);
         let compared = match lhs.ty.clone().or(rhs.ty.clone()) {
-            Some(ty) if self.int_type(&ty).is_some() || (is_equality && ty == bool_ty) => Some(ty),
+            Some(ty) if self.int_type(&ty).is_some() => Some(ty),
             Some(found) => {
-                self.error(if is_equality {
-                    CheckError::IncomparableOperand {
-                        op: op_symbol,
-                        found,
-                    }
-                } else {
-                    CheckError::NotInteger {
-                        op: op_symbol,
-                        found,
-                    }
+                self.error(CheckError::NotInteger {
+                    op: op_symbol,
+                    found,
                 });
                 None
             }
@@ -4204,8 +4288,10 @@ mod tests {
 
     #[test]
     fn rejects_comparing_other_types() {
-        let incomparable = |op| CheckError::IncomparableOperand {
+        // `Void` doesn't implement `Equal`.
+        let incomparable = |op| CheckError::NotImplemented {
             op,
+            trait_name: "Equal",
             found: ty("Void"),
         };
         assert_eq!(
@@ -4218,7 +4304,7 @@ mod tests {
         );
         assert_eq!(
             messages("let x = Void.new() == Void.new()"),
-            vec!["operator `==` expects an integer or `Bool`, found `Void`"]
+            vec!["operator `==` expects a type that implements `Equal`, found `Void`"]
         );
     }
 
@@ -4340,11 +4426,12 @@ mod tests {
         assert_eq!(
             check_body("let x = Void.new() == y"),
             Err(vec![
-                CheckError::Undeclared("y".to_string()),
-                CheckError::IncomparableOperand {
+                CheckError::NotImplemented {
                     op: "==",
+                    trait_name: "Equal",
                     found: ty("Void"),
                 },
+                CheckError::Undeclared("y".to_string()),
             ])
         );
     }
@@ -7800,7 +7887,7 @@ mod tests {
                 inferred("Rhs"),
                 inferred("Rhs"),
                 "`Copy` is not declared by trait `Combine`".to_string(),
-                "`impl Bool with Make` must give `alias Unused`, since it can't be inferred when none of the trait's functions use it".to_string(),
+                "`impl Bool with Make` must give `alias Unused`, since it can't be inferred from the `impl`'s functions".to_string(),
                 "`impl Void with Combine` is missing `fn combine(with rhs: Rhs) -> Output`".to_string(),
             ]
         );
@@ -7939,6 +8026,189 @@ mod tests {
             [
                 "operator `&` expects `Bool`, found `Int`",
                 "cannot assign `Bool` to `d`, which has type `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn impls_use_default_trait_functions() {
+        // Defaults can call the trait's other functions, including other
+        // defaults, and use `Self` and the `impl`'s aliases.
+        let src = "
+            trait Size {
+                alias Unit
+
+                fn size() -> Unit
+                static fn zero() -> Unit
+
+                fn doubled() -> Unit {
+                    return self.size() + self.size()
+                }
+
+                fn isEmpty() -> Bool {
+                    return self.size() == Self.zero()
+                }
+
+                fn same() -> Self {
+                    let unit: Unit = self.doubled()
+                    return self
+                }
+            }
+
+            group Box {
+                let width: Int
+            }
+
+            impl Box with Size {
+                fn size() -> Int {
+                    return self.width
+                }
+
+                static fn zero() -> Int {
+                    return 0
+                }
+            }
+
+            fn f(box: Box) -> Bool {
+                let size: Int = box.same().doubled()
+                return box.isEmpty() & Box.zero() == 0
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn impls_can_implement_default_trait_functions_themselves() {
+        let src = "
+            trait Describe {
+                fn size() -> Int
+
+                fn doubled() -> Int {
+                    return self.size() * 2
+                }
+            }
+
+            impl Int with Describe {
+                fn size() -> Int {
+                    return self
+                }
+
+                fn doubled() -> Int {
+                    return self + self
+                }
+            }
+
+            impl Bool with Describe {
+                fn size() -> Int {
+                    return 1
+                }
+
+                fn doubled() -> Bool {
+                    return true
+                }
+            }
+
+            impl Void with Describe {}
+            ";
+        // Only functions without a default must be implemented.
+        assert_eq!(
+            messages_top(src),
+            [
+                "trait `Describe` declares this function as `fn doubled() -> Int`",
+                "`impl Void with Describe` is missing `fn size() -> Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn default_trait_functions_are_checked_for_each_impl() {
+        // `Self` is a different type in each `impl`, so the default is
+        // checked in each one, as if it were written there.
+        let src = "
+            trait Bump {
+                fn bumped() -> Self {
+                    return self + 1
+                }
+            }
+
+            impl Int with Bump {}
+            impl Bool with Bump {}
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "operator `+` expects an integer, found `Bool`",
+                "`bumped` must return `Bool`, found `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn aliases_only_used_by_defaults_must_be_given() {
+        let src = "
+            trait Echo {
+                alias Value
+                fn echo(_ value: Value) -> Value {
+                    return value
+                }
+            }
+
+            impl Int with Echo {
+                alias Value = Bool
+            }
+
+            impl Bool with Echo {}
+
+            fn f() -> Bool {
+                return 1.echo(true)
+            }
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "`impl Bool with Echo` must give `alias Value`, since it can't be inferred from the `impl`'s functions"
+            ]
+        );
+    }
+
+    #[test]
+    fn equality_operators_call_equal() {
+        // `Point` only implements `isEqual`, so `!=` uses the default
+        // `isNotEqual`. Integer literals take the other operand's type.
+        let src = "
+            group Point {
+                let x: Int
+            }
+
+            impl Point with Equal {
+                fn isEqual(to rhs: Self) -> Bool {
+                    return self.x == rhs.x
+                }
+            }
+
+            fn f(a: Point, b: Point, byte: IntU8) -> Bool {
+                let same: Bool = a == b & a.isNotEqual(to: b)
+                return a != b & 0 == byte & byte != 255 & true != false
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        assert_eq!(
+            messages_top(
+                "
+                group Point {
+                    let x: Int
+                }
+                fn f(a: Point, byte: IntU8) -> Bool {
+                    let b = byte == 256
+                    let c = 1 == true
+                    return a == a
+                }
+                "
+            ),
+            [
+                "`256` doesn't fit in `IntU8`, which holds `0` to `255`",
+                "operator `==` expects `Int`, found `Bool`",
+                "operator `==` expects a type that implements `Equal`, found `Point`",
             ]
         );
     }
@@ -8672,7 +8942,7 @@ primitive Float"
                 let a = Shape.empty == Shape.empty
                 "
             )),
-            ["operator `==` expects an integer or `Bool`, found `Shape`"]
+            ["operator `==` expects a type that implements `Equal`, found `Shape`"]
         );
     }
 

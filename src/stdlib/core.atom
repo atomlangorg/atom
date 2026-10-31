@@ -85,6 +85,19 @@ trait Not {
     fn not() -> Output
 }
 
+// Types that `==` and `!=` can be used on, which call `isEqual` and
+// `isNotEqual`, as in `a == b`, where `b` is an `Rhs`. `isNotEqual` is the
+// opposite of `isEqual` unless it's implemented too.
+trait Equal {
+    alias Rhs
+
+    fn isEqual(to rhs: Rhs) -> Bool
+
+    fn isNotEqual(to rhs: Rhs) -> Bool {
+        return !self.isEqual(to: rhs)
+    }
+}
+
 // Each `impl` infers its trait's aliases from its signatures, such as
 // `alias Rhs = Self` and `alias Output = Bool` from `and`.
 impl Bool with And {
@@ -100,4 +113,41 @@ impl Bool with Or {
 impl Bool with Not {
     // `true` if it's `false`, and `false` if it's `true`.
     primitive fn not() -> Bool
+}
+
+// Integers and `Bool`s are equal if they hold the same value.
+impl IntU8 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntU16 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntU32 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntU64 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntS8 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntS16 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntS32 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl IntS64 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+}
+
+impl Bool with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
 }

@@ -497,7 +497,7 @@ where
 
     // One statement per line; blank lines are allowed anywhere.
     let mut stmt = Recursive::declare();
-    let function = {
+    let (function, block) = {
         let block = newlines
             .clone()
             .ignore_then(
@@ -565,7 +565,7 @@ where
 
         let function = signature
             .clone()
-            .then(block)
+            .then(block.clone())
             .map(|(((name, params), ret), body)| Function {
                 name,
                 params,
@@ -600,7 +600,7 @@ where
                 .or(return_)
                 .or(call),
         );
-        function
+        (function, block)
     };
 
     // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module in a
@@ -698,15 +698,19 @@ where
             }
         });
 
-    // Like an `impl`, one function per line, but only their signatures.
-    let trait_function = just(Token::Static).or_not().then(signature.clone()).map(
-        |(is_static, ((name, params), ret))| TraitFunction {
+    // Like an `impl`, one function per line, but each only needs its
+    // signature. A body is its default implementation.
+    let trait_function = just(Token::Static)
+        .or_not()
+        .then(signature.clone())
+        .then(block.or_not())
+        .map(|((is_static, ((name, params), ret)), body)| TraitFunction {
             is_static: is_static.is_some(),
             name,
             params,
             ret,
-        },
-    );
+            body,
+        });
     // `alias Name`, whose type each implementation gives.
     let trait_alias = just(Token::Alias).ignore_then(ident).map(TraitItem::Alias);
     let trait_ = just(Token::Trait)
@@ -3288,18 +3292,21 @@ mod tests {
                             name: "and".to_string(),
                             params: vec![param(None, "rhs", "Self")],
                             ret: Name::new("Bool"),
+                            body: None,
                         },
                         TraitFunction {
                             is_static: true,
                             name: "zero".to_string(),
                             params: vec![],
                             ret: Name::new("Self"),
+                            body: None,
                         },
                         TraitFunction {
                             is_static: false,
                             name: "reset".to_string(),
                             params: vec![param(Some("to"), "value", "Int")],
                             ret: Name::new("Void"),
+                            body: None,
                         },
                     ],
                 },
@@ -3419,12 +3426,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_default_trait_functions() {
+        let src = "
+            trait Equal {
+                fn isEqual(to rhs: Self) -> Bool
+                fn isNotEqual(to rhs: Self) -> Bool {
+                    return !self.isEqual(to: rhs)
+                }
+            }
+            ";
+        let Ok(program) = parse(src) else {
+            panic!("should parse");
+        };
+        let [Stmt::Trait { functions, .. }] = &program[..] else {
+            panic!("expected a trait, got {program:?}");
+        };
+        assert_eq!(functions[0].body, None);
+        let call = method_call(
+            Expr::SelfValue,
+            "isEqual",
+            vec![Arg {
+                label: Some("to".to_string()),
+                value: *var("rhs"),
+            }],
+        );
+        assert_eq!(
+            functions[1].body,
+            Some(vec![Stmt::Return(Some(*not(Box::new(call))))])
+        );
+        assert!(parse("trait Equal {\nfn isEqual(to rhs: Self) -> Bool {\n}").is_err());
+    }
+
+    #[test]
     fn rejects_malformed_traits() {
         for src in [
             "trait",
             "trait {}",
             "trait And",
-            "trait And { fn and(_ rhs: Self) -> Bool {} }",
             "trait And { let x: Int }",
             "trait And { fn and(_ rhs: Self) -> Bool fn or() }",
             "trait other::And {}",
