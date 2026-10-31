@@ -2315,6 +2315,11 @@ impl<'a> Checker<'a> {
             "IntU8.isEqual" | "IntU16.isEqual" | "IntU32.isEqual" | "IntU64.isEqual"
             | "IntS8.isEqual" | "IntS16.isEqual" | "IntS32.isEqual" | "IntS64.isEqual"
             | "Bool.isEqual" => ir::PrimitiveFn::Equal,
+            "IntU8.isNotEqual" | "IntU16.isNotEqual" | "IntU32.isNotEqual"
+            | "IntU64.isNotEqual" | "IntS8.isNotEqual" | "IntS16.isNotEqual"
+            | "IntS32.isNotEqual" | "IntS64.isNotEqual" | "Bool.isNotEqual" => {
+                ir::PrimitiveFn::NotEqual
+            }
             _ => panic!("the compiler doesn't know how to implement `{name}`"),
         };
         let Signature {

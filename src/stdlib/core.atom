@@ -118,36 +118,45 @@ impl Bool with Not {
 // Integers and `Bool`s are equal if they hold the same value.
 impl IntU8 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntU16 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntU32 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntU64 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntS8 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntS16 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntS32 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntS64 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl Bool with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }

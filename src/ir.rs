@@ -96,6 +96,8 @@ pub enum PrimitiveFn {
     /// `isEqual` on an integer or `Bool`, which is whether two of the same
     /// type are equal.
     Equal,
+    /// `isNotEqual` on an integer or `Bool`, the opposite of `Equal`.
+    NotEqual,
 }
 
 #[derive(Debug)]

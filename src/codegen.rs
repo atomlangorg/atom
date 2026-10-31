@@ -326,30 +326,38 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.build_call(exit, &[code.into()], "")?;
                 self.builder.build_unreachable()?;
             }
-            Body::Primitive(primitive @ (PrimitiveFn::BoolAnd | PrimitiveFn::BoolOr)) => {
-                // `self`, then the other `Bool`.
-                let lhs = value.get_nth_param(0).expect("`self`").into_int_value();
-                let rhs = value.get_nth_param(1).expect("`rhs`").into_int_value();
-                let result = match primitive {
-                    PrimitiveFn::BoolAnd => self.builder.build_and(lhs, rhs, "")?,
-                    _ => self.builder.build_or(lhs, rhs, "")?,
-                };
-                self.builder.build_return(Some(&result))?;
-            }
-            Body::Primitive(PrimitiveFn::Equal) => {
-                // `self`, then the other value of the same type.
-                let lhs = value.get_nth_param(0).expect("`self`").into_int_value();
-                let rhs = value.get_nth_param(1).expect("`rhs`").into_int_value();
-                let result = self.builder.build_int_compare(EQ, lhs, rhs, "")?;
-                self.builder.build_return(Some(&result))?;
-            }
-            Body::Primitive(PrimitiveFn::BoolNot) => {
-                let operand = value.get_nth_param(0).expect("`self`").into_int_value();
-                let result = self.builder.build_not(operand, "")?;
+            // Calls are built as the instruction itself, but the function
+            // is still defined like any other.
+            &Body::Primitive(primitive) => {
+                let params: Vec<_> = value
+                    .get_param_iter()
+                    .map(|param| param.into_int_value())
+                    .collect();
+                let result = self
+                    .primitive_instruction(primitive, &params)?
+                    .expect("only `exit` isn't a single instruction");
                 self.builder.build_return(Some(&result))?;
             }
         }
         Ok(())
+    }
+
+    /// Builds the single instruction that `primitive` is, on `args`, where
+    /// a method's `self` comes first, or `None` if it isn't one, such as
+    /// `exit`.
+    fn primitive_instruction(
+        &self,
+        primitive: PrimitiveFn,
+        args: &[IntValue<'ctx>],
+    ) -> Result<Option<IntValue<'ctx>>, BuilderError> {
+        Ok(Some(match primitive {
+            PrimitiveFn::Exit => return Ok(None),
+            PrimitiveFn::BoolAnd => self.builder.build_and(args[0], args[1], "")?,
+            PrimitiveFn::BoolOr => self.builder.build_or(args[0], args[1], "")?,
+            PrimitiveFn::BoolNot => self.builder.build_not(args[0], "")?,
+            PrimitiveFn::Equal => self.builder.build_int_compare(EQ, args[0], args[1], "")?,
+            PrimitiveFn::NotEqual => self.builder.build_int_compare(NE, args[0], args[1], "")?,
+        }))
     }
 
     /// Builds the C `main`, which sets every top-level value, then returns
@@ -544,8 +552,17 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             Expr::Call { function, args } => {
                 let args = args
                     .iter()
-                    .map(|arg| Ok(self.expr(arg)?.into()))
+                    .map(|arg| self.expr(arg))
                     .collect::<Result<Vec<_>, BuilderError>>()?;
+                // A primitive that's a single instruction, such as `==` on
+                // integers, is built in place rather than called.
+                if let Body::Primitive(primitive) = self.program.functions[*function].body {
+                    let ints: Vec<_> = args.iter().map(|arg| arg.into_int_value()).collect();
+                    if let Some(result) = self.primitive_instruction(primitive, &ints)? {
+                        return Ok(result.into());
+                    }
+                }
+                let args: Vec<_> = args.into_iter().map(Into::into).collect();
                 self.builder
                     .build_call(self.functions[*function], &args, "")?
                     .try_as_basic_value()
@@ -793,7 +810,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 mod tests {
     use std::{env, fs, os::unix::process::ExitStatusExt, process::ExitStatus};
 
-    use inkwell::execution_engine::ExecutionEngine;
+    use inkwell::{execution_engine::ExecutionEngine, values::AnyValue};
 
     use super::*;
     use crate::syntax::{self, Module as AtomModule, parser::parse};
@@ -2048,6 +2065,46 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 51);
+    }
+
+    #[test]
+    fn primitive_operators_are_single_instructions() {
+        // Each operator is built in place as one instruction, rather than as
+        // a call to the primitive that implements it.
+        let src = "
+            fn equal(_ a: IntU8, _ b: IntU8) -> Bool {
+                return a == b
+            }
+            fn notEqual(_ a: Int, _ b: Int) -> Bool {
+                return a != b
+            }
+            fn bools(_ a: Bool, _ b: Bool) -> Bool {
+                return !(a & b) | a == b | a != b
+            }
+            fn main() -> Int {
+                return 0
+            }
+            ";
+        let context = Context::create();
+        let module = compile_files(&context, &machine(), &[("/main", src)]);
+        let body = |name: &str| {
+            module
+                .get_function(&format!("/main::{name}"))
+                .expect("the function should be compiled")
+                .print_to_string()
+                .to_string()
+        };
+        let equal = body("equal");
+        assert!(equal.contains("icmp eq i8"), "{equal}");
+        let not_equal = body("notEqual");
+        assert!(not_equal.contains("icmp ne i64"), "{not_equal}");
+        let bools = body("bools");
+        for instruction in ["and i1", "xor i1", "or i1", "icmp eq i1", "icmp ne i1"] {
+            assert!(bools.contains(instruction), "{instruction}: {bools}");
+        }
+        for body in [equal, not_equal, bools] {
+            assert!(!body.contains("call"), "{body}");
+        }
     }
 
     #[test]
