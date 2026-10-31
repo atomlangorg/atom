@@ -69,6 +69,11 @@ trait Or {
     fn or(_ rhs: Self) -> Bool
 }
 
+// Types that `!` can be used on, which calls `not`, as in `!a`.
+trait Not {
+    fn not() -> Self
+}
+
 impl Bool with And {
     // `true` if both are `true`.
     primitive fn and(_ rhs: Self) -> Bool
@@ -77,4 +82,9 @@ impl Bool with And {
 impl Bool with Or {
     // `true` if either is `true`.
     primitive fn or(_ rhs: Self) -> Bool
+}
+
+impl Bool with Not {
+    // `true` if it's `false`, and `false` if it's `true`.
+    primitive fn not() -> Self
 }

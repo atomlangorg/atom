@@ -91,6 +91,8 @@ pub enum PrimitiveFn {
     BoolAnd,
     /// `Bool.or`, which is `true` if either `Bool` is.
     BoolOr,
+    /// `Bool.not`, which is `true` if the `Bool` isn't.
+    BoolNot,
 }
 
 #[derive(Debug)]

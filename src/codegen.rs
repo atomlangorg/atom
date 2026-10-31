@@ -336,6 +336,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 };
                 self.builder.build_return(Some(&result))?;
             }
+            Body::Primitive(PrimitiveFn::BoolNot) => {
+                let operand = value.get_nth_param(0).expect("`self`").into_int_value();
+                let result = self.builder.build_not(operand, "")?;
+                self.builder.build_return(Some(&result))?;
+            }
         }
         Ok(())
     }
@@ -474,7 +479,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let zero = operand.get_type().const_zero();
                         self.checked("llvm.ssub.with.overflow", zero, operand)?
                     }
-                    UnOp::Not | UnOp::BitNot => self.builder.build_not(operand, "")?,
+                    UnOp::BitNot => self.builder.build_not(operand, "")?,
+                    UnOp::Not => unreachable!("`!` compiles to a call to `not`"),
                 }
                 .into()
             }
@@ -1872,6 +1878,45 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 53);
+    }
+
+    #[test]
+    fn not_calls_not() {
+        let src = "
+            group Flags {
+                let bits: Int
+            }
+
+            impl Flags with Not {
+                fn not() -> Self {
+                    return Flags { bits: .!self.bits }
+                }
+            }
+
+            impl Flags {
+                static fn of(_ bits: Int) -> Self {
+                    return Self { bits: bits }
+                }
+            }
+
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let flags = Flags.of(5)
+                let a = bit(!false, at: 1)
+                let b = bit(!true, at: 2)
+                let c = bit(!!true & false.not(), at: 4)
+                let d = bit((!flags).bits == -6, at: 8)
+                let e = bit((!!flags).bits == 5, at: 16)
+                return a + b + c + d + e
+            }
+            ";
+        assert_eq!(run(src), 29);
     }
 
     #[test]

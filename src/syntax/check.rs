@@ -343,8 +343,8 @@ pub enum CheckError {
         trait_name: String,
         expected: String,
     },
-    /// `&` or `|` was used on a type that doesn't implement the standard
-    /// library's `And` or `Or` trait, which they call.
+    /// `&`, `|` or `!` was used on a type that doesn't implement the
+    /// standard library's `And`, `Or` or `Not` trait, which they call.
     NotImplemented {
         op: &'static str,
         trait_name: &'static str,
@@ -1958,6 +1958,7 @@ impl<'a> Checker<'a> {
             "exit" => ir::PrimitiveFn::Exit,
             "Bool.and" => ir::PrimitiveFn::BoolAnd,
             "Bool.or" => ir::PrimitiveFn::BoolOr,
+            "Bool.not" => ir::PrimitiveFn::BoolNot,
             _ => panic!("the compiler doesn't know how to implement `{name}`"),
         };
         let Signature {
@@ -2481,12 +2482,7 @@ impl<'a> Checker<'a> {
             Expr::Unary(op @ (UnOp::Neg | UnOp::BitNot), operand) => {
                 self.integer_unary(op, operand, expected)
             }
-            Expr::Unary(op @ UnOp::Not, operand) => {
-                let ty = self.std_type("Bool");
-                let operand = self.operand(op.symbol(), operand, ty.clone());
-                let expr = operand.map(|operand| ir::Expr::Unary(op.clone(), Box::new(operand)));
-                Typed { ty: Some(ty), expr }
-            }
+            Expr::Unary(UnOp::Not, operand) => self.not(operand, expected),
             Expr::Binary(
                 lhs,
                 op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
@@ -2668,6 +2664,66 @@ impl<'a> Checker<'a> {
         Typed { ty: Some(ty), expr }
     }
 
+    /// Checks `!operand`, which calls `operand.not()` from the standard
+    /// library's `Not` trait, which the operand's type must implement. The
+    /// result has the operand's type.
+    fn not(&mut self, operand: &Expr, expected: Option<&Type>) -> Typed {
+        let Typed { ty, expr } = self.expr_as(operand, expected);
+        let function = ty
+            .as_ref()
+            .and_then(|ty| self.operator_method("!", "Not", "not", ty));
+        let expr = function
+            .zip(expr)
+            .map(|(function, operand)| ir::Expr::Call {
+                function,
+                args: vec![operand],
+            });
+        // The result's type comes from `not`, so it's unknown without it.
+        Typed {
+            ty: function.and(ty),
+            expr,
+        }
+    }
+
+    /// Finds `method` of `ty`, which the operator `op` calls, as an index
+    /// into `functions`. `ty` must implement the standard library's trait
+    /// called `trait_name`, and like calling the method directly, the module
+    /// implementing it must be imported.
+    fn operator_method(
+        &mut self,
+        op: &'static str,
+        trait_name: &'static str,
+        method: &str,
+        ty: &Type,
+    ) -> Option<usize> {
+        let trait_index = match self.modules[self.core].scope.get(trait_name) {
+            Some(Binding::Trait(index)) => *index,
+            _ => panic!("the standard library should declare `{trait_name}`"),
+        };
+        let found = match self.member(ty, method) {
+            Some(Member::Method(found)) if self.implementations.contains(&(ty.id, trait_index)) => {
+                found
+            }
+            _ => {
+                self.error(CheckError::NotImplemented {
+                    op,
+                    trait_name,
+                    found: ty.clone(),
+                });
+                return None;
+            }
+        };
+        if !self.visible_modules().any(|module| module == found.module) {
+            self.error(CheckError::MemberNotImported {
+                ty: ty.clone(),
+                member: method.to_string(),
+                module: self.modules[found.module].display.clone(),
+            });
+            return None;
+        }
+        Some(found.function)
+    }
+
     /// Checks `lhs & rhs` or `lhs | rhs`, which call `lhs.and(rhs)` or
     /// `lhs.or(rhs)` from the standard library's `And` or `Or` trait, which
     /// the type of `lhs` must implement. Both operands have that type, and
@@ -2683,34 +2739,7 @@ impl<'a> Checker<'a> {
         let bool_ty = self.std_type("Bool");
 
         let function = lhs.ty.clone().and_then(|ty| {
-            let trait_index = match self.modules[self.core].scope.get(trait_name) {
-                Some(Binding::Trait(index)) => *index,
-                _ => panic!("the standard library should declare `{trait_name}`"),
-            };
-            let found = match self.member(&ty, method) {
-                Some(Member::Method(found))
-                    if self.implementations.contains(&(ty.id, trait_index)) =>
-                {
-                    found
-                }
-                _ => {
-                    self.error(CheckError::NotImplemented {
-                        op,
-                        trait_name,
-                        found: ty,
-                    });
-                    return None;
-                }
-            };
-            // Like calling the method, its module must be imported.
-            if !self.visible_modules().any(|module| module == found.module) {
-                self.error(CheckError::MemberNotImported {
-                    ty: ty.clone(),
-                    member: method.to_string(),
-                    module: self.modules[found.module].display.clone(),
-                });
-                return None;
-            }
+            let function = self.operator_method(op, trait_name, method, &ty)?;
             if let Some(found_rhs) = &rhs.ty
                 && *found_rhs != ty
             {
@@ -2721,7 +2750,7 @@ impl<'a> Checker<'a> {
                 });
                 return None;
             }
-            Some(found.function)
+            Some(function)
         });
 
         let expr = function
@@ -3337,22 +3366,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks an operand of `op`, returning what it compiles to, or `None` if
-    /// it has an error.
-    fn operand(&mut self, op: &'static str, operand: &Expr, expected: Type) -> Option<ir::Expr> {
-        let Typed { ty, expr } = self.expr(operand);
-        if let Some(found) = ty
-            && found != expected
-        {
-            self.error(CheckError::InvalidOperand {
-                op,
-                expected,
-                found,
-            });
-        }
-        expr
-    }
-
     /// The program made of everything that's been checked, which must not have
     /// any errors.
     fn program(self) -> ir::Program {
@@ -3465,7 +3478,7 @@ fn int_range(bits: u32, signed: bool) -> (i128, i128) {
 fn has_own_type(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) => false,
-        Expr::Unary(UnOp::Neg | UnOp::BitNot, operand) => has_own_type(operand),
+        Expr::Unary(UnOp::Neg | UnOp::Not | UnOp::BitNot, operand) => has_own_type(operand),
         Expr::Binary(
             lhs,
             BinOp::Add
@@ -3593,8 +3606,11 @@ mod tests {
             found: ty("Int"),
         };
 
-        assert_eq!(check_body("let x = !1"), Err(vec![invalid("!")]));
         assert_eq!(check_body("let x = true & 1"), Err(vec![invalid("&")]));
+        assert_eq!(
+            messages("let x = !1"),
+            ["operator `!` expects a type that implements `Not`, found `Int`"]
+        );
         // `Int` doesn't implement `Or`, so `|` can't be used on it.
         assert_eq!(
             check_body("let x = 1 | 2"),
@@ -3619,6 +3635,45 @@ mod tests {
             let b: Bool = true.or(false) & a | !a
             ";
         assert_eq!(check_body(src), Ok(()));
+    }
+
+    #[test]
+    fn not_calls_not_and_keeps_its_type() {
+        let src = "
+            group Flags {
+                let bits: Int
+            }
+
+            impl Flags with Not {
+                fn not() -> Self {
+                    return Flags { bits: .!self.bits }
+                }
+            }
+
+            fn f(flags: Flags) -> Flags {
+                let a: Bool = true.not() & !!false
+                let b: Flags = !flags
+                return !!b
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        assert_eq!(
+            messages_top(
+                "
+                group Flags {
+                    let bits: Int
+                }
+                fn f(flags: Flags) -> Bool {
+                    let a: Bool = !flags
+                    return !Void.new()
+                }
+                "
+            ),
+            [
+                "operator `!` expects a type that implements `Not`, found `Flags`",
+                "operator `!` expects a type that implements `Not`, found `Void`",
+            ]
+        );
     }
 
     #[test]
@@ -7274,8 +7329,8 @@ mod tests {
                 (
                     "/logic",
                     "
-                    trait Not {
-                        fn not() -> Self
+                    trait Flip {
+                        fn flipped() -> Self
                     }
                     ",
                 ),
@@ -7283,13 +7338,13 @@ mod tests {
                     "/main",
                     "
                     use /logic
-                    impl Bool with Not {
-                        fn not() -> Bool {
+                    impl Bool with Flip {
+                        fn flipped() -> Bool {
                             return !self
                         }
                     }
-                    impl Int with logic::Not {
-                        fn not() -> Int {
+                    impl Int with logic::Flip {
+                        fn flipped() -> Int {
                             return .!self
                         }
                     }
