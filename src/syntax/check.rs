@@ -873,9 +873,12 @@ struct Checker<'a> {
     /// For each of `functions`, what it compiles to, once its body has been
     /// checked, or `None` if it has an error.
     lowered_functions: Vec<Option<ir::Function>>,
-    /// The call statements whose result is a `Never`, which never finish, so
-    /// count as returning.
+    /// The statements that evaluate a `Never`, which never finish, so count
+    /// as returning.
     never_returns: HashSet<*const Stmt>,
+    /// Whether a `Never` has been evaluated since `evaluating` started
+    /// checking a statement's expressions.
+    evaluated_never: bool,
     /// For each type `id`, its methods by name. Methods aren't names in any
     /// scope, and are only found through the type of the value they're called
     /// on, in the modules that can see the module declaring them. They share
@@ -1637,24 +1640,26 @@ impl<'a> Checker<'a> {
             });
     }
 
-    /// Whether `stmts`, which have been checked, return on every path. A call
-    /// that results in a `Never` counts, since it never finishes. Both
-    /// branches of an `if` must return for it to count, so an `if` without an
-    /// `else` never does. Every option of a `match` must return, which is
-    /// enough since every option is matched.
+    /// Whether `stmts`, which have been checked, return on every path. A
+    /// statement that evaluates a `Never` counts, since it never finishes.
+    /// Both branches of an `if` must return for it to count, so an `if`
+    /// without an `else` never does. Every option of a `match` must return,
+    /// which is enough since every option is matched.
     fn always_returns(&self, stmts: &[Stmt]) -> bool {
-        stmts.iter().any(|stmt| match stmt {
-            Stmt::Return(_) => true,
-            Stmt::Expr(_) => self.never_returns.contains(&(stmt as *const Stmt)),
-            Stmt::Match { options, .. } => options
-                .iter()
-                .all(|option| self.always_returns(&option.body)),
-            Stmt::If {
-                then_block,
-                else_block: Some(else_block),
-                ..
-            } => self.always_returns(then_block) && self.always_returns(else_block),
-            _ => false,
+        stmts.iter().any(|stmt| {
+            self.never_returns.contains(&(stmt as *const Stmt))
+                || match stmt {
+                    Stmt::Return(_) => true,
+                    Stmt::Match { options, .. } => options
+                        .iter()
+                        .all(|option| self.always_returns(&option.body)),
+                    Stmt::If {
+                        then_block,
+                        else_block: Some(else_block),
+                        ..
+                    } => self.always_returns(then_block) && self.always_returns(else_block),
+                    _ => false,
+                }
         })
     }
 
@@ -1878,7 +1883,9 @@ impl<'a> Checker<'a> {
                 ty: type_name,
                 value,
             } => {
-                let Typed { ty, expr } = self.decl_type(name, type_name.as_ref(), value);
+                let Typed { ty, expr } = self.evaluating(stmt, |checker| {
+                    checker.decl_type(name, type_name.as_ref(), value)
+                });
                 let local = self.declare_local(name, *mutability, ty);
                 Some(ir::Stmt::Assign {
                     local,
@@ -1894,7 +1901,8 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Value { ty, .. }) => ty.clone(),
                     _ => None,
                 };
-                let found = self.expr_as(value, expected.as_ref());
+                let found =
+                    self.evaluating(stmt, |checker| checker.expr_as(value, expected.as_ref()));
                 match binding {
                     Ok(Binding::Value {
                         mutability: Mutability::Var,
@@ -1931,7 +1939,7 @@ impl<'a> Checker<'a> {
                 then_block,
                 else_block,
             } => {
-                let cond = self.expr(cond);
+                let cond = self.evaluating(stmt, |checker| checker.expr(cond));
                 if let Some(found) = &cond.ty
                     && *found != self.std_type("Bool")
                 {
@@ -1970,15 +1978,15 @@ impl<'a> Checker<'a> {
                 self.declare_alias(name, ty, LazyType::Checked(target));
                 None
             }
-            Stmt::Match { value, options } => self.match_(value, options),
+            Stmt::Match { value, options } => self.match_(stmt, value, options),
             Stmt::Return(value) => {
                 let FnContext { name, returns, .. } = self
                     .current_fn
                     .clone()
                     .expect("statements are only checked inside functions");
-                let found = value
-                    .as_ref()
-                    .map(|value| self.expr_as(value, returns.as_ref()));
+                let found = value.as_ref().map(|value| {
+                    self.evaluating(stmt, |checker| checker.expr_as(value, returns.as_ref()))
+                });
 
                 // A bare `return` returns `Void`.
                 let function = name.to_string();
@@ -2001,23 +2009,33 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Expr(expr) => {
-                let found = match expr {
-                    // A call's return value can be ignored.
-                    Expr::Call { callee, args } => self.call(callee, args),
-                    _ => self.expr(expr),
-                };
-                if found.ty == Some(self.std_type("Never")) {
-                    self.never_returns.insert(stmt);
-                }
+                // A call's return value can be ignored.
+                let found = self.evaluating(stmt, |checker| checker.expr(expr));
                 found.expr.map(ir::Stmt::Expr)
             }
         }
     }
 
+    /// Checks the expressions of `stmt` with `check`. If they evaluate a
+    /// `Never`, `stmt` never finishes, so it counts as returning.
+    fn evaluating<T>(&mut self, stmt: &'a Stmt, check: impl FnOnce(&mut Self) -> T) -> T {
+        self.evaluated_never = false;
+        let checked = check(self);
+        if self.evaluated_never {
+            self.never_returns.insert(stmt);
+        }
+        checked
+    }
+
     /// Checks a `match` on `value`, which must be a choice whose every option
     /// is matched exactly once by `options`, returning what it compiles to.
-    fn match_(&mut self, value: &Expr, options: &'a [MatchOption]) -> Option<ir::Stmt> {
-        let Typed { ty, expr } = self.expr(value);
+    fn match_(
+        &mut self,
+        stmt: &'a Stmt,
+        value: &Expr,
+        options: &'a [MatchOption],
+    ) -> Option<ir::Stmt> {
+        let Typed { ty, expr } = self.evaluating(stmt, |checker| checker.expr(value));
         let choice = match ty {
             Some(ty) if self.choice_options.contains_key(&ty.id) => Some(ty),
             Some(found) => {
@@ -2116,6 +2134,15 @@ impl<'a> Checker<'a> {
     /// which integer literals take as their type. It doesn't have to match:
     /// whatever uses `expr` checks that.
     fn expr_as(&mut self, expr: &Expr, expected: Option<&Type>) -> Typed {
+        let typed = self.expr_kind_as(expr, expected);
+        if typed.ty == Some(self.std_type("Never")) {
+            self.evaluated_never = true;
+        }
+        typed
+    }
+
+    /// Checks `expr` like `expr_as`, by what kind of expression it is.
+    fn expr_kind_as(&mut self, expr: &Expr, expected: Option<&Type>) -> Typed {
         match expr {
             Expr::Int(value) => self.int_literal(i128::from(*value), expected),
             // A negated literal is checked as one value, so the smallest
@@ -4349,6 +4376,57 @@ mod tests {
     }
 
     #[test]
+    fn evaluating_never_anywhere_in_a_statement_ends_its_path() {
+        // `describe` and `is_done` take a `Never`, so their arguments never
+        // finish being evaluated, and they're never called.
+        let src = "
+            choice Answer {
+                yes: Void
+                no: Void
+            }
+            fn describe(_ never: Never) -> Int {
+                match never {}
+            }
+            fn is_done(_ never: Never) -> Bool {
+                match never {}
+            }
+            fn answer(_ never: Never) -> Answer {
+                match never {}
+            }
+
+            fn declares() -> Int {
+                let stopped = exit()
+            }
+            fn declares_with_a_type() {
+                var stopped: Never = exit()
+            }
+            fn assigns() -> Int {
+                var total = 0
+                total = describe(exit())
+            }
+            fn returns() -> Never {
+                return exit()
+            }
+            fn calls_with() -> Int {
+                let total = 1 + describe(exit())
+            }
+            fn conditions() -> Int {
+                if is_done(exit()) {}
+            }
+            fn matches() -> Int {
+                match answer(exit()) {
+                    Answer.yes => {}
+                    Answer.no => {}
+                }
+            }
+            fn uses_a_never(never: Never) -> Int {
+                let stopped = never
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
     fn calls_that_never_return_only_end_their_own_path() {
         let missing = |function: &str| CheckError::MissingReturn {
             function: function.to_string(),
@@ -4370,9 +4448,14 @@ mod tests {
                 fn h() -> Int {
                     Void.new()
                 }
+                fn i(c: Bool) -> Int {
+                    if c {
+                        let stopped = exit()
+                    }
+                }
                 "
             ),
-            Err(vec![missing("f"), missing("g"), missing("h")])
+            Err(vec![missing("f"), missing("g"), missing("h"), missing("i")])
         );
     }
 

@@ -1749,6 +1749,46 @@ mod tests {
     }
 
     #[test]
+    fn exit_stops_the_program_from_inside_a_statement() {
+        let src = "
+            fn describe(_ never: Never) -> Int {
+                match never {}
+            }
+
+            fn stop() -> Never {
+                return exit()
+            }
+
+            fn total(stopping: Bool) -> Int {
+                var total = 2
+                if stopping {
+                    total = total + describe(stop())
+                }
+                return total
+            }
+
+            fn main() -> Int {
+                let a = total(stopping: false)
+                let b = total(stopping: true)
+                return a + b
+            }
+            ";
+        assert_eq!(run_executable("exit_in_assign", src).code(), Some(1));
+
+        let src = "
+            fn stop() {
+                let stopped = exit()
+            }
+
+            fn main() -> Int {
+                stop()
+                let stopped = exit()
+            }
+            ";
+        assert_eq!(run_executable("exit_in_decl", src).code(), Some(1));
+    }
+
+    #[test]
     fn sized_integers_trap_when_they_overflow() {
         let cases = [
             ("u8_add", "let x: IntU8 = 255\nlet y = x + 1"),
