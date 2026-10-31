@@ -27,8 +27,8 @@
 //! visible to the linker. It sets every top-level value, then calls Atom's
 //! `main`, whose result is the exit code.
 //!
-//! Arithmetic that overflows, and division by zero, traps by calling C's
-//! `abort`. `llvm.trap` would avoid needing C, but on macOS it can leave the
+//! Arithmetic that overflows, division by zero, and shifts that lose bits or
+//! go too far trap by calling C's `abort`. `llvm.trap` would avoid needing C, but on macOS it can leave the
 //! process hanging instead of stopping it, depending on what launched it.
 
 use std::{fmt, io, num::NonZeroU32, path::Path, process::Command};
@@ -448,7 +448,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let zero = operand.get_type().const_zero();
                         self.checked("llvm.ssub.with.overflow", zero, operand)?
                     }
-                    UnOp::Not => self.builder.build_not(operand, "")?,
+                    UnOp::Not | UnOp::BitNot => self.builder.build_not(operand, "")?,
                 }
                 .into()
             }
@@ -490,8 +490,14 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let predicate = if *signed { SGE } else { UGE };
                         self.builder.build_int_compare(predicate, lhs, rhs, "")?
                     }
-                    BinOp::And => self.builder.build_and(lhs, rhs, "")?,
-                    BinOp::Or => self.builder.build_or(lhs, rhs, "")?,
+                    BinOp::And | BinOp::BitAnd => self.builder.build_and(lhs, rhs, "")?,
+                    BinOp::Or | BinOp::BitOr => self.builder.build_or(lhs, rhs, "")?,
+                    BinOp::BitXor => self.builder.build_xor(lhs, rhs, "")?,
+                    BinOp::ShiftLeft => self.shift_left(lhs, rhs)?,
+                    BinOp::ShiftRight => {
+                        let amount = self.shift_amount(lhs, rhs)?;
+                        self.builder.build_right_shift(lhs, amount, false, "")?
+                    }
                 }
                 .into()
             }
@@ -669,6 +675,39 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let invalid = self.builder.build_or(by_zero, overflows, "")?;
         self.trap_if(invalid)?;
         self.builder.build_int_signed_div(lhs, rhs, "")
+    }
+
+    /// Shifts the unsigned integer `value` left by `amount`, filling with
+    /// zeros. Traps if any `1`s are shifted off the end.
+    fn shift_left(
+        &mut self,
+        value: IntValue<'ctx>,
+        amount: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, BuilderError> {
+        let amount = self.shift_amount(value, amount)?;
+        let shifted = self.builder.build_left_shift(value, amount, "")?;
+        let unshifted = self.builder.build_right_shift(shifted, amount, false, "")?;
+        let lost = self.builder.build_int_compare(NE, unshifted, value, "")?;
+        self.trap_if(lost)?;
+        Ok(shifted)
+    }
+
+    /// Converts `amount`, an integer of any type, to the type of `value` to
+    /// shift it by. Traps unless it's from 0 to one less than the width of
+    /// `value`. A negative `amount` is too large when taken as unsigned.
+    fn shift_amount(
+        &mut self,
+        value: IntValue<'ctx>,
+        amount: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, BuilderError> {
+        let ty = value.get_type();
+        // Every integer type can hold the width of the widest, which is 64.
+        let width = amount
+            .get_type()
+            .const_int(u64::from(ty.get_bit_width()), false);
+        let too_far = self.builder.build_int_compare(UGE, amount, width, "")?;
+        self.trap_if(too_far)?;
+        self.builder.build_int_cast_sign_flag(amount, ty, false, "")
     }
 
     /// Traps if the `Bool` `cond` is true, then carries on building
@@ -1571,6 +1610,84 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 63);
+    }
+
+    #[test]
+    fn evaluates_bitwise_operators() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let byte: IntU8 = 202
+                let small: IntS8 = -128
+                let a = bit(12 .& 10 == 8, at: 1)
+                let b = bit(12 .| 10 == 14, at: 2)
+                let c = bit(12 .^ 10 == 6, at: 4)
+                let d = bit(.!0 == -1, at: 8)
+                let e = bit(.!byte == 53, at: 16)
+                let f = bit(small .| 1 == -127, at: 32)
+                let g = bit(byte .^ .!byte == 255, at: 64)
+                return a + b + c + d + e + f + g
+            }
+            ";
+        assert_eq!(run(src), 127);
+    }
+
+    #[test]
+    fn shifts_unsigned_integers() {
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let byte: IntU8 = 1
+                let huge: IntU64 = 18446744073709551615
+                let by: IntS8 = 7
+                let a = bit(byte .< 7 == 128, at: 1)
+                let b = bit(byte .< by .> by == 1, at: 2)
+                let c = bit(huge .> 63 == 1, at: 4)
+                let d = bit(huge .> 0 == huge, at: 8)
+                let e = bit((huge .> 4) .< 4 == huge - 15, at: 16)
+                let f = bit(byte .> 1 == 0, at: 32)
+                return a + b + c + d + e + f
+            }
+            ";
+        assert_eq!(run(src), 63);
+    }
+
+    #[test]
+    fn shifts_trap_when_they_lose_bits_or_go_too_far() {
+        let cases = [
+            ("shl_loses", "let x: IntU8 = 129\nlet y = x .< 1"),
+            ("shl_loses_far", "let x: IntU64 = 2\nlet y = x .< 63"),
+            ("shl_width", "let x: IntU8 = 0\nlet y = x .< 8"),
+            ("shr_width", "let x: IntU64 = 0\nlet y = x .> 64"),
+            ("shl_negative", "let x: IntU8 = 0\nlet y = x .< -1"),
+            (
+                "shr_negative",
+                "let x: IntU8 = 0\nlet by: IntS8 = -128\nlet y = x .> by",
+            ),
+            (
+                "shr_wide",
+                "let x: IntU8 = 0\nlet by: IntU64 = 4294967296\nlet y = x .> by",
+            ),
+        ];
+        for (name, body) in cases {
+            let src = format!("fn main() -> Int {{\n{body}\nreturn 0\n}}");
+            assert!(traps(name, &src), "{name} should trap");
+        }
+        let src = "fn main() -> Int {\nlet x: IntU8 = 127\nlet y = x .< 1 .> 7\nreturn 0\n}";
+        assert!(!traps("shl_keeps", src));
     }
 
     #[test]

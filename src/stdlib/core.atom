@@ -20,7 +20,9 @@
 // Whole numbers, such as `42`. Unsigned integers (`IntU`) hold 0 to 2^N - 1,
 // and signed integers (`IntS`) hold -2^(N-1) to 2^(N-1) - 1, where N is the
 // number of bits. Arithmetic that goes outside a type's range stops the
-// program.
+// program. Only unsigned integers can be shifted, with `.<` and `.>`, which
+// stop the program if the amount isn't from 0 to N - 1, or if `.<` shifts
+// off a `1`.
 primitive IntU8
 primitive IntU16
 primitive IntU32

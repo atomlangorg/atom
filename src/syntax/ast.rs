@@ -123,6 +123,18 @@ pub enum BinOp {
     Gt,
     /// `>=`, which orders two integers.
     Ge,
+    /// `.&`, which ands each bit of two integers.
+    BitAnd,
+    /// `.|`, which ors each bit of two integers.
+    BitOr,
+    /// `.^`, which xors each bit of two integers.
+    BitXor,
+    /// `.<`, which shifts the bits of an unsigned integer left, filling with
+    /// zeros.
+    ShiftLeft,
+    /// `.>`, which shifts the bits of an unsigned integer right, filling with
+    /// zeros.
+    ShiftRight,
     And,
     Or,
 }
@@ -140,6 +152,11 @@ impl BinOp {
             Self::Le => "<=",
             Self::Gt => ">",
             Self::Ge => ">=",
+            Self::BitAnd => ".&",
+            Self::BitOr => ".|",
+            Self::BitXor => ".^",
+            Self::ShiftLeft => ".<",
+            Self::ShiftRight => ".>",
             Self::And => "&",
             Self::Or => "|",
         }
@@ -150,6 +167,8 @@ impl BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// `.!`, which flips each bit of an integer.
+    BitNot,
 }
 
 impl UnOp {
@@ -157,6 +176,7 @@ impl UnOp {
         match self {
             Self::Neg => "-",
             Self::Not => "!",
+            Self::BitNot => ".!",
         }
     }
 }

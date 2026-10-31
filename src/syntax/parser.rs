@@ -184,13 +184,17 @@ where
         let unary_op = select! {
             Token::Minus => UnOp::Neg,
             Token::Bang => UnOp::Not,
+            Token::DotBang => UnOp::BitNot,
         };
         let unary = unary_op
             .repeated()
             .foldr(atom, |op, rhs| Expr::Unary(op, Box::new(rhs)));
 
         // Binary operators are left-associative: `a - b + c` is `(a - b) + c`.
-        // Each level below binds less tightly than the one before it.
+        // Each level below binds less tightly than the one before it. Each
+        // level holds two copies of the one before it, so some are boxed to
+        // stop the parser's type doubling at every level, which makes it
+        // very slow to compile and to run.
         let fold_binary = |lhs, (op, rhs)| Expr::Binary(Box::new(lhs), op, Box::new(rhs));
 
         let product_op = select! {
@@ -207,7 +211,32 @@ where
         };
         let sum = product
             .clone()
-            .foldl(sum_op.then(product).repeated(), fold_binary);
+            .foldl(sum_op.then(product).repeated(), fold_binary)
+            .boxed();
+
+        let shift_op = select! {
+            Token::DotLt => BinOp::ShiftLeft,
+            Token::DotGt => BinOp::ShiftRight,
+        };
+        let shift = sum
+            .clone()
+            .foldl(shift_op.then(sum).repeated(), fold_binary);
+
+        let bit_and_op = just(Token::DotAmp).to(BinOp::BitAnd);
+        let bit_and = shift
+            .clone()
+            .foldl(bit_and_op.then(shift).repeated(), fold_binary);
+
+        let bit_xor_op = just(Token::DotCaret).to(BinOp::BitXor);
+        let bit_xor = bit_and
+            .clone()
+            .foldl(bit_xor_op.then(bit_and).repeated(), fold_binary);
+
+        let bit_or_op = just(Token::DotPipe).to(BinOp::BitOr);
+        let bit_or = bit_xor
+            .clone()
+            .foldl(bit_or_op.then(bit_xor).repeated(), fold_binary)
+            .boxed();
 
         // Comparisons can't be chained, since `a == b == c` would compare the
         // result of `a == b` with `c`, which is rarely what's meant.
@@ -219,11 +248,11 @@ where
             Token::Gt => BinOp::Gt,
             Token::GtEq => BinOp::Ge,
         };
-        let comparison = sum
+        let comparison = bit_or
             .clone()
             .then(
                 comparison_op
-                    .then(sum)
+                    .then(bit_or)
                     .map_with(|rhs, e| (rhs, e.span()))
                     .repeated()
                     .collect::<Vec<_>>(),
@@ -1001,6 +1030,95 @@ mod tests {
                 bin(var("a"), BinOp::Add, var("b")),
                 BinOp::And,
                 bin(var("c"), BinOp::Mul, var("d")),
+            )
+        );
+    }
+
+    #[test]
+    fn parses_bitwise_operators() {
+        let bit_not = |expr| Box::new(Expr::Unary(UnOp::BitNot, expr));
+        assert_eq!(
+            parse_expr("a .& b"),
+            *bin(var("a"), BinOp::BitAnd, var("b"))
+        );
+        assert_eq!(parse_expr("a .| b"), *bin(var("a"), BinOp::BitOr, var("b")));
+        assert_eq!(
+            parse_expr("a .^ b"),
+            *bin(var("a"), BinOp::BitXor, var("b"))
+        );
+        assert_eq!(
+            parse_expr("a .< b"),
+            *bin(var("a"), BinOp::ShiftLeft, var("b"))
+        );
+        assert_eq!(
+            parse_expr("a .> b"),
+            *bin(var("a"), BinOp::ShiftRight, var("b"))
+        );
+        assert_eq!(parse_expr(".!a"), *bit_not(var("a")));
+        assert_eq!(parse_expr(".!-a"), *bit_not(neg(var("a"))));
+        assert_eq!(
+            parse_expr(".!a .& b"),
+            *bin(bit_not(var("a")), BinOp::BitAnd, var("b"))
+        );
+    }
+
+    #[test]
+    fn bitwise_operators_bind_between_arithmetic_and_comparisons() {
+        // From tightest: arithmetic, shifts, `.&`, `.^`, `.|`, comparisons.
+        assert_eq!(
+            parse_expr("a .< b + 1"),
+            *bin(
+                var("a"),
+                BinOp::ShiftLeft,
+                bin(var("b"), BinOp::Add, int(1))
+            )
+        );
+        assert_eq!(
+            parse_expr("a .& b .< c"),
+            *bin(
+                var("a"),
+                BinOp::BitAnd,
+                bin(var("b"), BinOp::ShiftLeft, var("c"))
+            )
+        );
+        assert_eq!(
+            parse_expr("a .| b .^ c .& d"),
+            *bin(
+                var("a"),
+                BinOp::BitOr,
+                bin(
+                    var("b"),
+                    BinOp::BitXor,
+                    bin(var("c"), BinOp::BitAnd, var("d"))
+                ),
+            )
+        );
+        assert_eq!(
+            parse_expr("a .& b == c .| d"),
+            *bin(
+                bin(var("a"), BinOp::BitAnd, var("b")),
+                BinOp::Eq,
+                bin(var("c"), BinOp::BitOr, var("d")),
+            )
+        );
+    }
+
+    #[test]
+    fn bitwise_operators_are_left_associative() {
+        assert_eq!(
+            parse_expr("a .< b .> c"),
+            *bin(
+                bin(var("a"), BinOp::ShiftLeft, var("b")),
+                BinOp::ShiftRight,
+                var("c"),
+            )
+        );
+        assert_eq!(
+            parse_expr("a .| b .| c"),
+            *bin(
+                bin(var("a"), BinOp::BitOr, var("b")),
+                BinOp::BitOr,
+                var("c")
             )
         );
     }

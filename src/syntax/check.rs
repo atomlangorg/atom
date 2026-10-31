@@ -167,11 +167,13 @@ pub enum CheckError {
     },
     /// A comparison's operands have a type that can't be compared.
     IncomparableOperand { op: &'static str, found: Type },
-    /// An arithmetic or ordering operator was used on something that isn't
-    /// an integer.
+    /// An arithmetic, bitwise or ordering operator was used on something
+    /// that isn't an integer.
     NotInteger { op: &'static str, found: Type },
     /// `-` was used on something that isn't a signed integer.
     NotSignedInteger { op: &'static str, found: Type },
+    /// A shift was used on something that isn't an unsigned integer.
+    NotUnsignedInteger { op: &'static str, found: Type },
     /// An integer literal doesn't fit in its type, which holds `min` to
     /// `max`.
     IntOutOfRange {
@@ -431,6 +433,12 @@ impl fmt::Display for CheckError {
                 write!(
                     f,
                     "operator `{op}` expects a signed integer, found `{found}`"
+                )
+            }
+            Self::NotUnsignedInteger { op, found } => {
+                write!(
+                    f,
+                    "operator `{op}` expects an unsigned integer, found `{found}`"
                 )
             }
             Self::IntOutOfRange {
@@ -2079,7 +2087,9 @@ impl<'a> Checker<'a> {
             },
             // Operators always produce their result type, even if an operand
             // is invalid, so one bad operand doesn't cause further errors.
-            Expr::Unary(UnOp::Neg, operand) => self.negation(operand, expected),
+            Expr::Unary(op @ (UnOp::Neg | UnOp::BitNot), operand) => {
+                self.integer_unary(op, operand, expected)
+            }
             Expr::Unary(op @ UnOp::Not, operand) => {
                 let ty = self.std_type("Bool");
                 let operand = self.operand(op.symbol(), operand, ty.clone());
@@ -2102,6 +2112,9 @@ impl<'a> Checker<'a> {
                     signed: false,
                 });
                 Typed { ty: Some(ty), expr }
+            }
+            Expr::Binary(lhs, op @ (BinOp::ShiftLeft | BinOp::ShiftRight), rhs) => {
+                self.shift(lhs, op, rhs, expected)
             }
             Expr::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
             Expr::Call { callee, args } => self.call(callee, args),
@@ -2201,18 +2214,31 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks `-operand`, which negates a signed integer, producing another
-    /// of the same type.
-    fn negation(&mut self, operand: &Expr, expected: Option<&Type>) -> Typed {
+    /// Checks `-operand`, which negates a signed integer, or `.!operand`,
+    /// which flips the bits of any integer. Both produce another integer of
+    /// the same type.
+    fn integer_unary(&mut self, op: &UnOp, operand: &Expr, expected: Option<&Type>) -> Typed {
         let Typed { ty, expr } = self.expr_as(operand, expected);
+        let needs_signed = *op == UnOp::Neg;
         match ty {
-            Some(ty) if self.int_type(&ty).is_some_and(|(_, signed)| signed) => Typed {
-                expr: expr.map(|operand| ir::Expr::Unary(UnOp::Neg, Box::new(operand))),
-                ty: Some(ty),
-            },
+            Some(ty)
+                if self
+                    .int_type(&ty)
+                    .is_some_and(|(_, signed)| signed || !needs_signed) =>
+            {
+                Typed {
+                    expr: expr.map(|operand| ir::Expr::Unary(op.clone(), Box::new(operand))),
+                    ty: Some(ty),
+                }
+            }
             found => {
                 if let Some(found) = found {
-                    self.error(CheckError::NotSignedInteger { op: "-", found });
+                    let op = op.symbol();
+                    self.error(if needs_signed {
+                        CheckError::NotSignedInteger { op, found }
+                    } else {
+                        CheckError::NotInteger { op, found }
+                    });
                 }
                 Typed {
                     ty: Some(self.int_type_for(expected)),
@@ -2222,8 +2248,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks `lhs op rhs`, where `op` is `+`, `-`, `*` or `/`, whose operands
-    /// are integers of the same type, which it produces. The first operand
+    /// Checks `lhs op rhs`, where `op` is `+`, `-`, `*`, `/`, `.&`, `.|` or
+    /// `.^`, whose operands are integers of the same type, which it produces. The first operand
     /// that's an integer decides the type.
     fn arithmetic(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
         let (lhs, rhs) = self.operands(lhs, rhs, expected);
@@ -2258,6 +2284,51 @@ impl<'a> Checker<'a> {
             signed,
         });
         Typed { ty: Some(ty), expr }
+    }
+
+    /// Checks `lhs .< rhs` or `lhs .> rhs`, which shift the bits of an
+    /// unsigned integer, producing another of the same type. The amount to
+    /// shift by can be any integer type.
+    fn shift(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
+        let op_symbol = op.symbol();
+        let lhs = self.expr_as(lhs, expected);
+        let rhs = self.expr(rhs);
+        let ty = match lhs.ty {
+            Some(ty) if self.int_type(&ty).is_some_and(|(_, signed)| !signed) => Some(ty),
+            Some(found) => {
+                self.error(CheckError::NotUnsignedInteger {
+                    op: op_symbol,
+                    found,
+                });
+                None
+            }
+            None => None,
+        };
+        let rhs_expr = match rhs.ty {
+            Some(ty) if self.int_type(&ty).is_some() => rhs.expr,
+            Some(found) => {
+                self.error(CheckError::NotInteger {
+                    op: op_symbol,
+                    found,
+                });
+                None
+            }
+            None => None,
+        };
+
+        let expr = ty
+            .as_ref()
+            .and(lhs.expr.zip(rhs_expr))
+            .map(|(lhs, rhs)| ir::Expr::Binary {
+                lhs: Box::new(lhs),
+                op: op.clone(),
+                rhs: Box::new(rhs),
+                signed: false,
+            });
+        Typed {
+            ty: Some(ty.unwrap_or_else(|| self.int_type_for(expected))),
+            expr,
+        }
     }
 
     /// Checks a comparison of two integers or two `Bool`s of the same type,
@@ -2931,10 +3002,20 @@ fn int_range(bits: u32, signed: bool) -> (i128, i128) {
 fn has_own_type(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) => false,
-        Expr::Unary(UnOp::Neg, operand) => has_own_type(operand),
-        Expr::Binary(lhs, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, rhs) => {
-            has_own_type(lhs) || has_own_type(rhs)
-        }
+        Expr::Unary(UnOp::Neg | UnOp::BitNot, operand) => has_own_type(operand),
+        Expr::Binary(
+            lhs,
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor,
+            rhs,
+        ) => has_own_type(lhs) || has_own_type(rhs),
+        // A shift has the type of what's shifted, whatever it's shifted by.
+        Expr::Binary(lhs, BinOp::ShiftLeft | BinOp::ShiftRight, _) => has_own_type(lhs),
         _ => true,
     }
 }
@@ -3217,6 +3298,81 @@ mod tests {
         assert_eq!(
             messages("let x = true >= false"),
             vec!["operator `>=` expects an integer, found `Bool`"]
+        );
+    }
+
+    #[test]
+    fn accepts_bitwise_operators_on_integers() {
+        let src = "
+            fn f(byte: IntU8, small: IntS8, amount: IntS64) {
+                let a: IntU8 = byte .& 15 .| 1 .^ byte
+                let b: IntS8 = .!small .& -1
+                let c: Int = .!1 .^ 2
+                let d: IntU8 = byte .< amount .> 1
+                let e: IntU8 = 1 .< small
+                let f: IntU8 = byte + (1 .< 3)
+                let g: Bool = 3 .& 1 == 1
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn rejects_bitwise_operators_on_booleans() {
+        assert_eq!(
+            check_body("let x = true .& 1"),
+            Err(vec![not_integer(".&")])
+        );
+        assert_eq!(
+            check_body("let x = 1 .| false"),
+            Err(vec![not_integer(".|")])
+        );
+        assert_eq!(
+            check_body("let x = true .^ true"),
+            Err(vec![not_integer(".^"), not_integer(".^")])
+        );
+        assert_eq!(check_body("let x = .!true"), Err(vec![not_integer(".!")]));
+        assert_eq!(
+            messages("let x = .!false"),
+            vec!["operator `.!` expects an integer, found `Bool`"]
+        );
+    }
+
+    #[test]
+    fn only_unsigned_integers_can_be_shifted() {
+        assert_eq!(
+            messages_top(
+                "
+                fn f(byte: IntU8, small: IntS8) {
+                    let a = small .< 1
+                    let b = 1 .> 2
+                    let c = true .< 1
+                    let d = byte .> true
+                    let e: IntU8 = small .< byte
+                }
+                "
+            ),
+            [
+                "operator `.<` expects an unsigned integer, found `IntS8`",
+                "operator `.>` expects an unsigned integer, found `Int`",
+                "operator `.<` expects an unsigned integer, found `Bool`",
+                "operator `.>` expects an integer, found `Bool`",
+                "operator `.<` expects an unsigned integer, found `IntS8`",
+            ]
+        );
+    }
+
+    #[test]
+    fn shifts_have_the_type_of_what_is_shifted() {
+        assert_eq!(
+            messages_top(
+                "
+                fn f(byte: IntU8, amount: IntU64) {
+                    let a: IntU64 = byte .< amount
+                }
+                "
+            ),
+            ["cannot assign `IntU8` to `a`, which has type `IntU64`"]
         );
     }
 

@@ -112,6 +112,18 @@ pub enum Token<'src> {
     Amp,
     #[token("|")]
     Pipe,
+    #[token(".&")]
+    DotAmp,
+    #[token(".|")]
+    DotPipe,
+    #[token(".^")]
+    DotCaret,
+    #[token(".!")]
+    DotBang,
+    #[token(".<")]
+    DotLt,
+    #[token(".>")]
+    DotGt,
     #[token(":")]
     Colon,
     /// Separates a module from a name declared in it, as in `other::f`.
@@ -260,6 +272,12 @@ impl fmt::Display for Token<'_> {
             Self::Bang => write!(f, "!"),
             Self::Amp => write!(f, "&"),
             Self::Pipe => write!(f, "|"),
+            Self::DotAmp => write!(f, ".&"),
+            Self::DotPipe => write!(f, ".|"),
+            Self::DotCaret => write!(f, ".^"),
+            Self::DotBang => write!(f, ".!"),
+            Self::DotLt => write!(f, ".<"),
+            Self::DotGt => write!(f, ".>"),
             Self::Colon => write!(f, ":"),
             Self::ColonColon => write!(f, "::"),
             Self::Comma => write!(f, ","),
@@ -381,6 +399,54 @@ mod tests {
                 Token::Eq,
                 Token::FatArrow,
                 Token::Arrow,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_bitwise_operators() {
+        assert_eq!(
+            lex("a .& b .| c .^ .!d .< e .> f"),
+            vec![
+                Token::Ident("a"),
+                Token::DotAmp,
+                Token::Ident("b"),
+                Token::DotPipe,
+                Token::Ident("c"),
+                Token::DotCaret,
+                Token::DotBang,
+                Token::Ident("d"),
+                Token::DotLt,
+                Token::Ident("e"),
+                Token::DotGt,
+                Token::Ident("f"),
+            ]
+        );
+    }
+
+    #[test]
+    fn bitwise_operators_are_not_fields_or_comparisons() {
+        assert_eq!(
+            lex("a.b . & a.&b .<= .>= . < .!= . !"),
+            vec![
+                Token::Ident("a"),
+                Token::Dot,
+                Token::Ident("b"),
+                Token::Dot,
+                Token::Amp,
+                Token::Ident("a"),
+                Token::DotAmp,
+                Token::Ident("b"),
+                Token::DotLt,
+                Token::Eq,
+                Token::DotGt,
+                Token::Eq,
+                Token::Dot,
+                Token::Lt,
+                Token::DotBang,
+                Token::Eq,
+                Token::Dot,
+                Token::Bang,
             ]
         );
     }

@@ -135,6 +135,8 @@ pub enum Expr {
     /// An operator on integers or `Bool`s. `-` is only used on signed
     /// integers.
     Unary(UnOp, Box<Expr>),
+    /// An operator on integers or `Bool`s. Shifts are only used on unsigned
+    /// integers, and their `rhs` can be any integer type.
     Binary {
         lhs: Box<Expr>,
         op: BinOp,
