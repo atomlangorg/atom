@@ -135,6 +135,14 @@ pub enum Token<'src> {
     EqEq,
     #[token("!=")]
     BangEq,
+    #[token("<")]
+    Lt,
+    #[token("<=")]
+    LtEq,
+    #[token(">")]
+    Gt,
+    #[token(">=")]
+    GtEq,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -262,6 +270,10 @@ impl fmt::Display for Token<'_> {
             Self::Eq => write!(f, "="),
             Self::EqEq => write!(f, "=="),
             Self::BangEq => write!(f, "!="),
+            Self::Lt => write!(f, "<"),
+            Self::LtEq => write!(f, "<="),
+            Self::Gt => write!(f, ">"),
+            Self::GtEq => write!(f, ">="),
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
             Self::LBrace => write!(f, "{{"),
@@ -326,6 +338,20 @@ mod tests {
                 Token::Ident("c"),
             ]
         );
+        assert_eq!(
+            lex("a < b <= c > d >= e"),
+            vec![
+                Token::Ident("a"),
+                Token::Lt,
+                Token::Ident("b"),
+                Token::LtEq,
+                Token::Ident("c"),
+                Token::Gt,
+                Token::Ident("d"),
+                Token::GtEq,
+                Token::Ident("e"),
+            ]
+        );
     }
 
     #[test]
@@ -340,6 +366,21 @@ mod tests {
                 Token::BangEq,
                 Token::Bang,
                 Token::Eq,
+            ]
+        );
+        assert_eq!(
+            lex("<== < = >== > = => ->"),
+            vec![
+                Token::LtEq,
+                Token::Eq,
+                Token::Lt,
+                Token::Eq,
+                Token::GtEq,
+                Token::Eq,
+                Token::Gt,
+                Token::Eq,
+                Token::FatArrow,
+                Token::Arrow,
             ]
         );
     }
@@ -591,7 +632,7 @@ mod tests {
                 Token::Ident("b"),
                 Token::Ident("a"),
                 Token::Minus,
-                Token::Error,
+                Token::Gt,
             ]
         );
         assert_eq!(

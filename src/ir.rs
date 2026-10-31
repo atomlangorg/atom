@@ -140,7 +140,8 @@ pub enum Expr {
         op: BinOp,
         rhs: Box<Expr>,
         /// Whether the operands are signed integers, which decides when
-        /// arithmetic overflows, and how it divides.
+        /// arithmetic overflows, how it divides, and how integers are
+        /// ordered.
         signed: bool,
     },
     /// Calls the function at an index into `Program::functions`. A method's

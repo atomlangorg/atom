@@ -34,7 +34,7 @@
 use std::{fmt, io, num::NonZeroU32, path::Path, process::Command};
 
 use inkwell::{
-    IntPredicate::{EQ, NE},
+    IntPredicate::{EQ, NE, SGE, SGT, SLE, SLT, UGE, UGT, ULE, ULT},
     OptimizationLevel,
     basic_block::BasicBlock,
     builder::{Builder, BuilderError},
@@ -474,6 +474,22 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     BinOp::Div => self.divide(lhs, rhs, *signed)?,
                     BinOp::Eq => self.builder.build_int_compare(EQ, lhs, rhs, "")?,
                     BinOp::Ne => self.builder.build_int_compare(NE, lhs, rhs, "")?,
+                    BinOp::Lt => {
+                        let predicate = if *signed { SLT } else { ULT };
+                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
+                    }
+                    BinOp::Le => {
+                        let predicate = if *signed { SLE } else { ULE };
+                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
+                    }
+                    BinOp::Gt => {
+                        let predicate = if *signed { SGT } else { UGT };
+                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
+                    }
+                    BinOp::Ge => {
+                        let predicate = if *signed { SGE } else { UGE };
+                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
+                    }
                     BinOp::And => self.builder.build_and(lhs, rhs, "")?,
                     BinOp::Or => self.builder.build_or(lhs, rhs, "")?,
                 }
@@ -943,6 +959,58 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 1010);
+    }
+
+    #[test]
+    fn orders_integers() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(1 < 2, at: 1)
+                let b = bit(2 < 2, at: 2)
+                let c = bit(2 <= 2, at: 4)
+                let d = bit(3 <= 2, at: 8)
+                let e = bit(3 > 2, at: 16)
+                let f = bit(2 > 2, at: 32)
+                let g = bit(2 >= 2, at: 64)
+                let h = bit(2 >= 3, at: 128)
+                return a + b + c + d + e + f + g + h
+            }
+            ";
+        assert_eq!(run(src), 85);
+    }
+
+    #[test]
+    fn orders_integers_by_their_sign() {
+        // As a signed `i8`, 200 would be -56, and as an unsigned `u8`, -1
+        // would be 255.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let byte: IntU8 = 200
+                let small: IntS8 = -1
+                let huge: IntU64 = 18446744073709551615
+                let a = bit(byte > 100, at: 1)
+                let b = bit(small < 0, at: 2)
+                let c = bit(huge >= 9223372036854775807, at: 4)
+                let d = bit(0 - 9223372036854775807 - 1 <= 9223372036854775807, at: 8)
+                return a + b + c + d
+            }
+            ";
+        assert_eq!(run(src), 15);
     }
 
     #[test]

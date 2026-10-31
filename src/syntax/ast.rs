@@ -115,6 +115,14 @@ pub enum BinOp {
     Eq,
     /// `!=`, the opposite of `==`.
     Ne,
+    /// `<`, which orders two integers.
+    Lt,
+    /// `<=`, which orders two integers.
+    Le,
+    /// `>`, which orders two integers.
+    Gt,
+    /// `>=`, which orders two integers.
+    Ge,
     And,
     Or,
 }
@@ -128,6 +136,10 @@ impl BinOp {
             Self::Div => "/",
             Self::Eq => "==",
             Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
             Self::And => "&",
             Self::Or => "|",
         }

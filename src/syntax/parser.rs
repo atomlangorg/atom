@@ -214,6 +214,10 @@ where
         let comparison_op = select! {
             Token::EqEq => BinOp::Eq,
             Token::BangEq => BinOp::Ne,
+            Token::Lt => BinOp::Lt,
+            Token::LtEq => BinOp::Le,
+            Token::Gt => BinOp::Gt,
+            Token::GtEq => BinOp::Ge,
         };
         let comparison = sum
             .clone()
@@ -1005,6 +1009,10 @@ mod tests {
     fn parses_comparisons() {
         assert_eq!(parse_expr("a == b"), *bin(var("a"), BinOp::Eq, var("b")));
         assert_eq!(parse_expr("a != b"), *bin(var("a"), BinOp::Ne, var("b")));
+        assert_eq!(parse_expr("a < b"), *bin(var("a"), BinOp::Lt, var("b")));
+        assert_eq!(parse_expr("a <= b"), *bin(var("a"), BinOp::Le, var("b")));
+        assert_eq!(parse_expr("a > b"), *bin(var("a"), BinOp::Gt, var("b")));
+        assert_eq!(parse_expr("a >= b"), *bin(var("a"), BinOp::Ge, var("b")));
     }
 
     #[test]
@@ -1025,7 +1033,14 @@ mod tests {
 
     #[test]
     fn rejects_chained_comparisons() {
-        for src in ["x = a == b == c", "x = a != b == c", "x = a == b != c != d"] {
+        for src in [
+            "x = a == b == c",
+            "x = a != b == c",
+            "x = a == b != c != d",
+            "x = a < b < c",
+            "x = a <= b == c",
+            "x = a > b >= c",
+        ] {
             let errs = parse_body(src).unwrap_err();
             assert_eq!(
                 errs[0].to_string(),

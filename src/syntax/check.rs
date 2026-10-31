@@ -167,7 +167,8 @@ pub enum CheckError {
     },
     /// A comparison's operands have a type that can't be compared.
     IncomparableOperand { op: &'static str, found: Type },
-    /// An arithmetic operator was used on something that isn't an integer.
+    /// An arithmetic or ordering operator was used on something that isn't
+    /// an integer.
     NotInteger { op: &'static str, found: Type },
     /// `-` was used on something that isn't a signed integer.
     NotSignedInteger { op: &'static str, found: Type },
@@ -2085,7 +2086,11 @@ impl<'a> Checker<'a> {
                 let expr = operand.map(|operand| ir::Expr::Unary(op.clone(), Box::new(operand)));
                 Typed { ty: Some(ty), expr }
             }
-            Expr::Binary(lhs, op @ (BinOp::Eq | BinOp::Ne), rhs) => self.comparison(lhs, op, rhs),
+            Expr::Binary(
+                lhs,
+                op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
+                rhs,
+            ) => self.comparison(lhs, op, rhs),
             Expr::Binary(lhs, op @ (BinOp::And | BinOp::Or), rhs) => {
                 let ty = self.std_type("Bool");
                 let lhs = self.operand(op.symbol(), lhs, ty.clone());
@@ -2256,18 +2261,27 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks a comparison of two integers or two `Bool`s of the same type,
-    /// which produces a `Bool`. The first operand whose type is known decides
-    /// what's compared.
+    /// which produces a `Bool`. Only integers can be ordered with `<`, `<=`,
+    /// `>` and `>=`. The first operand whose type is known decides what's
+    /// compared.
     fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
         let (lhs, rhs) = self.operands(lhs, rhs, None);
         let bool_ty = self.std_type("Bool");
         let op_symbol = op.symbol();
+        let is_equality = matches!(op, BinOp::Eq | BinOp::Ne);
         let compared = match lhs.ty.clone().or(rhs.ty.clone()) {
-            Some(ty) if self.int_type(&ty).is_some() || ty == bool_ty => Some(ty),
+            Some(ty) if self.int_type(&ty).is_some() || (is_equality && ty == bool_ty) => Some(ty),
             Some(found) => {
-                self.error(CheckError::IncomparableOperand {
-                    op: op_symbol,
-                    found,
+                self.error(if is_equality {
+                    CheckError::IncomparableOperand {
+                        op: op_symbol,
+                        found,
+                    }
+                } else {
+                    CheckError::NotInteger {
+                        op: op_symbol,
+                        found,
+                    }
                 });
                 None
             }
@@ -3169,6 +3183,40 @@ mod tests {
         assert_eq!(
             messages("let x = Void.new() == Void.new()"),
             vec!["operator `==` expects an integer or `Bool`, found `Void`"]
+        );
+    }
+
+    #[test]
+    fn accepts_ordering_integers() {
+        let src = "
+            let a: Bool = 1 < 2
+            let b: Bool = 1 + 2 <= 3
+            let c: Bool = 4 > 5 * 6
+            let d: Bool = -7 >= 8 & a
+            ";
+        assert_eq!(check_body(src), Ok(()));
+    }
+
+    #[test]
+    fn rejects_ordering_other_types() {
+        assert_eq!(
+            check_body("let x = true < false"),
+            Err(vec![not_integer("<")])
+        );
+        assert_eq!(
+            check_body("let x = 1 <= true"),
+            Err(vec![invalid_operand("<=")])
+        );
+        assert_eq!(
+            check_body("let x = Void.new() > Void.new()"),
+            Err(vec![CheckError::NotInteger {
+                op: ">",
+                found: ty("Void"),
+            }])
+        );
+        assert_eq!(
+            messages("let x = true >= false"),
+            vec!["operator `>=` expects an integer, found `Bool`"]
         );
     }
 
@@ -7297,6 +7345,7 @@ primitive Float"
                     let c = small == big
                     let d: IntU16 = small
                     let e: Int = small + 1
+                    let f = big >= small
                 }
                 "
             ),
@@ -7306,6 +7355,7 @@ primitive Float"
                 "operator `==` expects `IntU8`, found `IntS64`",
                 "cannot assign `IntU8` to `d`, which has type `IntU16`",
                 "cannot assign `IntU8` to `e`, which has type `Int`",
+                "operator `>=` expects `IntS64`, found `IntU8`",
             ]
         );
     }
