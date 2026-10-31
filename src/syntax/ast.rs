@@ -355,6 +355,9 @@ pub struct ImplFunction {
     /// Whether it's a `static fn`, which is called on the type itself, as in
     /// `Int.zero()`, rather than a method, which is called on a value.
     pub is_static: bool,
+    /// Whether it's a `primitive fn`, which the compiler implements itself,
+    /// so its `body` is empty. Only allowed in the standard library.
+    pub is_primitive: bool,
     pub function: Function,
 }
 

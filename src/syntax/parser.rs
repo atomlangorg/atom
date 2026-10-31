@@ -616,12 +616,30 @@ where
         .map(Stmt::Use);
 
     // `impl Type { fn ... }`, with one function per line, like a block. Each
-    // can be a method, or a `static fn`.
+    // can be a method, or a `static fn`, and the standard library's can be a
+    // `primitive fn`, which has no body.
     let impl_function = just(Token::Static)
         .or_not()
-        .then(function)
-        .map(|(is_static, function)| ImplFunction {
+        .then(
+            just(Token::Primitive)
+                .ignore_then(signature.clone())
+                .map(|((name, params), ret)| {
+                    let body = vec![];
+                    (
+                        true,
+                        Function {
+                            name,
+                            params,
+                            ret,
+                            body,
+                        },
+                    )
+                })
+                .or(function.map(|function| (false, function))),
+        )
+        .map(|(is_static, (is_primitive, function))| ImplFunction {
             is_static: is_static.is_some(),
+            is_primitive,
             function,
         });
     // `with` is only special here, so it can still be a label.
@@ -3028,6 +3046,7 @@ mod tests {
                     functions: vec![
                         ImplFunction {
                             is_static: false,
+                            is_primitive: false,
                             function: Function {
                                 name: "score".to_string(),
                                 params: vec![],
@@ -3041,6 +3060,7 @@ mod tests {
                         },
                         ImplFunction {
                             is_static: false,
+                            is_primitive: false,
                             function: Function {
                                 name: "rename".to_string(),
                                 params: vec![param(Some("to"), "name", "Int")],
@@ -3050,6 +3070,7 @@ mod tests {
                         },
                         ImplFunction {
                             is_static: true,
+                            is_primitive: false,
                             function: Function {
                                 name: "make".to_string(),
                                 params: vec![],
@@ -3258,6 +3279,38 @@ mod tests {
         );
         // `with` is only special in an `impl`, so it can still be a label.
         assert!(parse("fn f(with value: Int) {}\nlet x = f(with: 1)").is_ok());
+    }
+
+    #[test]
+    fn parses_primitive_functions_in_impls() {
+        assert_eq!(
+            parse("impl Bool with And {\nprimitive fn and(_ rhs: Self) -> Bool\n}"),
+            Ok(vec![Stmt::Impl {
+                ty: Name::new("Bool"),
+                with: Some(Name::new("And")),
+                functions: vec![ImplFunction {
+                    is_static: false,
+                    is_primitive: true,
+                    function: Function {
+                        name: "and".to_string(),
+                        params: vec![Param {
+                            label: None,
+                            name: "rhs".to_string(),
+                            ty: Name::new("Self"),
+                        }],
+                        ret: Name::new("Bool"),
+                        body: vec![],
+                    },
+                }],
+            }])
+        );
+        for src in [
+            "impl Bool {\nprimitive fn and(_ rhs: Self) -> Bool {}\n}",
+            "impl Bool {\nprimitive and(_ rhs: Self) -> Bool\n}",
+            "impl Bool {\nprimitive Int\n}",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]

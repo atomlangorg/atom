@@ -343,6 +343,13 @@ pub enum CheckError {
         trait_name: String,
         expected: String,
     },
+    /// `&` or `|` was used on a type that doesn't implement the standard
+    /// library's `And` or `Or` trait, which they call.
+    NotImplemented {
+        op: &'static str,
+        trait_name: &'static str,
+        found: Type,
+    },
     /// An `impl` with a trait doesn't implement one of its functions, whose
     /// signature is `expected`.
     MissingTraitFn {
@@ -678,6 +685,14 @@ impl fmt::Display for CheckError {
                 trait_name,
                 expected,
             } => write!(f, "`impl {ty} with {trait_name}` is missing `{expected}`"),
+            Self::NotImplemented {
+                op,
+                trait_name,
+                found,
+            } => write!(
+                f,
+                "operator `{op}` expects a type that implements `{trait_name}`, found `{found}`"
+            ),
         }
     }
 }
@@ -950,6 +965,9 @@ struct Checker<'a> {
     impl_type: Option<Option<Type>>,
     functions: Vec<Signature<'a>>,
     traits: Vec<TraitInfo<'a>>,
+    /// Which types implement which traits, as a type `id` and an index into
+    /// `traits`.
+    implementations: HashSet<(usize, usize)>,
     /// For each of `functions`, what it compiles to, once its body has been
     /// checked, or `None` if it has an error.
     lowered_functions: Vec<Option<ir::Function>>,
@@ -1095,7 +1113,7 @@ impl<'a> Checker<'a> {
                     }
                     Stmt::PrimitiveFn { name, params, ret } => {
                         let index = self.declare_fn(name, params, ret);
-                        self.define_primitive_fn(index, name);
+                        self.define_primitive_fn(index, name, FnKind::Function);
                     }
                     Stmt::Impl {
                         ty,
@@ -1108,11 +1126,12 @@ impl<'a> Checker<'a> {
                         let mut indexes = vec![];
                         for ImplFunction {
                             is_static,
+                            is_primitive,
                             function,
                         } in functions
                         {
-                            let full_name =
-                                self.full_name(&format!("{}.{}", ty.name, function.name));
+                            let name = format!("{}.{}", ty.name, function.name);
+                            let full_name = self.full_name(&name);
                             let index = self.declare_method(
                                 self_ty.as_ref(),
                                 function,
@@ -1125,6 +1144,10 @@ impl<'a> Checker<'a> {
                             } else {
                                 FnKind::Method(self_ty.clone())
                             };
+                            if *is_primitive {
+                                self.define_primitive_fn(index, &name, kind);
+                                continue;
+                            }
                             pending.push((
                                 module,
                                 Pending::Fn {
@@ -1139,6 +1162,7 @@ impl<'a> Checker<'a> {
                         if let Some(with) = with {
                             let trait_index = self.resolve_trait(with);
                             if let Some((trait_index, self_ty)) = trait_index.zip(self_ty) {
+                                self.implementations.insert((self_ty.id, trait_index));
                                 let implemented = functions.iter().zip(indexes).collect();
                                 self.check_implements(ty, &self_ty, with, trait_index, implemented);
                             }
@@ -1868,6 +1892,7 @@ impl<'a> Checker<'a> {
             ImplFunction {
                 is_static,
                 function,
+                ..
             },
             implemented,
         ) in &functions
@@ -1921,15 +1946,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Records the primitive function called `name`, at `index` in
-    /// `functions`, which must be declared in the standard library.
-    fn define_primitive_fn(&mut self, index: usize, name: &str) {
+    /// Records the primitive function called `name`, such as `exit` or
+    /// `Bool.and`, at `index` in `functions`, which must be declared in the
+    /// standard library.
+    fn define_primitive_fn(&mut self, index: usize, name: &str, kind: FnKind) {
         if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
             self.error(CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
         let primitive = match name {
             "exit" => ir::PrimitiveFn::Exit,
+            "Bool.and" => ir::PrimitiveFn::BoolAnd,
+            "Bool.or" => ir::PrimitiveFn::BoolOr,
             _ => panic!("the compiler doesn't know how to implement `{name}`"),
         };
         let Signature {
@@ -1937,9 +1965,15 @@ impl<'a> Checker<'a> {
             params,
             returns,
         } = self.functions[index].clone();
-        let locals: Option<Vec<_>> = params
-            .iter()
-            .map(|param| Some(param.ty.as_ref()?.id))
+        // Like any method, `self` is its first local.
+        let receiver = match kind {
+            FnKind::Method(ty) => Some(ty),
+            FnKind::Function | FnKind::Static(_) => None,
+        };
+        let locals: Option<Vec<_>> = receiver
+            .into_iter()
+            .chain(params.into_iter().map(|param| param.ty))
+            .map(|ty| Some(ty?.id))
             .collect();
         self.lowered_functions[index] = locals.zip(returns).map(|(locals, returns)| ir::Function {
             name: full_name,
@@ -2459,16 +2493,7 @@ impl<'a> Checker<'a> {
                 rhs,
             ) => self.comparison(lhs, op, rhs),
             Expr::Binary(lhs, op @ (BinOp::And | BinOp::Or), rhs) => {
-                let ty = self.std_type("Bool");
-                let lhs = self.operand(op.symbol(), lhs, ty.clone());
-                let rhs = self.operand(op.symbol(), rhs, ty.clone());
-                let expr = lhs.zip(rhs).map(|(lhs, rhs)| ir::Expr::Binary {
-                    lhs: Box::new(lhs),
-                    op: op.clone(),
-                    rhs: Box::new(rhs),
-                    signed: false,
-                });
-                Typed { ty: Some(ty), expr }
+                self.trait_operator(lhs, op, rhs)
             }
             Expr::Binary(lhs, op @ (BinOp::ShiftLeft | BinOp::ShiftRight), rhs) => {
                 self.shift(lhs, op, rhs, expected)
@@ -2641,6 +2666,74 @@ impl<'a> Checker<'a> {
             signed,
         });
         Typed { ty: Some(ty), expr }
+    }
+
+    /// Checks `lhs & rhs` or `lhs | rhs`, which call `lhs.and(rhs)` or
+    /// `lhs.or(rhs)` from the standard library's `And` or `Or` trait, which
+    /// the type of `lhs` must implement. Both operands have that type, and
+    /// the result is a `Bool`.
+    fn trait_operator(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
+        let (trait_name, method) = match op {
+            BinOp::And => ("And", "and"),
+            BinOp::Or => ("Or", "or"),
+            _ => unreachable!("only `&` and `|` call trait functions"),
+        };
+        let op = op.symbol();
+        let (lhs, rhs) = self.operands(lhs, rhs, None);
+        let bool_ty = self.std_type("Bool");
+
+        let function = lhs.ty.clone().and_then(|ty| {
+            let trait_index = match self.modules[self.core].scope.get(trait_name) {
+                Some(Binding::Trait(index)) => *index,
+                _ => panic!("the standard library should declare `{trait_name}`"),
+            };
+            let found = match self.member(&ty, method) {
+                Some(Member::Method(found))
+                    if self.implementations.contains(&(ty.id, trait_index)) =>
+                {
+                    found
+                }
+                _ => {
+                    self.error(CheckError::NotImplemented {
+                        op,
+                        trait_name,
+                        found: ty,
+                    });
+                    return None;
+                }
+            };
+            // Like calling the method, its module must be imported.
+            if !self.visible_modules().any(|module| module == found.module) {
+                self.error(CheckError::MemberNotImported {
+                    ty: ty.clone(),
+                    member: method.to_string(),
+                    module: self.modules[found.module].display.clone(),
+                });
+                return None;
+            }
+            if let Some(found_rhs) = &rhs.ty
+                && *found_rhs != ty
+            {
+                self.error(CheckError::InvalidOperand {
+                    op,
+                    expected: ty,
+                    found: found_rhs.clone(),
+                });
+                return None;
+            }
+            Some(found.function)
+        });
+
+        let expr = function
+            .zip(lhs.expr.zip(rhs.expr))
+            .map(|(function, (lhs, rhs))| ir::Expr::Call {
+                function,
+                args: vec![lhs, rhs],
+            });
+        Typed {
+            ty: Some(bool_ty),
+            expr,
+        }
     }
 
     /// Checks `lhs .< rhs` or `lhs .> rhs`, which shift the bits of an
@@ -3502,9 +3595,142 @@ mod tests {
 
         assert_eq!(check_body("let x = !1"), Err(vec![invalid("!")]));
         assert_eq!(check_body("let x = true & 1"), Err(vec![invalid("&")]));
+        // `Int` doesn't implement `Or`, so `|` can't be used on it.
         assert_eq!(
             check_body("let x = 1 | 2"),
-            Err(vec![invalid("|"), invalid("|")])
+            Err(vec![CheckError::NotImplemented {
+                op: "|",
+                trait_name: "Or",
+                found: ty("Int"),
+            }])
+        );
+        assert_eq!(
+            messages("let x = 1 & true"),
+            ["operator `&` expects a type that implements `And`, found `Int`"]
+        );
+    }
+
+    #[test]
+    fn boolean_operators_call_and_and_or() {
+        // `Bool` implements `And` and `Or` in the standard library, so they
+        // can also be called directly.
+        let src = "
+            let a: Bool = true.and(false)
+            let b: Bool = true.or(false) & a | !a
+            ";
+        assert_eq!(check_body(src), Ok(()));
+    }
+
+    #[test]
+    fn any_type_implementing_and_or_or_can_use_their_operators() {
+        let src = "
+            group Flags {
+                let bits: Int
+            }
+
+            impl Flags with And {
+                fn and(_ rhs: Self) -> Bool {
+                    return self.bits .& rhs.bits != 0
+                }
+            }
+
+            impl Flags with Or {
+                fn or(_ rhs: Self) -> Bool {
+                    return self.bits .| rhs.bits != 0
+                }
+            }
+
+            fn f(a: Flags, b: Flags) -> Bool {
+                // Each side is a `Bool`, which also implements them.
+                return a & b | (b | a)
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn boolean_operators_need_their_trait_and_the_same_type() {
+        assert_eq!(
+            messages_top(
+                "
+                group Flags {
+                    let bits: Int
+                }
+
+                // An `and` method alone isn't enough.
+                impl Flags {
+                    fn and(_ rhs: Self) -> Bool {
+                        return true
+                    }
+                }
+
+                impl Flags with Or {
+                    fn or(_ rhs: Self) -> Bool {
+                        return true
+                    }
+                }
+
+                fn f(a: Flags) -> Bool {
+                    let b = a & a
+                    let c = a | true
+                    return true | a
+                }
+                "
+            ),
+            [
+                "operator `&` expects a type that implements `And`, found `Flags`",
+                "operator `|` expects `Flags`, found `Bool`",
+                "operator `|` expects `Bool`, found `Flags`",
+            ]
+        );
+    }
+
+    #[test]
+    fn boolean_operators_need_their_implementation_imported() {
+        let flags = "
+            group Flags {
+                let bits: Int
+            }
+            ";
+        let and = "
+            use /flags
+            impl Flags with And {
+                fn and(_ rhs: Flags) -> Bool {
+                    return true
+                }
+            }
+            ";
+        assert_eq!(
+            file_messages(&[
+                ("/flags", flags),
+                ("/and", and),
+                (
+                    "/main",
+                    "use /flags\nfn f(a: Flags) -> Bool {\nreturn a & a\n}"
+                ),
+                (
+                    "/other",
+                    "use /flags\nuse /and\nfn f(a: Flags) -> Bool {\nreturn a & a\n}"
+                ),
+            ]),
+            ["/main: `Flags.and` is declared in `/and`, which is not imported"]
+        );
+    }
+
+    #[test]
+    fn only_the_stdlib_can_declare_primitive_methods() {
+        assert_eq!(
+            messages_top(
+                "
+                trait Flip {
+                    fn flip() -> Self
+                }
+                impl Bool with Flip {
+                    primitive fn flip() -> Self
+                }
+                "
+            ),
+            ["`Bool.flip` can't be a primitive, since only the standard library can declare them"]
         );
     }
 

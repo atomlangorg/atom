@@ -326,6 +326,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.build_call(exit, &[code.into()], "")?;
                 self.builder.build_unreachable()?;
             }
+            Body::Primitive(primitive @ (PrimitiveFn::BoolAnd | PrimitiveFn::BoolOr)) => {
+                // `self`, then the other `Bool`.
+                let lhs = value.get_nth_param(0).expect("`self`").into_int_value();
+                let rhs = value.get_nth_param(1).expect("`rhs`").into_int_value();
+                let result = match primitive {
+                    PrimitiveFn::BoolAnd => self.builder.build_and(lhs, rhs, "")?,
+                    _ => self.builder.build_or(lhs, rhs, "")?,
+                };
+                self.builder.build_return(Some(&result))?;
+            }
         }
         Ok(())
     }
@@ -506,8 +516,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let predicate = if *signed { SGE } else { UGE };
                         self.builder.build_int_compare(predicate, lhs, rhs, "")?
                     }
-                    BinOp::And | BinOp::BitAnd => self.builder.build_and(lhs, rhs, "")?,
-                    BinOp::Or | BinOp::BitOr => self.builder.build_or(lhs, rhs, "")?,
+                    BinOp::BitAnd => self.builder.build_and(lhs, rhs, "")?,
+                    BinOp::BitOr => self.builder.build_or(lhs, rhs, "")?,
+                    BinOp::And | BinOp::Or => {
+                        unreachable!("`&` and `|` compile to calls to `and` and `or`")
+                    }
                     BinOp::BitXor => self.builder.build_xor(lhs, rhs, "")?,
                     BinOp::ShiftLeft => self.shift_left(lhs, rhs)?,
                     BinOp::ShiftRight => {
@@ -1810,6 +1823,55 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 7);
+    }
+
+    #[test]
+    fn boolean_operators_call_and_and_or() {
+        // Each check is one bit of the result. `Flags` uses `&` and `|` by
+        // implementing `And` and `Or`.
+        let src = "
+            group Flags {
+                let bits: Int
+            }
+
+            impl Flags with And {
+                fn and(_ rhs: Self) -> Bool {
+                    return self.bits .& rhs.bits != 0
+                }
+            }
+
+            impl Flags with Or {
+                fn or(_ rhs: Self) -> Bool {
+                    return self.bits .| rhs.bits != 0
+                }
+            }
+
+            impl Flags {
+                static fn of(_ bits: Int) -> Self {
+                    return Self { bits: bits }
+                }
+            }
+
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(true & true, at: 1)
+                let b = bit(true & false, at: 2)
+                let c = bit(false | true, at: 4)
+                let d = bit(false | false, at: 8)
+                let e = bit(true.and(true) & false.or(true), at: 16)
+                let f = bit(Flags.of(6) & Flags.of(3), at: 32)
+                let g = bit(Flags.of(4) & Flags.of(3), at: 64)
+                let h = bit(Flags.of(0) | Flags.of(0), at: 128)
+                return a + c + e + f + b + d + g + h
+            }
+            ";
+        assert_eq!(run(src), 53);
     }
 
     #[test]

@@ -87,6 +87,10 @@ pub enum Body {
 pub enum PrimitiveFn {
     /// Stops the program with exit code 1.
     Exit,
+    /// `Bool.and`, which is `true` if both `Bool`s are.
+    BoolAnd,
+    /// `Bool.or`, which is `true` if either `Bool` is.
+    BoolOr,
 }
 
 #[derive(Debug)]

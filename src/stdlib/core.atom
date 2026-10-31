@@ -58,3 +58,23 @@ choice Never {}
 // Stops the program immediately with exit code 1. It never finishes, so a
 // call to it ends its path through a function like a `return` would.
 primitive fn exit() -> Never
+
+// Types that `&` can be used on, which calls `and`, as in `a & b`.
+trait And {
+    fn and(_ rhs: Self) -> Bool
+}
+
+// Types that `|` can be used on, which calls `or`, as in `a | b`.
+trait Or {
+    fn or(_ rhs: Self) -> Bool
+}
+
+impl Bool with And {
+    // `true` if both are `true`.
+    primitive fn and(_ rhs: Self) -> Bool
+}
+
+impl Bool with Or {
+    // `true` if either is `true`.
+    primitive fn or(_ rhs: Self) -> Bool
+}
