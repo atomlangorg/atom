@@ -391,6 +391,13 @@ where
         )
         .map(|(name, fields)| Stmt::Group { name, fields });
 
+    // `alias Name = Type`.
+    let alias = just(Token::Alias)
+        .ignore_then(ident)
+        .then_ignore(just(Token::Eq))
+        .then(type_name.clone())
+        .map(|(name, ty)| Stmt::Alias { name, ty });
+
     // `name: Type`, or just `name` for an option holding `Void`.
     let option = ident
         .then(annotation.or_not())
@@ -535,6 +542,7 @@ where
                 .or(function.clone().map(Stmt::Fn))
                 .or(group_)
                 .or(choice_)
+                .or(alias)
                 .or(return_)
                 .or(call),
         );
@@ -604,7 +612,11 @@ where
         .or(stmt.validate(|stmt, e, emitter| {
             if !matches!(
                 stmt,
-                Stmt::Decl { .. } | Stmt::Fn(_) | Stmt::Group { .. } | Stmt::Choice { .. }
+                Stmt::Decl { .. }
+                    | Stmt::Fn(_)
+                    | Stmt::Group { .. }
+                    | Stmt::Choice { .. }
+                    | Stmt::Alias { .. }
             ) {
                 emitter.emit(Rich::custom(
                     e.span(),
@@ -1965,6 +1977,7 @@ mod tests {
                 fn f() {}
                 group S {}
                 choice C {}
+                alias A = S
                 "
             ),
             Ok(vec![
@@ -1987,8 +2000,53 @@ mod tests {
                 }),
                 group_("S", vec![]),
                 choice_("C", vec![]),
+                alias("A", Name::new("S")),
             ])
         );
+    }
+
+    fn alias(name: &str, ty: Name) -> Stmt {
+        Stmt::Alias {
+            name: name.to_string(),
+            ty,
+        }
+    }
+
+    #[test]
+    fn parses_aliases() {
+        assert_eq!(
+            parse_body("alias ID = Int"),
+            Ok(vec![alias("ID", Name::new("Int"))])
+        );
+        assert_eq!(
+            parse_body("alias Shape = /shapes/shape::Shape"),
+            Ok(vec![alias(
+                "Shape",
+                qualified(
+                    ModulePath::Absolute(vec!["shapes".to_string(), "shape".to_string()]),
+                    "Shape"
+                ),
+            )])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_aliases() {
+        for src in [
+            "alias",
+            "alias ID",
+            "alias ID =",
+            "alias = Int",
+            "alias ID: Int",
+            "alias ID = 1",
+            "alias ID = Int Bool",
+            "alias ID = Int.zero",
+            "alias other::ID = Int",
+            "alias alias = Int",
+            "alias ID = alias",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]

@@ -141,6 +141,8 @@ pub enum CheckError {
     AmbiguousModule { name: String, modules: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
+    /// An alias is an alias of itself, directly or through other aliases.
+    CyclicAlias(String),
     /// A group or choice contains itself, directly or through other types,
     /// so it would be infinitely large.
     RecursiveType(String),
@@ -386,6 +388,7 @@ impl fmt::Display for CheckError {
                 quoted_list(modules, "or")
             ),
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
+            Self::CyclicAlias(name) => write!(f, "`{name}` is an alias of itself"),
             Self::RecursiveType(name) => write!(f, "`{name}` contains itself"),
             Self::Redeclared(name) => write!(f, "`{name}` is already declared"),
             Self::AssignToConstant(name) => {
@@ -636,6 +639,9 @@ enum Binding {
     /// An index into `Checker::functions`.
     Function(usize),
     Type(Type),
+    /// An index into `Checker::aliases`. `Checker::lookup` finds aliases as
+    /// the types they're aliases of.
+    Alias(usize),
 }
 
 /// A value declared at the top level of a module. Its type is worked out when
@@ -645,18 +651,29 @@ struct Global<'a> {
     name: &'a str,
     ty: Option<&'a Name>,
     value: &'a Expr,
-    state: GlobalState,
+    state: LazyType,
     /// What its initialiser compiles to, once it's been checked, or `None` if
     /// it has an error.
     lowered: Option<ir::Expr>,
 }
 
-enum GlobalState {
+/// The state of something whose type is worked out when it's first needed.
+enum LazyType {
     Unchecked,
-    /// Its initialiser is being checked, so needing its type again means it
-    /// depends on itself.
+    /// Its type is being worked out, so needing it again means it depends on
+    /// itself.
     Checking,
     Checked(Option<Type>),
+}
+
+/// A type alias, as in `alias ID = Int`. Top-level aliases are worked out
+/// when they're first needed, since they can be used in any order.
+struct Alias<'a> {
+    module: usize,
+    name: &'a str,
+    /// The name of the type it's an alias of.
+    target: &'a Name,
+    state: LazyType,
 }
 
 /// The function whose body is being checked.
@@ -720,6 +737,9 @@ enum LookupError {
     Ambiguous(Vec<String>),
     /// The name's module couldn't be found.
     Module(CheckError),
+    /// The name is an alias whose type couldn't be worked out, which has
+    /// already been reported.
+    Reported,
 }
 
 /// A field or method of a type, which are found with `.name` on a value.
@@ -814,6 +834,7 @@ struct Checker<'a> {
     /// from the type's fields and methods.
     statics: HashMap<usize, HashMap<&'a str, Method>>,
     globals: Vec<Global<'a>>,
+    aliases: Vec<Alias<'a>>,
     /// Indexes into `globals`, in the order their types were worked out, so
     /// that each comes after the values its initialiser uses.
     global_order: Vec<usize>,
@@ -881,19 +902,26 @@ impl<'a> Checker<'a> {
             self.resolve_imports();
         }
 
-        // Every type is declared before any fields or options are resolved,
-        // so types can contain each other in any order.
+        // Every type and alias is declared before any are resolved, so types
+        // can contain each other, and aliases can refer to each other, in any
+        // order.
         let mut types = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
-                if let Stmt::Group { name, .. }
-                | Stmt::Choice { name, .. }
-                | Stmt::Primitive { name } = stmt
-                {
-                    types.push((module, self.declare_type(name), stmt));
+                match stmt {
+                    Stmt::Group { name, .. }
+                    | Stmt::Choice { name, .. }
+                    | Stmt::Primitive { name } => {
+                        types.push((module, self.declare_type(name), stmt));
+                    }
+                    Stmt::Alias { name, ty } => self.declare_alias(name, ty, LazyType::Unchecked),
+                    _ => {}
                 }
             }
+        }
+        for index in 0..self.aliases.len() {
+            self.alias_type(index);
         }
         for &(module, id, stmt) in &types {
             self.module = module;
@@ -965,7 +993,7 @@ impl<'a> Checker<'a> {
                             name,
                             ty: ty.as_ref(),
                             value,
-                            state: GlobalState::Unchecked,
+                            state: LazyType::Unchecked,
                             lowered: None,
                         });
                         let index = self.globals.len() - 1;
@@ -975,7 +1003,8 @@ impl<'a> Checker<'a> {
                     Stmt::Use(_)
                     | Stmt::Group { .. }
                     | Stmt::Choice { .. }
-                    | Stmt::Primitive { .. } => {}
+                    | Stmt::Primitive { .. }
+                    | Stmt::Alias { .. } => {}
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
@@ -1145,7 +1174,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn lookup(&self, name: &Name) -> Result<Binding, LookupError> {
+    /// Finds what `name` refers to. An alias is found as the type it's an
+    /// alias of, which is worked out if it hasn't been yet.
+    fn lookup(&mut self, name: &Name) -> Result<Binding, LookupError> {
+        match self.lookup_binding(name)? {
+            Binding::Alias(index) => self
+                .alias_type(index)
+                .map(Binding::Type)
+                .ok_or(LookupError::Reported),
+            binding => Ok(binding),
+        }
+    }
+
+    /// Finds what `name` refers to, without working out aliases.
+    fn lookup_binding(&self, name: &Name) -> Result<Binding, LookupError> {
         let binding = match &name.module {
             Some(path) => {
                 let module = self.resolve_qualifier(path).map_err(LookupError::Module)?;
@@ -1223,6 +1265,7 @@ impl<'a> Checker<'a> {
                 modules,
             },
             LookupError::Module(error) => error,
+            LookupError::Reported => return,
         };
         self.error(error);
     }
@@ -1270,18 +1313,46 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The type that the alias at `index` in `aliases` is an alias of, working
+    /// it out if that hasn't been done yet. Returns `None` if it's unknown.
+    fn alias_type(&mut self, index: usize) -> Option<Type> {
+        let alias = &self.aliases[index];
+        match &alias.state {
+            LazyType::Checked(ty) => return ty.clone(),
+            LazyType::Checking => {
+                let error = CheckError::CyclicAlias(alias.name.to_string());
+                self.error_in(alias.module, error);
+                return None;
+            }
+            LazyType::Unchecked => {}
+        }
+
+        // Worked out in its own module, even when another module needs it
+        // first. Only top-level aliases are worked out later, and they're all
+        // worked out before any functions are checked, so there are no local
+        // scopes to set aside.
+        let (module, target) = (alias.module, alias.target);
+        self.aliases[index].state = LazyType::Checking;
+        let outer_module = std::mem::replace(&mut self.module, module);
+        let ty = self.resolve_type(target);
+        self.module = outer_module;
+
+        self.aliases[index].state = LazyType::Checked(ty.clone());
+        ty
+    }
+
     /// The type of the top-level value at `index` in `globals`, checking its
     /// declaration if that hasn't been done yet.
     fn global_type(&mut self, index: usize) -> Option<Type> {
         let global = &self.globals[index];
         match &global.state {
-            GlobalState::Checked(ty) => return ty.clone(),
-            GlobalState::Checking => {
+            LazyType::Checked(ty) => return ty.clone(),
+            LazyType::Checking => {
                 let error = CheckError::CyclicValue(global.name.to_string());
                 self.error_in(global.module, error);
                 return None;
             }
-            GlobalState::Unchecked => {}
+            LazyType::Unchecked => {}
         }
 
         // Checked as part of its own module, even when another module needs
@@ -1289,12 +1360,12 @@ impl<'a> Checker<'a> {
         // there are no local scopes to set aside.
         let (module, name, type_name, value) =
             (global.module, global.name, global.ty, global.value);
-        self.globals[index].state = GlobalState::Checking;
+        self.globals[index].state = LazyType::Checking;
         let outer_module = std::mem::replace(&mut self.module, module);
         let Typed { ty, expr } = self.decl_type(name, type_name, value);
         self.module = outer_module;
 
-        self.globals[index].state = GlobalState::Checked(ty.clone());
+        self.globals[index].state = LazyType::Checked(ty.clone());
         self.globals[index].lowered = expr;
         self.global_order.push(index);
         ty
@@ -1513,6 +1584,18 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Declares an alias called `name` of the type called `target`, whose
+    /// type has been worked out if `state` says so.
+    fn declare_alias(&mut self, name: &'a str, target: &'a Name, state: LazyType) {
+        self.aliases.push(Alias {
+            module: self.module,
+            name,
+            target,
+            state,
+        });
+        self.declare(name, Binding::Alias(self.aliases.len() - 1));
+    }
+
     /// Declares a type without its fields or options, returning its `id`.
     fn declare_type(&mut self, name: &'a str) -> usize {
         let id = self.group_fields.len();
@@ -1683,7 +1766,7 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Function(_)) => {
                         self.error(CheckError::NotAValue(name.clone()));
                     }
-                    Ok(Binding::Type(_)) => {
+                    Ok(Binding::Type(_) | Binding::Alias(_)) => {
                         self.error(CheckError::TypeAsValue(name.clone()));
                     }
                     // `lookup` never finds top-level values from inside a
@@ -1728,6 +1811,13 @@ impl<'a> Checker<'a> {
                 let id = self.declare_type(name);
                 self.define_type(id, stmt);
                 self.check_not_recursive(id, name);
+                None
+            }
+            // Like other names inside functions, an alias is only visible
+            // after it's declared, so it's worked out straight away.
+            Stmt::Alias { name, ty } => {
+                let target = self.resolve_type(ty);
+                self.declare_alias(name, ty, LazyType::Checked(target));
                 None
             }
             Stmt::Match { value, options } => self.match_(value, options),
@@ -1880,7 +1970,7 @@ impl<'a> Checker<'a> {
                     self.error(CheckError::NotAValue(name.to_string()));
                     Typed::UNKNOWN
                 }
-                Ok(Binding::Type(_)) => {
+                Ok(Binding::Type(_) | Binding::Alias(_)) => {
                     self.error(CheckError::TypeAsValue(name.to_string()));
                     Typed::UNKNOWN
                 }
@@ -2340,7 +2430,9 @@ impl<'a> Checker<'a> {
 
         let index = match self.lookup(callee) {
             Ok(Binding::Function(index)) => index,
-            Ok(Binding::Value { .. } | Binding::Global(_) | Binding::Type(_)) => {
+            Ok(
+                Binding::Value { .. } | Binding::Global(_) | Binding::Type(_) | Binding::Alias(_),
+            ) => {
                 self.error(CheckError::NotAFunction(callee.to_string()));
                 return Typed::UNKNOWN;
             }
@@ -2462,7 +2554,7 @@ impl<'a> Checker<'a> {
             .map(|global| ir::Global {
                 name: format!("{}::{}", self.modules[global.module].display, global.name),
                 ty: match global.state {
-                    GlobalState::Checked(Some(ty)) => ty.id,
+                    LazyType::Checked(Some(ty)) => ty.id,
                     _ => panic!("{NO_ERRORS}"),
                 },
                 value: global.lowered.expect(NO_ERRORS),
@@ -6596,5 +6688,190 @@ primitive Float"
                 "`Never` is a choice, so it can only be created from one of its options",
             ]
         );
+    }
+
+    #[test]
+    fn aliases_are_interchangeable_with_their_types() {
+        let src = "
+            alias ID = Int
+            let a: ID = 1
+            let b: Int = a
+            let c: ID = b + a
+
+            fn next(after id: ID) -> Int {
+                return id + 1
+            }
+
+            // An `impl` of an alias is an `impl` of its type.
+            impl ID {
+                static fn first() -> ID {
+                    return 0
+                }
+
+                fn doubled() -> Int {
+                    return self * 2
+                }
+            }
+
+            let d: ID = Int.first()
+            let e: Int = ID.first().doubled() + next(after: 3)
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn errors_name_the_type_an_alias_is_of() {
+        assert_eq!(
+            messages_top("alias ID = Int\nlet a: ID = true"),
+            ["cannot assign `Bool` to `a`, which has type `Int`"]
+        );
+    }
+
+    #[test]
+    fn aliases_can_be_used_in_any_order() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /shapes
+                    let origin: Origin = Spot.at(x: 0)
+                    alias Origin = Location
+                    alias Location = shapes::Spot
+                    ",
+                ),
+                (
+                    "/shapes",
+                    "
+                    alias Spot = Point
+                    group Point {
+                        let x: Int
+                    }
+                    impl Spot {
+                        static fn at(x: Int) -> Point {
+                            return Spot { x: x }
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn aliases_of_choices_have_their_options() {
+        let src = format!(
+            "
+            {SHAPE}
+            alias Figure = Shape
+            fn size(of figure: Figure) -> Int {{
+                match figure {{
+                    Figure.circle(let radius) => {{
+                        return radius
+                    }}
+                    Shape.empty => {{
+                        return 0
+                    }}
+                    Figure.nothing => {{
+                        return 0
+                    }}
+                }}
+            }}
+            let a = size(of: Figure.circle(2))
+            let b = size(of: Shape.empty)
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                alias Figure = Shape
+                fn f(figure: Figure) {{
+                    match figure {{
+                        Figure.circle => {{}}
+                        Shape.circle => {{}}
+                        Shape.empty => {{}}
+                        Shape.nothing => {{}}
+                    }}
+                }}
+                "
+            )),
+            ["`Shape.circle` is matched more than once"]
+        );
+    }
+
+    #[test]
+    fn aliases_inside_functions() {
+        let src = "
+            fn f() -> Bool {
+                alias Flag = Bool
+                let flag: Flag = true
+                fn invert(_ flag: Flag) -> Flag {
+                    return !flag
+                }
+                return invert(flag)
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        // Like other names in functions, they're only visible after they're
+        // declared, and only in their own block.
+        assert_eq!(
+            messages_top(
+                "
+                fn f() {
+                    let a: Early = 1
+                    alias Early = Int
+                    if true {
+                        alias Inner = Int
+                    }
+                    let b: Inner = 1
+                }
+                "
+            ),
+            ["unknown type `Early`", "unknown type `Inner`"]
+        );
+    }
+
+    #[test]
+    fn rejects_cyclic_aliases() {
+        assert_eq!(
+            check_top("alias A = B\nalias B = C\nalias C = A\nalias D = D\nlet x: A = 1"),
+            Err(vec![
+                CheckError::CyclicAlias("A".to_string()),
+                CheckError::CyclicAlias("D".to_string()),
+            ])
+        );
+        assert_eq!(messages_top("alias A = A"), ["`A` is an alias of itself"]);
+    }
+
+    #[test]
+    fn aliases_must_be_of_types() {
+        // Uses of an alias whose type is unknown don't cause more errors.
+        assert_eq!(
+            messages_top(
+                "
+                alias A = Missing
+                fn f(a: A) -> A {
+                    let value = 1
+                    alias B = value
+                    let b: B = a
+                    return A.anything()
+                }
+                "
+            ),
+            ["unknown type `Missing`", "`value` is not a type"]
+        );
+    }
+
+    #[test]
+    fn aliases_share_names_with_other_declarations() {
+        assert_eq!(
+            check_top("group Point {}\nalias Point = Int"),
+            Err(vec![CheckError::Redeclared("Point".to_string())])
+        );
+        // A module's own names come before the standard library's.
+        assert_eq!(check_top("alias Int = Bool\nlet flag: Int = true"), Ok(()));
     }
 }

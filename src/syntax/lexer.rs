@@ -81,6 +81,8 @@ pub enum Token<'src> {
     Match,
     #[token("primitive")]
     Primitive,
+    #[token("alias")]
+    Alias,
     #[token("use")]
     Use,
     #[token("impl")]
@@ -235,6 +237,7 @@ impl fmt::Display for Token<'_> {
             Self::Choice => write!(f, "choice"),
             Self::Match => write!(f, "match"),
             Self::Primitive => write!(f, "primitive"),
+            Self::Alias => write!(f, "alias"),
             Self::Use => write!(f, "use"),
             Self::Impl => write!(f, "impl"),
             Self::Static => write!(f, "static"),
@@ -475,6 +478,20 @@ mod tests {
                 Token::Primitive,
                 Token::Ident("Int"),
                 Token::Ident("primitives"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_alias() {
+        assert_eq!(
+            lex("alias ID = Int aliases"),
+            vec![
+                Token::Alias,
+                Token::Ident("ID"),
+                Token::Eq,
+                Token::Ident("Int"),
+                Token::Ident("aliases"),
             ]
         );
     }

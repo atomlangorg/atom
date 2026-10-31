@@ -245,6 +245,12 @@ pub enum Stmt {
         name: String,
         fields: Vec<Field>,
     },
+    /// `alias Name = Type`: another name for a type, which can be used in
+    /// place of it anywhere.
+    Alias {
+        name: String,
+        ty: Name,
+    },
     /// `primitive Name`: a type that the compiler represents itself, such as
     /// `Int`. Only allowed at the top level of the standard library.
     Primitive {

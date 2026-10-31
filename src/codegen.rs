@@ -1420,4 +1420,36 @@ mod tests {
         );
         assert_eq!(run(&src), 54);
     }
+
+    #[test]
+    fn aliases_compile_as_their_types() {
+        let src = format!(
+            "
+            {SHAPE}
+            alias Figure = Shape
+            alias Size = Int
+
+            fn size(of figure: Figure) -> Size {{
+                match figure {{
+                    Figure.circle(let radius) => {{
+                        return radius
+                    }}
+                    Shape.empty => {{
+                        return 0
+                    }}
+                    Figure.flag => {{
+                        return 1
+                    }}
+                }}
+            }}
+
+            fn main() -> Int {{
+                alias Total = Size
+                let total: Total = size(of: Figure.circle(40)) + size(of: Shape.flag(true))
+                return total
+            }}
+            "
+        );
+        assert_eq!(run(&src), 41);
+    }
 }
