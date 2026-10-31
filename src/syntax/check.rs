@@ -49,8 +49,9 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
-        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction, UnOp,
+        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplAlias, ImplFunction,
+        Import, MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction,
+        UnOp,
     },
     parser::parse,
 };
@@ -327,16 +328,14 @@ pub enum CheckError {
     NotATrait(String),
     /// A trait's name was used as a value.
     TraitAsValue(String),
-    /// A trait declares more than one function with the same name.
-    TraitFnRedeclared {
-        trait_name: String,
-        function: String,
-    },
-    /// An `impl` with a trait has a function the trait doesn't declare.
-    NotInTrait {
-        trait_name: String,
-        function: String,
-    },
+    /// A trait declares more than one alias or function with the same name.
+    TraitMemberRedeclared { trait_name: String, member: String },
+    /// An `impl` with a trait has an alias or function the trait doesn't
+    /// declare.
+    NotInTrait { trait_name: String, member: String },
+    /// An `impl` without a trait has an alias, which only a trait can
+    /// declare.
+    ImplAliasWithoutTrait(String),
     /// An `impl` with a trait implements one of its functions with a
     /// different signature to the trait's, which is `expected`.
     TraitFnMismatch {
@@ -350,9 +349,9 @@ pub enum CheckError {
         trait_name: &'static str,
         found: Type,
     },
-    /// An `impl` with a trait doesn't implement one of its functions, whose
-    /// signature is `expected`.
-    MissingTraitFn {
+    /// An `impl` with a trait doesn't give one of its aliases, or implement
+    /// one of its functions, which is `expected`, as the trait writes it.
+    MissingTraitMember {
         ty: String,
         trait_name: String,
         expected: String,
@@ -665,14 +664,16 @@ impl fmt::Display for CheckError {
             Self::UnknownTrait(name) => write!(f, "unknown trait `{name}`"),
             Self::NotATrait(name) => write!(f, "`{name}` is not a trait"),
             Self::TraitAsValue(name) => write!(f, "`{name}` is a trait, not a value"),
-            Self::TraitFnRedeclared {
-                trait_name,
-                function,
-            } => write!(f, "trait `{trait_name}` already declares `{function}`"),
-            Self::NotInTrait {
-                trait_name,
-                function,
-            } => write!(f, "`{function}` is not declared by trait `{trait_name}`"),
+            Self::TraitMemberRedeclared { trait_name, member } => {
+                write!(f, "trait `{trait_name}` already declares `{member}`")
+            }
+            Self::NotInTrait { trait_name, member } => {
+                write!(f, "`{member}` is not declared by trait `{trait_name}`")
+            }
+            Self::ImplAliasWithoutTrait(name) => write!(
+                f,
+                "`alias {name}` can only be given in an `impl` with a trait that declares it"
+            ),
             Self::TraitFnMismatch {
                 trait_name,
                 expected,
@@ -680,7 +681,7 @@ impl fmt::Display for CheckError {
                 f,
                 "trait `{trait_name}` declares this function as `{expected}`"
             ),
-            Self::MissingTraitFn {
+            Self::MissingTraitMember {
                 ty,
                 trait_name,
                 expected,
@@ -771,10 +772,27 @@ enum Binding {
 struct TraitInfo<'a> {
     name: &'a str,
     module: usize,
+    /// The names of its aliases, such as `Rhs`, whose types each
+    /// implementation gives.
+    aliases: &'a [String],
     functions: &'a [TraitFunction],
     /// For each of `functions`, its parameter types and return type, which
     /// are `None` if they're unknown. Worked out once types are defined.
     signatures: Vec<(Vec<Option<TraitType>>, Option<TraitType>)>,
+}
+
+/// An `impl ty with trait_name`, whose functions are checked against the
+/// trait at `index` in `Checker::traits`.
+struct Implementation<'b, 'a> {
+    ty: &'b Name,
+    /// The type `ty` refers to.
+    self_ty: &'b Type,
+    trait_name: &'b Name,
+    index: usize,
+    aliases: &'a [ImplAlias],
+    /// The index in `Checker::impl_aliases` of the types of `aliases`, if
+    /// there are any.
+    alias_types: Option<usize>,
 }
 
 /// A type in a trait's function signature.
@@ -782,6 +800,9 @@ struct TraitInfo<'a> {
 enum TraitType {
     /// `Self`, which is whichever type implements the trait.
     SelfType,
+    /// One of the trait's aliases, as an index into `TraitInfo::aliases`,
+    /// whose type each implementation gives.
+    Alias(usize),
     Type(Type),
 }
 
@@ -937,6 +958,9 @@ enum Pending<'a> {
         name: &'a str,
         body: &'a [Stmt],
         kind: FnKind,
+        /// The `impl` aliases its body can use, as an index into
+        /// `Checker::impl_aliases`, if it's in an `impl` that gives any.
+        aliases: Option<usize>,
     },
 }
 
@@ -963,6 +987,13 @@ struct Checker<'a> {
     /// functions nested in its methods. Only it can be constructed. `Some(None)`
     /// if the `impl`'s type is unknown.
     impl_type: Option<Option<Type>>,
+    /// The aliases given by each `impl`, such as `alias Rhs = Self`, by name,
+    /// with types that are `None` if they're unknown.
+    impl_aliases: Vec<HashMap<&'a str, Option<Type>>>,
+    /// The index in `impl_aliases` of the aliases that the code being
+    /// checked can use, if it's in an `impl` that gives any, including inside
+    /// functions nested in its methods.
+    current_impl_aliases: Option<usize>,
     functions: Vec<Signature<'a>>,
     traits: Vec<TraitInfo<'a>>,
     /// Which types implement which traits, as a type `id` and an index into
@@ -1069,7 +1100,11 @@ impl<'a> Checker<'a> {
                         types.push((module, self.declare_type(name), stmt));
                     }
                     Stmt::Alias { name, ty } => self.declare_alias(name, ty, LazyType::Unchecked),
-                    Stmt::Trait { name, functions } => self.declare_trait(name, functions),
+                    Stmt::Trait {
+                        name,
+                        aliases,
+                        functions,
+                    } => self.declare_trait(name, aliases, functions),
                     _ => {}
                 }
             }
@@ -1108,6 +1143,7 @@ impl<'a> Checker<'a> {
                                 name: &function.name,
                                 body: &function.body,
                                 kind: FnKind::Function,
+                                aliases: None,
                             },
                         ));
                     }
@@ -1118,11 +1154,21 @@ impl<'a> Checker<'a> {
                     Stmt::Impl {
                         ty,
                         with,
+                        aliases,
                         functions,
                     } => {
                         let self_ty = self.resolve_type(ty);
-                        // Signatures can use `Self`, just like bodies.
+                        let trait_index = with.as_ref().and_then(|with| self.resolve_trait(with));
+                        if with.is_none() {
+                            for alias in aliases {
+                                let name = alias.name.clone();
+                                self.error(CheckError::ImplAliasWithoutTrait(name));
+                            }
+                        }
+                        // Signatures can use `Self` and the `impl`'s aliases,
+                        // just like bodies.
                         let outer_impl_type = self.impl_type.replace(self_ty.clone());
+                        let impl_aliases = self.define_impl_aliases(aliases);
                         let mut indexes = vec![];
                         for ImplFunction {
                             is_static,
@@ -1155,17 +1201,28 @@ impl<'a> Checker<'a> {
                                     name: &function.name,
                                     body: &function.body,
                                     kind,
+                                    aliases: impl_aliases,
                                 },
                             ));
                         }
                         self.impl_type = outer_impl_type;
-                        if let Some(with) = with {
-                            let trait_index = self.resolve_trait(with);
-                            if let Some((trait_index, self_ty)) = trait_index.zip(self_ty) {
-                                self.implementations.insert((self_ty.id, trait_index));
-                                let implemented = functions.iter().zip(indexes).collect();
-                                self.check_implements(ty, &self_ty, with, trait_index, implemented);
-                            }
+                        self.current_impl_aliases = None;
+                        if let Some((with, (trait_index, self_ty))) =
+                            with.as_ref().zip(trait_index.zip(self_ty))
+                        {
+                            self.implementations.insert((self_ty.id, trait_index));
+                            let implemented = functions.iter().zip(indexes).collect();
+                            self.check_implements(
+                                Implementation {
+                                    ty,
+                                    self_ty: &self_ty,
+                                    trait_name: with,
+                                    index: trait_index,
+                                    aliases,
+                                    alias_types: impl_aliases,
+                                },
+                                implemented,
+                            );
                         }
                     }
                     Stmt::Decl {
@@ -1205,7 +1262,8 @@ impl<'a> Checker<'a> {
                     name,
                     body,
                     kind,
-                } => self.fn_body(index, name, body, kind),
+                    aliases,
+                } => self.fn_body(index, name, body, kind, aliases),
             }
         }
     }
@@ -1419,6 +1477,13 @@ impl<'a> Checker<'a> {
                     }
                     Some((_, binding)) => return Ok(binding.clone()),
                     None => {}
+                }
+
+                // Then the aliases of the `impl` it's in.
+                if let Some(aliases) = self.current_impl_aliases
+                    && let Some(ty) = self.impl_aliases[aliases].get(name.name.as_str())
+                {
+                    return ty.clone().map(Binding::Type).ok_or(LookupError::Reported);
                 }
 
                 // The current module's own names come first. Otherwise, a name
@@ -1707,7 +1772,17 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks the body of the function at `index` in `functions`.
-    fn fn_body(&mut self, index: usize, name: &'a str, body: &'a [Stmt], kind: FnKind) {
+    /// `aliases` are the aliases of the `impl` a method or static function is
+    /// in, as an index into `impl_aliases`. Other functions keep the aliases
+    /// of the code they're nested in.
+    fn fn_body(
+        &mut self,
+        index: usize,
+        name: &'a str,
+        body: &'a [Stmt],
+        kind: FnKind,
+        aliases: Option<usize>,
+    ) {
         let Signature {
             name: full_name,
             params,
@@ -1729,6 +1804,12 @@ impl<'a> Checker<'a> {
             FnKind::Method(ty) | FnKind::Static(ty) => self.impl_type.replace(ty.clone()),
             FnKind::Function => self.impl_type.clone(),
         };
+        let outer_impl_aliases = match &kind {
+            FnKind::Method(_) | FnKind::Static(_) => {
+                std::mem::replace(&mut self.current_impl_aliases, aliases)
+            }
+            FnKind::Function => self.current_impl_aliases,
+        };
 
         // `self` is a keyword, so it can't clash with a parameter. Like any
         // other value, functions nested in the method can't use it.
@@ -1747,6 +1828,7 @@ impl<'a> Checker<'a> {
             .locals;
         self.fn_scope_start = outer_scope_start;
         self.impl_type = outer_impl_type;
+        self.current_impl_aliases = outer_impl_aliases;
 
         // A `Void` function can finish without an explicit `return`.
         if !self.always_returns(body) {
@@ -1800,10 +1882,16 @@ impl<'a> Checker<'a> {
 
     /// Declares the trait called `name` in the current module. Its signatures
     /// are worked out by `define_trait`, once types are defined.
-    fn declare_trait(&mut self, name: &'a str, functions: &'a [TraitFunction]) {
+    fn declare_trait(
+        &mut self,
+        name: &'a str,
+        aliases: &'a [String],
+        functions: &'a [TraitFunction],
+    ) {
         self.traits.push(TraitInfo {
             name,
             module: self.module,
+            aliases,
             functions,
             signatures: vec![],
         });
@@ -1811,40 +1899,82 @@ impl<'a> Checker<'a> {
     }
 
     /// Works out the types in the signatures of the trait at `index` in
-    /// `traits`, where `Self` stands for whichever type implements it.
+    /// `traits`, where `Self` stands for whichever type implements it, and
+    /// its aliases for whichever types the implementation gives.
     fn define_trait(&mut self, index: usize) {
         let TraitInfo {
             name,
             module,
+            aliases,
             functions,
             ..
         } = self.traits[index];
         self.module = module;
-        let mut names = HashSet::new();
+        // Aliases and functions have separate names, like types and methods.
+        let mut alias_names = HashSet::new();
+        let mut function_names = HashSet::new();
+        let redeclared = aliases
+            .iter()
+            .filter(|alias| !alias_names.insert(*alias))
+            .chain(
+                functions
+                    .iter()
+                    .map(|function| &function.name)
+                    .filter(|name| !function_names.insert(*name)),
+            );
+        let errors: Vec<_> = redeclared
+            .map(|member| CheckError::TraitMemberRedeclared {
+                trait_name: name.to_string(),
+                member: member.clone(),
+            })
+            .collect();
+        for error in errors {
+            self.error(error);
+        }
+
         let mut signatures = vec![];
         for function in functions {
-            if !names.insert(&function.name) {
-                self.error(CheckError::TraitFnRedeclared {
-                    trait_name: name.to_string(),
-                    function: function.name.clone(),
-                });
-            }
             let params = function
                 .params
                 .iter()
-                .map(|param| self.trait_type(&param.ty))
+                .map(|param| self.trait_type(aliases, &param.ty))
                 .collect();
-            signatures.push((params, self.trait_type(&function.ret)));
+            signatures.push((params, self.trait_type(aliases, &function.ret)));
         }
         self.traits[index].signatures = signatures;
     }
 
-    /// Resolves the type called `name` in a trait's signature.
-    fn trait_type(&mut self, name: &Name) -> Option<TraitType> {
+    /// Resolves the type called `name` in the signature of a trait with
+    /// `aliases`.
+    fn trait_type(&mut self, aliases: &[String], name: &Name) -> Option<TraitType> {
         if *name == Name::new("Self") {
             return Some(TraitType::SelfType);
         }
+        if name.module.is_none()
+            && let Some(index) = aliases.iter().position(|alias| *alias == name.name)
+        {
+            return Some(TraitType::Alias(index));
+        }
         self.resolve_type(name).map(TraitType::Type)
+    }
+
+    /// Works out the types of an `impl`'s `aliases`, which can use `Self`
+    /// and the aliases before them, returning their index in `impl_aliases`
+    /// if there are any. While its functions are declared, they can be used.
+    fn define_impl_aliases(&mut self, aliases: &'a [ImplAlias]) -> Option<usize> {
+        if aliases.is_empty() {
+            return None;
+        }
+        self.impl_aliases.push(HashMap::new());
+        let index = self.impl_aliases.len() - 1;
+        self.current_impl_aliases = Some(index);
+        for alias in aliases {
+            let ty = self.resolve_type(&alias.ty);
+            if self.impl_aliases[index].insert(&alias.name, ty).is_some() {
+                self.error(CheckError::Redeclared(alias.name.clone()));
+            }
+        }
+        Some(index)
     }
 
     /// Finds the trait called `name`, returning its index into `traits`.
@@ -1873,21 +2003,41 @@ impl<'a> Checker<'a> {
     /// them.
     fn check_implements(
         &mut self,
-        ty: &Name,
-        self_ty: &Type,
-        trait_name: &Name,
-        index: usize,
+        implementation: Implementation,
         functions: Vec<(&ImplFunction, usize)>,
     ) {
+        let Implementation {
+            ty,
+            self_ty,
+            trait_name,
+            index,
+            aliases,
+            alias_types,
+        } = implementation;
         let trait_ = &self.traits[index];
+        let alias_type = |alias: usize| {
+            let types = &self.impl_aliases[alias_types?];
+            types.get(trait_.aliases[alias].as_str())?.as_ref()
+        };
         let matches = |found: &Option<Type>, expected: &Option<TraitType>| match (found, expected) {
             (Some(found), Some(TraitType::SelfType)) => found == self_ty,
+            (Some(found), Some(TraitType::Alias(alias))) => {
+                alias_type(*alias).is_none_or(|expected| found == expected)
+            }
             (Some(found), Some(TraitType::Type(expected))) => found == expected,
             // An unknown type has already been reported.
             _ => true,
         };
 
         let mut errors = vec![];
+        for alias in aliases {
+            if !trait_.aliases.contains(&alias.name) {
+                errors.push(CheckError::NotInTrait {
+                    trait_name: trait_name.to_string(),
+                    member: alias.name.clone(),
+                });
+            }
+        }
         for &(
             ImplFunction {
                 is_static,
@@ -1904,7 +2054,7 @@ impl<'a> Checker<'a> {
             else {
                 errors.push(CheckError::NotInTrait {
                     trait_name: trait_name.to_string(),
-                    function: function.name.clone(),
+                    member: function.name.clone(),
                 });
                 continue;
             };
@@ -1929,12 +2079,21 @@ impl<'a> Checker<'a> {
                 });
             }
         }
+        for declared in trait_.aliases {
+            if !aliases.iter().any(|alias| alias.name == *declared) {
+                errors.push(CheckError::MissingTraitMember {
+                    ty: ty.to_string(),
+                    trait_name: trait_name.to_string(),
+                    expected: format!("alias {declared}"),
+                });
+            }
+        }
         for declared in trait_.functions {
             if !functions
                 .iter()
                 .any(|(implemented, _)| implemented.function.name == declared.name)
             {
-                errors.push(CheckError::MissingTraitFn {
+                errors.push(CheckError::MissingTraitMember {
                     ty: ty.to_string(),
                     trait_name: trait_name.to_string(),
                     expected: signature_text(declared),
@@ -2259,7 +2418,13 @@ impl<'a> Checker<'a> {
             Stmt::Fn(function) => {
                 // Declared before the body is checked, so it can call itself.
                 let index = self.declare_fn(&function.name, &function.params, &function.ret);
-                self.fn_body(index, &function.name, &function.body, FnKind::Function);
+                self.fn_body(
+                    index,
+                    &function.name,
+                    &function.body,
+                    FnKind::Function,
+                    None,
+                );
                 None
             }
             Stmt::Group { name, .. } | Stmt::Choice { name, .. } => {
@@ -2482,7 +2647,7 @@ impl<'a> Checker<'a> {
             Expr::Unary(op @ (UnOp::Neg | UnOp::BitNot), operand) => {
                 self.integer_unary(op, operand, expected)
             }
-            Expr::Unary(UnOp::Not, operand) => self.not(operand, expected),
+            Expr::Unary(UnOp::Not, operand) => self.not(operand),
             Expr::Binary(
                 lhs,
                 op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
@@ -2666,9 +2831,9 @@ impl<'a> Checker<'a> {
 
     /// Checks `!operand`, which calls `operand.not()` from the standard
     /// library's `Not` trait, which the operand's type must implement. The
-    /// result has the operand's type.
-    fn not(&mut self, operand: &Expr, expected: Option<&Type>) -> Typed {
-        let Typed { ty, expr } = self.expr_as(operand, expected);
+    /// result is its implementation's `Output`.
+    fn not(&mut self, operand: &Expr) -> Typed {
+        let Typed { ty, expr } = self.expr(operand);
         let function = ty
             .as_ref()
             .and_then(|ty| self.operator_method("!", "Not", "not", ty));
@@ -2680,7 +2845,7 @@ impl<'a> Checker<'a> {
             });
         // The result's type comes from `not`, so it's unknown without it.
         Typed {
-            ty: function.and(ty),
+            ty: function.and_then(|function| self.functions[function].returns.clone()),
             expr,
         }
     }
@@ -2726,8 +2891,8 @@ impl<'a> Checker<'a> {
 
     /// Checks `lhs & rhs` or `lhs | rhs`, which call `lhs.and(rhs)` or
     /// `lhs.or(rhs)` from the standard library's `And` or `Or` trait, which
-    /// the type of `lhs` must implement. Both operands have that type, and
-    /// the result is a `Bool`.
+    /// the type of `lhs` must implement. `rhs` must be its implementation's
+    /// `Rhs`, and the result is its `Output`.
     fn trait_operator(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
         let (trait_name, method) = match op {
             BinOp::And => ("And", "and"),
@@ -2735,23 +2900,30 @@ impl<'a> Checker<'a> {
             _ => unreachable!("only `&` and `|` call trait functions"),
         };
         let op = op.symbol();
-        let (lhs, rhs) = self.operands(lhs, rhs, None);
-        let bool_ty = self.std_type("Bool");
+        let lhs = self.expr(lhs);
+        let signature = lhs
+            .ty
+            .as_ref()
+            .and_then(|ty| self.operator_method(op, trait_name, method, ty))
+            .map(|function| (function, self.functions[function].clone()));
 
-        let function = lhs.ty.clone().and_then(|ty| {
-            let function = self.operator_method(op, trait_name, method, &ty)?;
-            if let Some(found_rhs) = &rhs.ty
-                && *found_rhs != ty
-            {
-                self.error(CheckError::InvalidOperand {
-                    op,
-                    expected: ty,
-                    found: found_rhs.clone(),
-                });
-                return None;
-            }
-            Some(function)
-        });
+        // The right operand is the method's argument, so it's used as its
+        // parameter's type, like any other argument.
+        let param = signature
+            .as_ref()
+            .and_then(|(_, signature)| signature.params.first()?.ty.clone());
+        let rhs = self.expr_as(rhs, param.as_ref());
+        let mut function = signature.as_ref().map(|&(function, _)| function);
+        if let Some((param, found)) = param.zip(rhs.ty)
+            && param != found
+        {
+            self.error(CheckError::InvalidOperand {
+                op,
+                expected: param,
+                found,
+            });
+            function = None;
+        }
 
         let expr = function
             .zip(lhs.expr.zip(rhs.expr))
@@ -2760,7 +2932,7 @@ impl<'a> Checker<'a> {
                 args: vec![lhs, rhs],
             });
         Typed {
-            ty: Some(bool_ty),
+            ty: signature.and_then(|(_, signature)| signature.returns),
             expr,
         }
     }
@@ -3478,7 +3650,7 @@ fn int_range(bits: u32, signed: bool) -> (i128, i128) {
 fn has_own_type(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) => false,
-        Expr::Unary(UnOp::Neg | UnOp::Not | UnOp::BitNot, operand) => has_own_type(operand),
+        Expr::Unary(UnOp::Neg | UnOp::BitNot, operand) => has_own_type(operand),
         Expr::Binary(
             lhs,
             BinOp::Add
@@ -3645,6 +3817,8 @@ mod tests {
             }
 
             impl Flags with Not {
+                alias Output = Self
+
                 fn not() -> Self {
                     return Flags { bits: .!self.bits }
                 }
@@ -3684,12 +3858,18 @@ mod tests {
             }
 
             impl Flags with And {
+                alias Rhs = Self
+                alias Output = Bool
+
                 fn and(_ rhs: Self) -> Bool {
                     return self.bits .& rhs.bits != 0
                 }
             }
 
             impl Flags with Or {
+                alias Rhs = Self
+                alias Output = Bool
+
                 fn or(_ rhs: Self) -> Bool {
                     return self.bits .| rhs.bits != 0
                 }
@@ -3720,6 +3900,9 @@ mod tests {
                 }
 
                 impl Flags with Or {
+                    alias Rhs = Self
+                    alias Output = Bool
+
                     fn or(_ rhs: Self) -> Bool {
                         return true
                     }
@@ -3750,6 +3933,9 @@ mod tests {
         let and = "
             use /flags
             impl Flags with And {
+                alias Rhs = Self
+                alias Output = Bool
+
                 fn and(_ rhs: Flags) -> Bool {
                     return true
                 }
@@ -7322,6 +7508,190 @@ mod tests {
         assert_eq!(check_top(&src), Ok(()));
     }
 
+    /// A trait with aliases, for trait alias tests.
+    const COMBINE: &str = "
+        trait Combine {
+            alias Rhs
+            alias Output
+
+            fn combine(with rhs: Rhs) -> Output
+        }
+        ";
+
+    #[test]
+    fn impls_give_the_types_of_trait_aliases() {
+        // The aliases can be used in the `impl`'s signatures and bodies,
+        // including in functions nested in them, and by later aliases.
+        let src = format!(
+            "
+            {COMBINE}
+            impl Int with Combine {{
+                alias Rhs = Bool
+                alias Output = Rhs
+
+                fn combine(with rhs: Rhs) -> Bool {{
+                    fn check(_ value: Output) -> Rhs {{
+                        return value
+                    }}
+                    let checked: Output = check(rhs)
+                    return checked & self == 0
+                }}
+            }}
+
+            impl Bool with Combine {{
+                alias Rhs = Int
+                alias Output = Self
+
+                fn combine(with rhs: Int) -> Output {{
+                    return self | rhs == 0
+                }}
+            }}
+
+            fn f() -> Bool {{
+                return 1.combine(with: true) & false.combine(with: 2)
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn impl_aliases_are_only_visible_in_their_impl() {
+        let src = format!(
+            "
+            {COMBINE}
+            impl Int with Combine {{
+                alias Rhs = Bool
+                alias Output = Bool
+
+                fn combine(with rhs: Rhs) -> Output {{
+                    return rhs
+                }}
+            }}
+
+            impl Int {{
+                fn other(_ rhs: Rhs) {{}}
+            }}
+
+            fn f(rhs: Rhs) {{}}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            ["unknown type `Rhs`", "unknown type `Rhs`"]
+        );
+    }
+
+    #[test]
+    fn impls_must_give_exactly_their_traits_aliases() {
+        let src = format!(
+            "
+            {COMBINE}
+            impl Int with Combine {{
+                alias Rhs = Bool
+                alias Extra = Int
+                alias Rhs = Int
+
+                fn combine(with rhs: Rhs) -> Bool {{
+                    return true
+                }}
+            }}
+
+            impl Bool {{
+                alias Output = Bool
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`Rhs` is already declared",
+                "`Extra` is not declared by trait `Combine`",
+                "`impl Int with Combine` is missing `alias Output`",
+                "`alias Output` can only be given in an `impl` with a trait that declares it",
+            ]
+        );
+    }
+
+    #[test]
+    fn trait_functions_must_match_with_their_aliases() {
+        let src = format!(
+            "
+            {COMBINE}
+            trait Twice {{
+                alias Same
+                alias Same
+            }}
+
+            impl Int with Combine {{
+                alias Rhs = Bool
+                alias Output = Int
+
+                fn combine(with rhs: Int) -> Int {{
+                    return rhs
+                }}
+            }}
+
+            impl Bool with Combine {{
+                alias Rhs = Missing
+                alias Output = Bool
+
+                fn combine(with rhs: Int) -> Bool {{
+                    return true
+                }}
+            }}
+            "
+        );
+        // An unknown alias type isn't reported again.
+        assert_eq!(
+            messages_top(&src),
+            [
+                "trait `Twice` already declares `Same`",
+                "trait `Combine` declares this function as `fn combine(with rhs: Rhs) -> Output`",
+                "unknown type `Missing`",
+            ]
+        );
+    }
+
+    #[test]
+    fn operators_use_their_implementations_aliases() {
+        let src = "
+            impl Int with And {
+                alias Rhs = Bool
+                alias Output = Int
+
+                fn and(_ keep: Rhs) -> Output {
+                    if keep {
+                        return self
+                    }
+                    return 0
+                }
+            }
+
+            impl Int with Not {
+                alias Output = Bool
+
+                fn not() -> Output {
+                    return self == 0
+                }
+            }
+
+            fn f() -> Int {
+                let a: Int = 5 & true
+                let b: Bool = !0 & !1
+                return a
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        assert_eq!(
+            messages_top(&format!("{src}\nlet c = 5 & 1\nlet d: Int = !1")),
+            [
+                "operator `&` expects `Bool`, found `Int`",
+                "cannot assign `Bool` to `d`, which has type `Int`",
+            ]
+        );
+    }
+
     #[test]
     fn traits_can_be_implemented_from_other_modules() {
         assert_eq!(
@@ -7474,8 +7844,8 @@ mod tests {
             ),
             [
                 "`Twice` is already declared",
-                "unknown type `Missing`",
                 "trait `Broken` already declares `f`",
+                "unknown type `Missing`",
             ]
         );
     }

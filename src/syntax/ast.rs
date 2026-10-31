@@ -270,17 +270,21 @@ pub enum Stmt {
     /// `impl Type { fn ... }`: adds methods and static functions to a type.
     /// Only allowed at the top level.
     ///
-    /// `impl Type with Trait { fn ... }` implements a trait's functions, and
-    /// only those.
+    /// `impl Type with Trait { alias ... fn ... }` implements a trait's
+    /// aliases and functions, and only those.
     Impl {
         ty: Name,
         with: Option<Name>,
+        /// `alias Name = Type`, giving the type of one of the trait's aliases.
+        aliases: Vec<ImplAlias>,
         functions: Vec<ImplFunction>,
     },
-    /// `trait Name { fn ... }`: functions that a type can implement, declared
-    /// without bodies. Only allowed at the top level.
+    /// `trait Name { alias ... fn ... }`: functions that a type can
+    /// implement, declared without bodies, and aliases, such as `alias Rhs`,
+    /// whose types each implementation gives. Only allowed at the top level.
     Trait {
         name: String,
+        aliases: Vec<String>,
         functions: Vec<TraitFunction>,
     },
     /// `group Name { let field: Type ... }`
@@ -347,6 +351,13 @@ pub struct TraitFunction {
     pub params: Vec<Param>,
     /// `Void` when no type is written, like in a `fn`.
     pub ret: Name,
+}
+
+/// `alias Name = Type` in an `impl`, giving the type of its trait's alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplAlias {
+    pub name: String,
+    pub ty: Name,
 }
 
 /// A function in an `impl`.

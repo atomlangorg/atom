@@ -1841,12 +1841,18 @@ mod tests {
             }
 
             impl Flags with And {
+                alias Rhs = Self
+                alias Output = Bool
+
                 fn and(_ rhs: Self) -> Bool {
                     return self.bits .& rhs.bits != 0
                 }
             }
 
             impl Flags with Or {
+                alias Rhs = Self
+                alias Output = Bool
+
                 fn or(_ rhs: Self) -> Bool {
                     return self.bits .| rhs.bits != 0
                 }
@@ -1888,6 +1894,8 @@ mod tests {
             }
 
             impl Flags with Not {
+                alias Output = Self
+
                 fn not() -> Self {
                     return Flags { bits: .!self.bits }
                 }
@@ -1917,6 +1925,41 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 29);
+    }
+
+    #[test]
+    fn operators_use_their_implementations_aliases() {
+        // `Int & Bool` keeps the `Int` if the `Bool` is `true`, and `!` on an
+        // `Int` is whether it's zero.
+        let src = "
+            impl Int with And {
+                alias Rhs = Bool
+                alias Output = Int
+
+                fn and(_ keep: Rhs) -> Output {
+                    if keep {
+                        return self
+                    }
+                    return 0
+                }
+            }
+
+            impl Int with Not {
+                alias Output = Bool
+
+                fn not() -> Output {
+                    return self == 0
+                }
+            }
+
+            fn main() -> Int {
+                let a = 40 & true
+                let b = 7 & false
+                let c = (2 & !0) & !b
+                return a + b + c
+            }
+            ";
+        assert_eq!(run(src), 42);
     }
 
     #[test]

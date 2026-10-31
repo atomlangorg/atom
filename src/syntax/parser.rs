@@ -24,8 +24,9 @@ use chumsky::{
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplFunction, Import,
-        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction, UnOp,
+        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplAlias, ImplFunction,
+        Import, MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction,
+        UnOp,
     },
     lexer::{self, Token},
 };
@@ -89,6 +90,18 @@ pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, 
 /// call, constructor or function's parameters. It can be split over several
 /// lines after `open`, after each comma, and before `close`.
 ///
+/// A line in an `impl`, which are collected into its aliases and functions.
+enum ImplItem {
+    Alias(ImplAlias),
+    Function(ImplFunction),
+}
+
+/// A line in a `trait`, which are collected into its aliases and functions.
+enum TraitItem {
+    Alias(String),
+    Function(TraitFunction),
+}
+
 /// A list whose `close` is on its own line should end with a comma, so that
 /// adding an item only changes one line. Otherwise it shouldn't. Either way,
 /// this is a warning rather than an error.
@@ -642,6 +655,12 @@ where
             is_primitive,
             function,
         });
+    let impl_alias = just(Token::Alias)
+        .ignore_then(ident)
+        .then_ignore(just(Token::Eq))
+        .then(type_name.clone())
+        .map(|(name, ty)| ImplItem::Alias(ImplAlias { name, ty }));
+
     // `with` is only special here, so it can still be a label.
     let impl_ = just(Token::Impl)
         .ignore_then(type_name.clone())
@@ -654,17 +673,29 @@ where
             newlines
                 .clone()
                 .ignore_then(
-                    impl_function
+                    impl_alias
+                        .or(impl_function.map(ImplItem::Function))
                         .separated_by(newlines.clone().at_least(1))
                         .allow_trailing()
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|((ty, with), functions)| Stmt::Impl {
-            ty,
-            with,
-            functions,
+        .map(|((ty, with), items)| {
+            let mut aliases = vec![];
+            let mut functions = vec![];
+            for item in items {
+                match item {
+                    ImplItem::Alias(alias) => aliases.push(alias),
+                    ImplItem::Function(function) => functions.push(function),
+                }
+            }
+            Stmt::Impl {
+                ty,
+                with,
+                aliases,
+                functions,
+            }
         });
 
     // Like an `impl`, one function per line, but only their signatures.
@@ -676,20 +707,37 @@ where
             ret,
         },
     );
+    // `alias Name`, whose type each implementation gives.
+    let trait_alias = just(Token::Alias).ignore_then(ident).map(TraitItem::Alias);
     let trait_ = just(Token::Trait)
         .ignore_then(ident)
         .then(
             newlines
                 .clone()
                 .ignore_then(
-                    trait_function
+                    trait_alias
+                        .or(trait_function.map(TraitItem::Function))
                         .separated_by(newlines.clone().at_least(1))
                         .allow_trailing()
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(name, functions)| Stmt::Trait { name, functions });
+        .map(|(name, items)| {
+            let mut aliases = vec![];
+            let mut functions = vec![];
+            for item in items {
+                match item {
+                    TraitItem::Alias(alias) => aliases.push(alias),
+                    TraitItem::Function(function) => functions.push(function),
+                }
+            }
+            Stmt::Trait {
+                name,
+                aliases,
+                functions,
+            }
+        });
 
     // `primitive Name` or `primitive fn name(params) -> Type`, which the
     // checker only allows in the standard library.
@@ -3043,6 +3091,7 @@ mod tests {
                 Stmt::Impl {
                     ty: Name::new("User"),
                     with: None,
+                    aliases: vec![],
                     functions: vec![
                         ImplFunction {
                             is_static: false,
@@ -3087,6 +3136,7 @@ mod tests {
                 Stmt::Impl {
                     ty: qualified(ModulePath::Named("user".to_string()), "User"),
                     with: None,
+                    aliases: vec![],
                     functions: vec![],
                 },
             ])
@@ -3231,6 +3281,7 @@ mod tests {
             Ok(vec![
                 Stmt::Trait {
                     name: "And".to_string(),
+                    aliases: vec![],
                     functions: vec![
                         TraitFunction {
                             is_static: false,
@@ -3254,6 +3305,7 @@ mod tests {
                 },
                 Stmt::Trait {
                     name: "Marker".to_string(),
+                    aliases: vec![],
                     functions: vec![],
                 },
             ])
@@ -3268,11 +3320,13 @@ mod tests {
                 Stmt::Impl {
                     ty: Name::new("Custom"),
                     with: Some(Name::new("And")),
+                    aliases: vec![],
                     functions: vec![],
                 },
                 Stmt::Impl {
                     ty: Name::new("Int"),
                     with: Some(qualified(ModulePath::Named("logic".to_string()), "And")),
+                    aliases: vec![],
                     functions: vec![],
                 },
             ])
@@ -3288,6 +3342,7 @@ mod tests {
             Ok(vec![Stmt::Impl {
                 ty: Name::new("Bool"),
                 with: Some(Name::new("And")),
+                aliases: vec![],
                 functions: vec![ImplFunction {
                     is_static: false,
                     is_primitive: true,
@@ -3308,6 +3363,56 @@ mod tests {
             "impl Bool {\nprimitive fn and(_ rhs: Self) -> Bool {}\n}",
             "impl Bool {\nprimitive and(_ rhs: Self) -> Bool\n}",
             "impl Bool {\nprimitive Int\n}",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_aliases_in_traits_and_impls() {
+        let src = "
+            trait And {
+                alias Rhs
+                fn and(_ rhs: Rhs) -> Output
+                alias Output
+            }
+            impl Bool with And {
+                alias Rhs = Self
+
+                primitive fn and(_ rhs: Rhs) -> Output
+                alias Output = core::Bool
+            }
+            ";
+        let Ok(program) = parse(src) else {
+            panic!("should parse");
+        };
+        let [
+            Stmt::Trait { aliases, .. },
+            Stmt::Impl { aliases: given, .. },
+        ] = &program[..]
+        else {
+            panic!("expected a trait and an impl, got {program:?}");
+        };
+        assert_eq!(aliases, &["Rhs".to_string(), "Output".to_string()]);
+        assert_eq!(
+            given,
+            &[
+                ImplAlias {
+                    name: "Rhs".to_string(),
+                    ty: Name::new("Self"),
+                },
+                ImplAlias {
+                    name: "Output".to_string(),
+                    ty: qualified(ModulePath::Named("core".to_string()), "Bool"),
+                },
+            ]
+        );
+        for src in [
+            "trait And {\nalias Rhs = Int\n}",
+            "trait And {\nalias\n}",
+            "trait And {\nalias Rhs Output\n}",
+            "impl Bool with And {\nalias Rhs\n}",
+            "impl Bool with And {\nalias Rhs =\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
