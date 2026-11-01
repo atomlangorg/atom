@@ -2579,6 +2579,52 @@ mod tests {
     }
 
     #[test]
+    fn static_functions_can_be_used_as_values() {
+        let src = "
+            group Point {
+                let x: Int
+                let y: Int
+            }
+
+            impl Point {
+                static fn at(x: Int, y: Int) -> Self {
+                    return Self { x: x, y: y }
+                }
+
+                static fn origin() -> Self {
+                    return Self.at(x: 0, y: 0)
+                }
+            }
+
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+            }
+
+            fn built(by make: Fn<Int, Box<Int>>, from value: Int) -> Int {
+                return make(value).value
+            }
+
+            fn main() -> Int {
+                let at = Point.at
+                let origin = Point.origin
+                let pair = (x: 10, y: 20)
+                let a = at(x: 1, y: 2)
+                let b = origin()
+                let c = Point.at.call(input: pair)
+                // 1 + 2 + 0 + 0 + 10 + 20 + 100
+                return a.x + a.y + b.x + b.y + c.x + c.y + built(by: Box<Int>.of, from: 100)
+            }
+            ";
+        assert_eq!(run(src), 133);
+    }
+
+    #[test]
     fn functions_can_recurse_through_fn_values() {
         let src = "
             fn sum(to value: Int) -> Int {

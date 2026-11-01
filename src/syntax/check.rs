@@ -3898,11 +3898,7 @@ impl<'a> Checker<'a> {
                     ty: self.global_type(index),
                     expr: Some(ir::Expr::Global(index)),
                 },
-                Ok(Binding::Function(index)) => {
-                    let ty = self.function_type(index);
-                    let expr = ty.is_some().then(|| self.function_value(index));
-                    Typed { ty, expr }
-                }
+                Ok(Binding::Function(index)) => self.function_value(index),
                 Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
                     self.error(CheckError::TypeAsValue(name.to_string()));
                     Typed::UNKNOWN
@@ -4181,15 +4177,8 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        if !self.visible_modules().any(|module| module == found.module) {
-            self.error(CheckError::MemberNotImported {
-                ty: ty.clone(),
-                member: method.to_string(),
-                module: self.modules[found.module].display.clone(),
-            });
-            return None;
-        }
-        Some(found.function)
+        self.check_imported(ty, method, &found)
+            .then_some(found.function)
     }
 
     /// Checks `lhs & rhs`, `lhs | rhs`, `lhs == rhs` or `lhs != rhs`, which
@@ -4583,11 +4572,10 @@ impl<'a> Checker<'a> {
                 }
             }
             Receiver::Type(ty) => match self.static_function(&ty, field) {
-                Some(_) => CheckError::MemberNotValue {
-                    ty,
-                    member: field.to_string(),
-                    kind: MemberKind::StaticFunction,
-                },
+                Some(found) => {
+                    self.check_imported(&ty, field, &found);
+                    return self.function_value(found.function);
+                }
                 None => self.no_static_function(ty, field),
             },
         };
@@ -4690,9 +4678,24 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a call to a method on a value, or a static function on a type,
-    /// returning its return type, or `None` if it can't be determined, along
-    /// with what it compiles to.
+    /// Reports an error unless `found`, the method or static function of `ty`
+    /// called `member`, can be used here. Like functions, they can only be used
+    /// from their own module or one that imports it. Returns whether it can.
+    fn check_imported(&mut self, ty: &Type, member: &str, found: &Method) -> bool {
+        let imported = self.visible_modules().any(|module| module == found.module);
+        if !imported {
+            self.error(CheckError::MemberNotImported {
+                ty: ty.clone(),
+                member: member.to_string(),
+                module: self.modules[found.module].display.clone(),
+            });
+        }
+        imported
+    }
+
+    /// Checks a call to a method on a value, a static function on a type, or
+    /// the creation of an option of a choice, returning its return type, or
+    /// `None` if it can't be determined, along with what it compiles to.
     fn method_call(
         &mut self,
         receiver: &Expr,
@@ -4717,16 +4720,21 @@ impl<'a> Checker<'a> {
                 }
                 _ => Some(Receiver::Value(ty, lowered)),
             },
+            // So is a static function, like any other function.
+            Some(Receiver::Type(ty)) if let Some(found) = self.static_function(&ty, method) => {
+                self.check_imported(&ty, method, &found);
+                let fn_type = self.function_type(found.function);
+                let name = format!("{ty}.{method}");
+                let callee = Callee::Function(found.function);
+                return self.call_value(fn_type, callee, &name, args);
+            }
             receiver => receiver,
         };
         let params = match &receiver {
-            Some(Receiver::Type(ty)) => match self.option(ty, method) {
-                Some((_, value_ty)) => vec![value_ty],
-                None => self
-                    .static_function(ty, method)
-                    .map(|found| self.param_types(found.function))
-                    .unwrap_or_default(),
-            },
+            Some(Receiver::Type(ty)) => self
+                .option(ty, method)
+                .map(|(_, value_ty)| vec![value_ty])
+                .unwrap_or_default(),
             Some(Receiver::Value(ty, _)) => match self.member(ty, method) {
                 Some(Member::Method(found)) => self.param_types(found.function),
                 _ => vec![],
@@ -4745,7 +4753,7 @@ impl<'a> Checker<'a> {
         }
         let (ty, found_method, lowered_receiver) = match receiver {
             Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
-                Some(Member::Method(found_method)) => (ty, found_method, Some(lowered_receiver)),
+                Some(Member::Method(found_method)) => (ty, found_method, lowered_receiver),
                 Some(Member::Field(..)) => unreachable!("fields were handled above"),
                 None => {
                     let error = self.no_member(ty, method);
@@ -4753,28 +4761,13 @@ impl<'a> Checker<'a> {
                     return Typed::UNKNOWN;
                 }
             },
-            Receiver::Type(ty) => match self.static_function(&ty, method) {
-                Some(found_method) => (ty, found_method, None),
-                None => {
-                    let error = self.no_static_function(ty, method);
-                    self.error(error);
-                    return Typed::UNKNOWN;
-                }
-            },
+            Receiver::Type(ty) => {
+                let error = self.no_static_function(ty, method);
+                self.error(error);
+                return Typed::UNKNOWN;
+            }
         };
-        let member = method.to_string();
-
-        // Like functions, methods and static functions can only be used from
-        // their own module or one that imports it.
-        if !self
-            .visible_modules()
-            .any(|module| module == found_method.module)
-        {
-            self.error(CheckError::MemberNotImported {
-                ty,
-                member,
-                module: self.modules[found_method.module].display.clone(),
-            });
+        if !self.check_imported(&ty, method, &found_method) {
             return Typed::UNKNOWN;
         }
 
@@ -4782,12 +4775,9 @@ impl<'a> Checker<'a> {
         let returns = self.check_args(format!("{ty}.{method}"), args, found, signature);
 
         // A method's receiver is its first argument.
-        let lowered_args = match lowered_receiver {
-            Some(lowered_receiver) => lowered_receiver
-                .zip(lowered_args)
-                .map(|(receiver, args)| iter::once(receiver).chain(args).collect()),
-            None => lowered_args,
-        };
+        let lowered_args = lowered_receiver
+            .zip(lowered_args)
+            .map(|(receiver, args)| iter::once(receiver).chain(args).collect());
         Typed {
             ty: returns,
             expr: lowered_args.map(|args| ir::Expr::Call {
@@ -5002,23 +4992,34 @@ impl<'a> Checker<'a> {
         self.instance(template, vec![input, returns?], true)
     }
 
-    /// What the function at `index` in `functions` compiles to as a value, once
-    /// `function_type` has found its type, which is a pointer to a function
-    /// taking its `Input` as a single parameter, made the first time it's
-    /// needed, so that every `Fn` can be called in the same way.
-    fn function_value(&mut self, index: usize) -> ir::Expr {
-        if let Some(&value) = self.function_values.get(&index) {
-            return ir::Expr::Function(value);
+    /// The function at `index` in `functions` as a value, which compiles to a
+    /// pointer to a function taking its `Input` as a single parameter, so that
+    /// every `Fn` can be called in the same way.
+    fn function_value(&mut self, index: usize) -> Typed {
+        let Some(ty) = self.function_type(index) else {
+            return Typed::UNKNOWN;
+        };
+        let value = match self.function_values.get(&index) {
+            Some(&value) => value,
+            None => self.single_input_function(index, &ty),
+        };
+        Typed {
+            ty: Some(ty),
+            expr: Some(ir::Expr::Function(value)),
         }
-        const KNOWN: &str = "the function's type is known";
-        let ty = self.function_type(index).expect(KNOWN);
+    }
+
+    /// Makes a function that calls the function at `index` in `functions`,
+    /// whose type is `ty`, with its `Input` as a single parameter, returning
+    /// its index in `functions`.
+    fn single_input_function(&mut self, index: usize, ty: &Type) -> usize {
         let input = self.instances[&ty.id].1[0].id;
         let Signature {
             name,
             params,
             returns,
         } = self.functions[index].clone();
-        let returns = returns.expect(KNOWN);
+        let returns = returns.expect("the function's type is known");
         let args = if self.tuples.contains_key(&input) {
             (0..params.len())
                 .map(|index| ir::Expr::Field {
@@ -5047,7 +5048,7 @@ impl<'a> Checker<'a> {
             })]),
         }));
         self.function_values.insert(index, value);
-        ir::Expr::Function(value)
+        value
     }
 
     /// The types of the parameters of the function at `index` in `functions`.
@@ -8802,20 +8803,15 @@ mod tests {
     }
 
     #[test]
-    fn static_functions_must_be_called() {
+    fn types_are_not_values() {
         assert_eq!(
             messages_top(&format!(
                 "
                 {POINT}
-                let a = Int.zero
-                // A type on its own is still not a value.
-                let b = Int
+                let a = Int
                 "
             )),
-            [
-                "`Int.zero` is a static function, not a value",
-                "`Int` is a type, not a value",
-            ]
+            ["`Int` is a type, not a value"]
         );
     }
 
@@ -11003,6 +10999,112 @@ primitive Float"
             "
         );
         assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn static_functions_are_values_of_type_fn() {
+        let src = "
+            group Point {
+                let x: Int
+                let y: Int
+            }
+
+            impl Point {
+                static fn at(x: Int, y: Int) -> Self {
+                    return Self { x: x, y: y }
+                }
+
+                static fn origin() -> Self {
+                    return Self.at(x: 0, y: 0)
+                }
+            }
+
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+            }
+
+            fn f() {
+                let at: Fn<(x: Int, y: Int), Point> = Point.at
+                let origin: Fn<(), Point> = Point.origin
+                let of: Fn<Int, Box<Int>> = Box<Int>.of
+                let a: Point = at(x: 1, y: 2)
+                let b: Point = origin()
+                let c: Box<Int> = of(1)
+                let d: Point = Point.at.call(input: (x: 1, y: 2))
+                let e: Box<Int> = Box.of(1)
+                let pair = (x: 1, y: 2)
+                let g: Point = at.call(input: pair)
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn static_functions_are_called_like_other_functions() {
+        let src = "
+            group Point {
+                let x: Int
+                let y: Int
+            }
+
+            impl Point {
+                static fn at(x: Int, y: Int) -> Self {
+                    return Self { x: x, y: y }
+                }
+            }
+
+            fn f(point: Point) {
+                let pair = (x: 1, y: 2)
+                let at = Point.at
+                Point.at(pair)
+                Point.at(x: true, y: 2)
+                Point.at(x: 1, z: 2)
+                Point.at(x: 1)
+                at(x: 1)
+                let a: Fn<Int, Point> = Point.at
+                let b = Point.missing
+                let c = point.at
+            }
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "`Point.at` takes 2 arguments, found 1",
+                "argument `x` of `Point.at` expects `Int`, found `Bool`",
+                "argument to `Point.at` should be labelled `y`, found `z`",
+                "`Point.at` takes 2 arguments, found 1",
+                "`at` is called with `(x: Int, y: Int)`, but was given `(x: Int)`",
+                "cannot assign `Fn<(x: Int, y: Int), Point>` to `a`, which has type `Fn<Int, Point>`",
+                "`Point` has no static function `missing`",
+                "`Point.at` is a static function, so it must be used on `Point` itself rather than a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_functions_as_values_must_be_imported() {
+        let ints = "
+            impl Int {
+                static fn one() -> Int {
+                    return 1
+                }
+            }
+            ";
+        let other = "
+            fn f() -> Fn<(), Int> {
+                return Int.one
+            }
+            ";
+        assert_eq!(
+            file_messages(&[("/ints", ints), ("/other", other)]),
+            ["/other: `Int.one` is declared in `/ints`, which is not imported"]
+        );
     }
 
     #[test]

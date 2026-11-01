@@ -172,9 +172,10 @@ trait Call {
     fn call(input: Input) -> Output
 }
 
-// A function, which is what a function's name refers to when it's used as a
-// value. `Input` is the type of its only parameter if that has no label and
-// isn't a tuple, and otherwise a tuple of its parameters, as in
+// A function, which is what naming a function or static function refers to
+// when it's used as a value, as in `add` or `Int.zero`. `Input` is the type of
+// its only parameter if that has no label and isn't a tuple, and otherwise a
+// tuple of its parameters, as in
 // `Fn<(a: Int, b: Int), Int>` for `fn add(a: Int, b: Int) -> Int`, or
 // `Fn<(_: (a: Int, b: Int)), Int>` for
 // `fn sum(_ pair: (a: Int, b: Int)) -> Int`. Calling a function by name uses
