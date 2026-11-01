@@ -2275,6 +2275,26 @@ mod tests {
     }
 
     #[test]
+    fn destructuring_declares_constants() {
+        let src = "
+            fn split(_ n: Int) -> (tens: Int, ones: Int) {
+                return (tens: n / 10, ones: n - n / 10 * 10)
+            }
+
+            fn main() -> Int {
+                let x = 3
+                let y = 5
+                (let a, let b) = (y, x)
+                (tens: let tens, ones: _) = split(47)
+                (_, (inner: let c)) = (x, (inner: 100))
+                // 5 * 1000 + 3 * 100 + 4 * 10 + 100
+                return a * 1000 + b * 100 + tens * 10 + c
+            }
+            ";
+        assert_eq!(run(src), 5440);
+    }
+
+    #[test]
     fn trait_functions_are_called_like_any_other() {
         let src = "
             group Counter {

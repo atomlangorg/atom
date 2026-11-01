@@ -637,9 +637,20 @@ where
             )),
         });
 
+        // A tuple pattern, then a value for it to match, as in
+        // `(let a, let b) = (y, x)`. Only a tuple pattern starts with `(`,
+        // which a call such as `(x: 1).f()` can too, so it's tried first.
+        let destructure = just(Token::LParen)
+            .rewind()
+            .ignore_then(pattern.clone())
+            .then_ignore(just(Token::Eq))
+            .then(expr.clone())
+            .map(|(pattern, value)| Stmt::Destructure { pattern, value });
+
         stmt.define(
             decl.clone()
                 .or(assign)
+                .or(destructure)
                 .or(if_)
                 .or(match_)
                 .or(function.clone().map(Stmt::Fn))
@@ -1054,6 +1065,45 @@ mod tests {
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
+    }
+
+    #[test]
+    fn parses_destructuring() {
+        assert_eq!(
+            parse_body("(let a, _) = (y, x)"),
+            Ok(vec![Stmt::Destructure {
+                pattern: Pattern::Tuple(vec![
+                    TuplePattern {
+                        label: None,
+                        pattern: Pattern::Binding("a".to_string()),
+                    },
+                    TuplePattern {
+                        label: None,
+                        pattern: Pattern::Any,
+                    },
+                ]),
+                value: Expr::Tuple(vec![arg(None, *var("y")), arg(None, *var("x"))]),
+            }])
+        );
+        // A call on a tuple still starts with `(`.
+        assert_eq!(
+            parse_body("(x: 1).f()"),
+            Ok(vec![Stmt::Expr(method_call(
+                Expr::Tuple(vec![arg(Some("x"), Expr::Int(1))]),
+                "f",
+                vec![],
+            ))])
+        );
+        // Only a tuple pattern can be assigned to, and only in a function.
+        for src in [
+            "_ = x",
+            "Shape.a(let r) = s",
+            "(let a) =",
+            "(let a) = (1) = (2)",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+        assert!(parse("(let a, let b) = (1, 2)").is_err());
     }
 
     #[test]

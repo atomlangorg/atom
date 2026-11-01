@@ -272,6 +272,9 @@ pub enum CheckError {
     WrongPatternType { expected: Type, found: Type },
     /// A pattern names an option that the choice doesn't have.
     UnknownOption { ty: Type, option: String },
+    /// A pattern that's assigned a value doesn't match every value, such as
+    /// `missing`.
+    RefutablePattern { pattern: String, missing: String },
     /// A pattern in a `match` can't be reached, since the ones before it
     /// match everything it does.
     UnreachablePattern(String),
@@ -607,6 +610,10 @@ impl fmt::Display for CheckError {
             Self::UnknownOption { ty, option } => {
                 write!(f, "`{ty}` has no option `{option}`")
             }
+            Self::RefutablePattern { pattern, missing } => write!(
+                f,
+                "pattern `{pattern}` doesn't match every value, such as `{missing}`, so it can only be used in a `match`"
+            ),
             Self::UnreachablePattern(pattern) => write!(
                 f,
                 "pattern `{pattern}` can't be reached, since the patterns before it match everything it does"
@@ -2806,6 +2813,7 @@ impl<'a> Checker<'a> {
                 None
             }
             Stmt::Match { value, arms } => self.match_(stmt, value, arms),
+            Stmt::Destructure { pattern, value } => self.destructure(stmt, pattern, value),
             Stmt::Return(value) => {
                 let FnContext { name, returns, .. } = self
                     .current_fn
@@ -2886,6 +2894,40 @@ impl<'a> Checker<'a> {
             value: expr?,
             ty: ty.id,
             arms: lowered,
+        })
+    }
+
+    /// Checks `pattern = value`, which declares the values that `pattern`
+    /// binds in the current scope. With nothing to fall back on, `pattern`
+    /// must match every value it could be given. It compiles to a `match`
+    /// with one arm, whose block is empty.
+    fn destructure(
+        &mut self,
+        stmt: &'a Stmt,
+        pattern: &'a Pattern,
+        value: &Expr,
+    ) -> Option<ir::Stmt> {
+        let Typed { ty, expr } = self.evaluating(stmt, |checker| checker.expr(value));
+        let (lowered, space) = self.pattern(pattern, ty.as_ref());
+        let (ty, lowered) = (ty?, lowered?);
+        let tys = std::slice::from_ref(&ty);
+        if let Some(values) = self
+            .unmatched(&[vec![space]], &[Space::Any], tys, 1)
+            .first()
+        {
+            self.error(CheckError::RefutablePattern {
+                pattern: pattern.to_string(),
+                missing: self.show_space(&values[0], &ty),
+            });
+            return None;
+        }
+        Some(ir::Stmt::Match {
+            value: expr?,
+            ty: ty.id,
+            arms: vec![ir::MatchArm {
+                pattern: lowered,
+                body: vec![],
+            }],
         })
     }
 
@@ -9853,6 +9895,67 @@ primitive Float"
                 "`match` is on `(a: Bool, b: IntU8)`, so it can't match an option of `Shape`",
                 "pattern `true` can't match `Int`",
                 "pattern `(x: _)` can't match `Int`",
+                "`missing` is not declared",
+            ]
+        );
+    }
+
+    #[test]
+    fn destructuring_declares_constants() {
+        // The values can be used after it, and nested patterns can take
+        // values apart further.
+        let src = "
+            fn f(point: (x: Int, y: (z: Bool, w: IntU8))) -> Int {
+                let x = 3
+                let y = 5
+                (let a, let b) = (y, x)
+                (x: let px, y: (z: let pz, w: _)) = point
+                (_, let c) = (true, a + b)
+                let flag: Bool = pz
+                return a + b + px + c
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        assert_eq!(
+            messages_top(
+                "
+                fn f(point: (x: Int, y: Int)) {
+                    (let a, let b) = (1, 2)
+                    a = 3
+                    (let a, let c) = (1, 2)
+                }
+                "
+            ),
+            [
+                "cannot assign to `a` because it was declared with `let`",
+                "`a` is already declared",
+            ]
+        );
+    }
+
+    #[test]
+    fn destructuring_must_match_every_value() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn f(point: (x: Int, y: Bool), shape: (_: Shape)) {{
+                (x: 0, y: let y) = point
+                (x: let x, y: true) = point
+                (Shape.circle(let r)) = shape
+                (let a, let b) = point
+                (x: let c) = point
+                (let d, let e) = missing
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "pattern `(x: 0, y: let y)` doesn't match every value, such as `(x: _, y: _)`, so it can only be used in a `match`",
+                "pattern `(x: let x, y: true)` doesn't match every value, such as `(x: _, y: false)`, so it can only be used in a `match`",
+                "pattern `(Shape.circle(let r))` doesn't match every value, such as `(Shape.empty)`, so it can only be used in a `match`",
+                "pattern `(let a, let b)` can't match `(x: Int, y: Bool)`",
+                "pattern `(x: let c)` can't match `(x: Int, y: Bool)`",
                 "`missing` is not declared",
             ]
         );

@@ -385,6 +385,13 @@ pub enum Stmt {
         value: Expr,
         arms: Vec<MatchArm>,
     },
+    /// `(let a, let b) = value`: matches `value` against a tuple pattern,
+    /// declaring the values it binds as `let` constants. The pattern must
+    /// match every value it could be given.
+    Destructure {
+        pattern: Pattern,
+        value: Expr,
+    },
     /// `return` or `return value`
     Return(Option<Expr>),
     /// An expression on its own line. Only function calls are allowed.
