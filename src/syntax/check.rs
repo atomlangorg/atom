@@ -281,8 +281,14 @@ pub enum CheckError {
     /// A `match` doesn't match some values, shown as these patterns, with
     /// `more` if there are more than are shown.
     MissingPatterns { patterns: Vec<String>, more: bool },
-    /// A field was called like a method.
-    FieldNotMethod { ty: Type, field: String },
+    /// A value was called whose type doesn't implement `Call`.
+    NotCallable { name: String, ty: Type },
+    /// A value was called with an input of a different type to its `Input`.
+    WrongCallInput {
+        name: String,
+        expected: Type,
+        found: Type,
+    },
     /// A method or static function was used without calling it.
     MemberNotValue {
         ty: Type,
@@ -672,9 +678,18 @@ impl fmt::Display for CheckError {
             Self::NoMember { ty, member } => {
                 write!(f, "`{ty}` has no field or method `{member}`")
             }
-            Self::FieldNotMethod { ty, field } => {
-                write!(f, "`{ty}.{field}` is a field, not a method")
-            }
+            Self::NotCallable { name, ty } => write!(
+                f,
+                "`{name}` is `{ty}`, which doesn't implement `Call`, so it can't be called"
+            ),
+            Self::WrongCallInput {
+                name,
+                expected,
+                found,
+            } => write!(
+                f,
+                "`{name}` is called with `{expected}`, but was given `{found}`"
+            ),
             Self::MemberNotValue { ty, member, kind } => {
                 write!(f, "`{ty}.{member}` is {}, not a value", kind.with_article())
             }
@@ -4103,15 +4118,33 @@ impl<'a> Checker<'a> {
     }
 
     /// Finds `method` of `ty`, which the operator `op` calls, as an index
-    /// into `functions`. `ty` must implement the standard library's trait
-    /// called `trait_name`, and like calling the method directly, the module
-    /// implementing it must be imported.
+    /// into `functions`, as `trait_method` does.
     fn operator_method(
         &mut self,
         op: &'static str,
         trait_name: &'static str,
         method: &str,
         ty: &Type,
+    ) -> Option<usize> {
+        let not_implemented = CheckError::NotImplemented {
+            op,
+            trait_name,
+            found: ty.clone(),
+        };
+        self.trait_method(trait_name, method, ty, not_implemented)
+    }
+
+    /// Finds `method` of `ty`, as an index into `functions`, which the
+    /// compiler calls for some syntax, such as an operator. `ty` must
+    /// implement the standard library's trait called `trait_name`, or
+    /// `not_implemented` is reported. Like calling the method directly, the
+    /// module implementing it must be imported.
+    fn trait_method(
+        &mut self,
+        trait_name: &str,
+        method: &str,
+        ty: &Type,
+        not_implemented: CheckError,
     ) -> Option<usize> {
         let trait_index = match self.modules[self.core].scope.get(trait_name) {
             Some(Binding::Trait(index)) => *index,
@@ -4122,11 +4155,7 @@ impl<'a> Checker<'a> {
                 found
             }
             _ => {
-                self.error(CheckError::NotImplemented {
-                    op,
-                    trait_name,
-                    found: ty.clone(),
-                });
+                self.error(not_implemented);
                 return None;
             }
         };
@@ -4547,6 +4576,67 @@ impl<'a> Checker<'a> {
     /// Checks a call to a method on a value, or a static function on a type,
     /// returning its return type, or `None` if it can't be determined, along
     /// with what it compiles to.
+    /// Checks calling `value`, called `name`, with `args`, which calls its
+    /// `call` from the standard library's `Call` trait, as in `adder(a: 3)`
+    /// for `adder.call(input: (a: 3))`. The arguments are its `Input`, written
+    /// like a tuple without its brackets, so `negate(3)` passes `3`, unless
+    /// `Input` is a tuple of one value without a label.
+    fn call_value(&mut self, value: Typed, name: &str, args: &[Arg]) -> Typed {
+        let input = match args {
+            [Arg { label: None, value }] => Expr::Paren(Box::new(value.clone())),
+            _ => Expr::Tuple(args.to_vec()),
+        };
+        // Like a function's arguments, the input is checked first, so its
+        // errors come before the call's, and it's used as `Input`, which is
+        // found without reporting errors.
+        let call_trait = match self.modules[self.core].scope.get("Call") {
+            Some(Binding::Trait(index)) => *index,
+            _ => panic!("the standard library should declare `Call`"),
+        };
+        let param = value
+            .ty
+            .as_ref()
+            .filter(|ty| self.implementations.contains(&(ty.id, call_trait)))
+            .and_then(|ty| match self.member(ty, "call") {
+                Some(Member::Method(found)) => self.functions[found.function].params.first(),
+                _ => None,
+            })
+            .and_then(|param| param.ty.clone());
+        let Typed {
+            ty: found,
+            expr: input,
+        } = self.expr_as(&input, param.as_ref());
+
+        let function = value.ty.as_ref().and_then(|ty| {
+            let not_callable = CheckError::NotCallable {
+                name: name.to_string(),
+                ty: ty.clone(),
+            };
+            self.trait_method("Call", "call", ty, not_callable)
+        });
+        let returns = function.and_then(|function| self.functions[function].returns.clone());
+        if let Some((expected, found)) = param.zip(found)
+            && expected != found
+        {
+            self.error(CheckError::WrongCallInput {
+                name: name.to_string(),
+                expected,
+                found,
+            });
+            return Typed {
+                ty: returns,
+                expr: None,
+            };
+        }
+        let expr = function
+            .zip(value.expr.zip(input))
+            .map(|(function, (value, input))| ir::Expr::Call {
+                function,
+                args: vec![value, input],
+            });
+        Typed { ty: returns, expr }
+    }
+
     fn method_call(
         &mut self,
         receiver: &Expr,
@@ -4559,6 +4649,23 @@ impl<'a> Checker<'a> {
         // reporting errors, so the arguments can take their types from its
         // parameters.
         let receiver = self.receiver(receiver, method, expected);
+        // A field followed by arguments is called, like any other value.
+        let receiver = match receiver {
+            Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
+                Some(Member::Field(index, field_ty)) => {
+                    let value = Typed {
+                        ty: field_ty,
+                        expr: lowered.map(|receiver| ir::Expr::Field {
+                            receiver: Box::new(receiver),
+                            index,
+                        }),
+                    };
+                    return self.call_value(value, method, args);
+                }
+                _ => Some(Receiver::Value(ty, lowered)),
+            },
+            receiver => receiver,
+        };
         let params = match &receiver {
             Some(Receiver::Type(ty)) => match self.option(ty, method) {
                 Some((_, value_ty)) => vec![value_ty],
@@ -4586,11 +4693,7 @@ impl<'a> Checker<'a> {
         let (ty, found_method, lowered_receiver) = match receiver {
             Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
                 Some(Member::Method(found_method)) => (ty, found_method, Some(lowered_receiver)),
-                Some(Member::Field(..)) => {
-                    let field = method.to_string();
-                    self.error(CheckError::FieldNotMethod { ty, field });
-                    return Typed::UNKNOWN;
-                }
+                Some(Member::Field(..)) => unreachable!("fields were handled above"),
                 None => {
                     let error = self.no_member(ty, method);
                     self.error(error);
@@ -4788,6 +4891,10 @@ impl<'a> Checker<'a> {
         // but the function is found first so they can take their types from
         // its parameters.
         let binding = self.lookup(callee);
+        if let Ok(Binding::Value { .. } | Binding::Global(_)) = &binding {
+            let value = self.expr(&Expr::Var(callee.clone()));
+            return self.call_value(value, &callee.to_string(), args);
+        }
         let params = match &binding {
             Ok(Binding::Function(index)) => self.param_types(*index),
             _ => vec![],
@@ -4804,6 +4911,7 @@ impl<'a> Checker<'a> {
                 | Binding::Trait(_)
                 | Binding::Generic(_),
             ) => {
+                // Values were handled above.
                 self.error(CheckError::NotAFunction(callee.to_string()));
                 return Typed::UNKNOWN;
             }
@@ -6308,7 +6416,10 @@ mod tests {
                     found: 1,
                 },
                 CheckError::Undeclared("z".to_string()),
-                CheckError::NotAFunction("y".to_string()),
+                CheckError::NotCallable {
+                    name: "y".to_string(),
+                    ty: ty("Int"),
+                },
             ])
         );
     }
@@ -6328,7 +6439,10 @@ mod tests {
     fn rejects_calling_undeclared_or_non_functions() {
         assert_eq!(
             messages("let x = 1\nx()\ng()"),
-            ["`x` is not a function", "`g` is not declared"]
+            [
+                "`x` is `Int`, which doesn't implement `Call`, so it can't be called",
+                "`g` is not declared",
+            ]
         );
     }
 
@@ -8346,10 +8460,10 @@ mod tests {
                 "
             )),
             [
-                "`User.age` is a field, not a method",
+                "`age` is `Int`, which doesn't implement `Call`, so it can't be called",
                 "`User.nextAge` is a method, not a value",
                 "`missing` is not declared",
-                "`User.isAdmin` is a field, not a method",
+                "`isAdmin` is `Bool`, which doesn't implement `Call`, so it can't be called",
             ]
         );
     }
@@ -10515,6 +10629,90 @@ primitive Float"
                 "pattern `(let a, let b)` can't match `(x: Int, y: Bool)`",
                 "pattern `(x: let c)` can't match `(x: Int, y: Bool)`",
                 "`missing` is not declared",
+            ]
+        );
+    }
+
+    /// Types that implement `Call`, for call tests.
+    const CALLABLES: &str = "
+        group Adder {
+            let base: Int
+        }
+
+        impl Adder with Call {
+            fn call(input: (a: Int, b: Int)) -> Int {
+                return self.base + input.a + input.b
+            }
+        }
+
+        group Negate {}
+
+        impl Negate with Call {
+            fn call(input: Int) -> Int {
+                return -input
+            }
+        }
+
+        group Counter {}
+
+        impl Counter with Call {
+            fn call(input: ()) -> Bool {
+                return true
+            }
+        }
+
+        group Tools {
+            let adder: Adder
+            let negate: Negate
+        }
+        ";
+
+    #[test]
+    fn values_implementing_call_can_be_called() {
+        // By name or as a field, with the input written like a tuple without
+        // its brackets, or by calling `call` itself.
+        let src = format!(
+            "
+            {CALLABLES}
+            fn f(adder: Adder, negate: Negate, counter: Counter, tools: Tools) -> Int {{
+                let sum: Int = adder(a: 3, b: 5)
+                let same: Int = adder.call(input: (a: 3, b: 5))
+                let negated: Int = negate(sum) + tools.negate(1)
+                let counted: Bool = counter()
+                let pair = (first: adder, second: 2)
+                return tools.adder(a: 1, b: 2) + pair.first(a: negated, b: same)
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn calls_need_call_and_its_input() {
+        let src = format!(
+            "
+            {CALLABLES}
+            fn f(adder: Adder, negate: Negate, tools: Tools, count: Int) {{
+                let a = count(1)
+                let b = adder(a: 3)
+                let c = adder(b: 3, a: 5)
+                let d = negate(true)
+                let e = negate()
+                let f = tools.adder(a: missing, b: 1)
+                let g = unknown(1)
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`count` is `Int`, which doesn't implement `Call`, so it can't be called",
+                "`adder` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
+                "`adder` is called with `(a: Int, b: Int)`, but was given `(b: Int, a: Int)`",
+                "`negate` is called with `Int`, but was given `Bool`",
+                "`negate` is called with `Int`, but was given `()`",
+                "`missing` is not declared",
+                "`unknown` is not declared",
             ]
         );
     }

@@ -160,3 +160,13 @@ impl Bool with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
+
+// Types whose values can be called like functions, which calls `call`, as in
+// `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. The arguments
+// are the `Input`, written like a tuple without its brackets.
+trait Call {
+    alias Input
+    alias Output
+
+    fn call(input: Input) -> Output
+}

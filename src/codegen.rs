@@ -2360,6 +2360,65 @@ mod tests {
     }
 
     #[test]
+    fn values_implementing_call_can_be_called() {
+        let src = "
+            group Adder {
+                let base: Int
+            }
+
+            impl Adder with Call {
+                fn call(input: (a: Int, b: Int)) -> Int {
+                    return self.base + input.a + input.b
+                }
+            }
+
+            impl Adder {
+                static fn from(_ base: Int) -> Self {
+                    return Self { base: base }
+                }
+            }
+
+            group Scale {
+                let by: Int
+            }
+
+            impl Scale with Call {
+                fn call(input: Int) -> Int {
+                    return input * self.by
+                }
+            }
+
+            group Tools {
+                let adder: Adder
+                let scale: Scale
+            }
+
+            impl Tools {
+                static fn new() -> Self {
+                    return Self { adder: Adder.from(100), scale: Scale.by(10) }
+                }
+            }
+
+            impl Scale {
+                static fn by(_ by: Int) -> Self {
+                    return Self { by: by }
+                }
+            }
+
+            fn main() -> Int {
+                let adder = Adder.from(1000)
+                let tools = Tools.new()
+                // 1000 + 3 + 5, then 100 + 1 + 2, then 4 * 10
+                let a = adder(a: 3, b: 5)
+                let b = tools.adder(a: 1, b: 2)
+                let c = tools.scale(4)
+                return a + b + c + adder.call(input: (a: 0, b: 0))
+            }
+            ";
+        assert_eq!(run(src), 2151);
+    }
+
+    #[test]
     fn trait_functions_are_called_like_any_other() {
         let src = "
             group Counter {
