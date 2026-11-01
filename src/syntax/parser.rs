@@ -194,6 +194,59 @@ where
             .map(|(module, name)| Name { module, name }))
         .boxed();
 
+    // Type names are resolved by the checker, not reserved by the lexer. A
+    // tuple type is written like parameters, as in `(at x: Int, y: Int)`,
+    // except that `_: Int` has neither a label nor a name. A generic type is
+    // given its arguments, as in `Optional<Int>`, and in a generic type's
+    // `impl`, `Self.T` is what its parameter `T` stands for.
+    let type_name = recursive(|type_name| {
+        let args = type_name
+            .clone()
+            .separated_by(just(Token::Comma))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Lt), just(Token::Gt));
+        let element = just(Token::Underscore)
+            .ignore_then(ident.or_not())
+            .map(|name| (None, name))
+            .or(ident
+                .then(ident)
+                .map(|(label, name)| (Some(label), Some(name))))
+            .or(ident.map(|name| (Some(name.clone()), Some(name))))
+            .then_ignore(just(Token::Colon))
+            .then(type_name)
+            .map(|((label, name), ty)| TupleElement { label, name, ty });
+        let self_param = just(Token::SelfType)
+            .ignore_then(just(Token::Dot))
+            .ignore_then(ident)
+            .map(TypeName::SelfParam);
+        self_param
+            .or(name
+                .clone()
+                .then(args.or_not())
+                .map(|(name, args)| match args {
+                    Some(args) => TypeName::Generic { name, args },
+                    None => TypeName::Named(name),
+                }))
+            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
+            .labelled("type")
+    })
+    .boxed();
+    let type_args = type_name
+        .clone()
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Lt), just(Token::Gt));
+    // A name that's a type, which can be given generic arguments.
+    let named_type = name
+        .clone()
+        .then(type_args.clone().or_not())
+        .map(|(name, args)| match args {
+            Some(args) => TypeName::Generic { name, args },
+            None => TypeName::Named(name),
+        });
+
     // Unary and binary operators applied to `atom`, which is the tightest
     // binding part of an expression.
     let operators = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
@@ -331,10 +384,18 @@ where
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
         .map(|(name, value)| FieldValue { name, value });
-    let construct = name
+    let construct = named_type
         .clone()
         .then(comma_list(field_value, Token::LBrace, Token::RBrace))
         .map(|(ty, fields)| Expr::Construct { ty, fields });
+
+    // `Optional<Int>` before a `.`, as in `Optional<Int>.none`. In `a < b`,
+    // there's no `>` and `.`, so it's a comparison.
+    let generic_type = name
+        .clone()
+        .then(type_args.clone())
+        .then_ignore(just(Token::Dot).rewind())
+        .map(|(name, args)| Expr::GenericType { name, args });
 
     let self_value = just(Token::SelfValue).to(Expr::SelfValue);
 
@@ -364,6 +425,7 @@ where
         literal
             .or(self_value.clone())
             .or(construct)
+            .or(generic_type.clone())
             .or(name_or_call.clone())
             .or(parenthesised.clone())
             .labelled("expression")
@@ -376,6 +438,7 @@ where
     let condition = operators(with_members(
         literal
             .or(self_value)
+            .or(generic_type)
             .or(name_or_call)
             .or(parenthesised)
             .labelled("expression")
@@ -397,7 +460,7 @@ where
             .or_not()
             .then(pattern.clone())
             .map(|(label, pattern)| TuplePattern { label, pattern });
-        let option = name
+        let option = named_type
             .clone()
             .then_ignore(just(Token::Dot))
             .then(ident)
@@ -428,26 +491,6 @@ where
         Token::Var => Mutability::Var,
     };
 
-    // Type names are resolved by the checker, not reserved by the lexer. A
-    // tuple type is written like parameters, as in `(at x: Int, y: Int)`,
-    // except that `_: Int` has neither a label nor a name.
-    let type_name = recursive(|type_name| {
-        let element = just(Token::Underscore)
-            .ignore_then(ident.or_not())
-            .map(|name| (None, name))
-            .or(ident
-                .then(ident)
-                .map(|(label, name)| (Some(label), Some(name))))
-            .or(ident.map(|name| (Some(name.clone()), Some(name))))
-            .then_ignore(just(Token::Colon))
-            .then(type_name)
-            .map(|((label, name), ty)| TupleElement { label, name, ty });
-        name.clone()
-            .map(TypeName::Named)
-            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
-            .labelled("type")
-    })
-    .boxed();
     let annotation = just(Token::Colon).ignore_then(type_name.clone());
 
     let decl = mutability
@@ -488,8 +531,18 @@ where
 
     // Like a block, one field per line with blank lines allowed, and the `{`
     // on the same line as `group`.
+    // `<T, U>` after a type's name, naming its generic parameters.
+    let params = ident
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Lt), just(Token::Gt))
+        .or_not()
+        .map(Option::unwrap_or_default);
+
     let group_ = just(Token::Group)
         .ignore_then(ident)
+        .then(params.clone())
         .then(
             newlines
                 .clone()
@@ -501,7 +554,11 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(name, fields)| Stmt::Group { name, fields });
+        .map(|((name, params), fields)| Stmt::Group {
+            name,
+            params,
+            fields,
+        });
 
     // `alias Name = Type`.
     let alias = just(Token::Alias)
@@ -521,6 +578,7 @@ where
     // Laid out like a group, with one option per line.
     let choice_ = just(Token::Choice)
         .ignore_then(ident)
+        .then(params)
         .then(
             newlines
                 .clone()
@@ -532,7 +590,11 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(name, options)| Stmt::Choice { name, options });
+        .map(|((name, params), options)| Stmt::Choice {
+            name,
+            params,
+            options,
+        });
 
     // `label name: Type`, `_ name: Type`, or `name: Type`, where the name is
     // also the label.
@@ -977,6 +1039,118 @@ mod tests {
     }
 
     #[test]
+    fn parses_generic_declarations() {
+        assert_eq!(
+            parse("choice Optional<T> {\nnone\nsome: T\n}\ngroup Pair<A, B> {}"),
+            Ok(vec![
+                Stmt::Choice {
+                    name: "Optional".to_string(),
+                    params: vec!["T".to_string()],
+                    options: vec![
+                        ChoiceOption {
+                            name: "none".to_string(),
+                            ty: TypeName::new("Void"),
+                        },
+                        ChoiceOption {
+                            name: "some".to_string(),
+                            ty: TypeName::new("T"),
+                        },
+                    ],
+                },
+                Stmt::Group {
+                    name: "Pair".to_string(),
+                    params: vec!["A".to_string(), "B".to_string()],
+                    fields: vec![],
+                },
+            ])
+        );
+        for src in [
+            "group Box<> {}",
+            "group Box<T {}",
+            "group Box<Int<T>> {}",
+            "group Box<T,> {}",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_generic_types() {
+        let generic = |name: &str, args| TypeName::Generic {
+            name: Name::new(name),
+            args,
+        };
+        assert_eq!(
+            decl_type("let t: Pair<Int, Optional<(x: Int)>> = t"),
+            generic(
+                "Pair",
+                vec![
+                    TypeName::new("Int"),
+                    generic(
+                        "Optional",
+                        vec![TypeName::Tuple(vec![TupleElement {
+                            label: Some("x".to_string()),
+                            name: Some("x".to_string()),
+                            ty: TypeName::new("Int"),
+                        }])],
+                    ),
+                ],
+            )
+        );
+        assert_eq!(
+            decl_type("let t: Self.T = t"),
+            TypeName::SelfParam("T".to_string())
+        );
+        for src in ["let t: Box<> = t", "let t: Box<Int = t", "let t: Self. = t"] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_generic_types_in_expressions() {
+        let int_box = || TypeName::Generic {
+            name: Name::new("Box"),
+            args: vec![TypeName::new("Int")],
+        };
+        assert_eq!(
+            parse_expr("Optional<Int>.none"),
+            field_access(
+                Expr::GenericType {
+                    name: Name::new("Optional"),
+                    args: vec![TypeName::new("Int")],
+                },
+                "none"
+            )
+        );
+        assert_eq!(
+            parse_expr("Box<Int> { value: 1 }"),
+            Expr::Construct {
+                ty: int_box(),
+                fields: vec![FieldValue {
+                    name: "value".to_string(),
+                    value: Expr::Int(1),
+                }],
+            }
+        );
+        // Without a `.` or `{` after the `>`, they're comparisons.
+        assert_eq!(parse_expr("a < b"), *bin(var("a"), BinOp::Lt, var("b")));
+        assert_eq!(
+            parse_expr("f(a < b, c > d)"),
+            *call(
+                "f",
+                vec![
+                    arg(None, *bin(var("a"), BinOp::Lt, var("b"))),
+                    arg(None, *bin(var("c"), BinOp::Gt, var("d"))),
+                ]
+            )
+        );
+        assert_eq!(
+            parse_body("if a < b {}"),
+            Ok(vec![if_(*bin(var("a"), BinOp::Lt, var("b")), vec![], None)])
+        );
+    }
+
+    #[test]
     fn parses_tuple_values() {
         assert_eq!(parse_expr("()"), Expr::Tuple(vec![]));
         assert_eq!(
@@ -1024,6 +1198,17 @@ mod tests {
         );
         assert_eq!(pattern("()"), Pattern::Tuple(vec![]));
         assert_eq!(
+            pattern("Optional<Int>.none"),
+            Pattern::Option {
+                ty: TypeName::Generic {
+                    name: Name::new("Optional"),
+                    args: vec![TypeName::new("Int")],
+                },
+                option: "none".to_string(),
+                value: None,
+            }
+        );
+        assert_eq!(
             pattern("(x: 0, y: let y, _)"),
             Pattern::Tuple(vec![
                 element(
@@ -1040,13 +1225,13 @@ mod tests {
         assert_eq!(
             pattern("Shape.pair((left: Shape.empty, right: _))"),
             Pattern::Option {
-                ty: Name::new("Shape"),
+                ty: TypeName::new("Shape"),
                 option: "pair".to_string(),
                 value: Some(Box::new(Pattern::Tuple(vec![
                     element(
                         Some("left"),
                         Pattern::Option {
-                            ty: Name::new("Shape"),
+                            ty: TypeName::new("Shape"),
                             option: "empty".to_string(),
                             value: None,
                         }
@@ -2033,6 +2218,7 @@ mod tests {
     fn group_(name: &str, fields: Vec<Field>) -> Stmt {
         Stmt::Group {
             name: name.to_string(),
+            params: vec![],
             fields,
         }
     }
@@ -2167,6 +2353,7 @@ mod tests {
     fn choice_(name: &str, options: Vec<ChoiceOption>) -> Stmt {
         Stmt::Choice {
             name: name.to_string(),
+            params: vec![],
             options,
         }
     }
@@ -2298,7 +2485,7 @@ mod tests {
     fn match_option(ty: &str, name: &str, binding: Option<&str>, body: Vec<Stmt>) -> MatchArm {
         MatchArm {
             pattern: Pattern::Option {
-                ty: Name::new(ty),
+                ty: TypeName::new(ty),
                 option: name.to_string(),
                 value: binding.map(|binding| Box::new(Pattern::Binding(binding.to_string()))),
             },
@@ -2368,7 +2555,10 @@ mod tests {
                 arms: vec![
                     MatchArm {
                         pattern: Pattern::Option {
-                            ty: qualified(ModulePath::Named("other".to_string()), "Shape"),
+                            ty: TypeName::Named(qualified(
+                                ModulePath::Named("other".to_string()),
+                                "Shape",
+                            )),
                             option: "circle".to_string(),
                             value: Some(Box::new(Pattern::Binding("r".to_string()))),
                         },
@@ -2707,7 +2897,10 @@ mod tests {
     }
 
     fn construct(ty: Name, fields: Vec<FieldValue>) -> Expr {
-        Expr::Construct { ty, fields }
+        Expr::Construct {
+            ty: TypeName::Named(ty),
+            fields,
+        }
     }
 
     #[test]

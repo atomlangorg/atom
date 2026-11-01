@@ -339,6 +339,28 @@ pub enum CheckError {
     /// An `impl` without a trait has an alias, which only a trait can
     /// declare.
     ImplAliasWithoutTrait(String),
+    /// A generic type was used without its arguments.
+    GenericArgsNeeded(String),
+    /// A type that isn't generic was given generic arguments.
+    NotGeneric(String),
+    /// A generic type was given the wrong number of arguments.
+    WrongGenericCount {
+        ty: String,
+        expected: usize,
+        found: usize,
+    },
+    /// A generic type's name was used without arguments where they can't be
+    /// inferred.
+    CannotInferGeneric(String),
+    /// `Self.T` was used outside the `impl` of a generic type.
+    SelfParamOutsideGeneric(String),
+    /// `Self.T` names a parameter the `impl`'s generic type doesn't have.
+    UnknownSelfParam { ty: Type, param: String },
+    /// A generic type was given arguments nested too deeply, which means a
+    /// type uses itself with ever larger arguments.
+    GenericTooDeep(String),
+    /// A generic type was declared inside a function.
+    GenericInFunction(String),
     /// `Self` or one of a trait's aliases was used in a tuple type in the
     /// trait's signatures.
     TraitTypeInTuple(String),
@@ -701,9 +723,46 @@ impl fmt::Display for CheckError {
                 f,
                 "`alias {name}` can only be given in an `impl` with a trait that declares it"
             ),
+            Self::GenericArgsNeeded(name) => write!(
+                f,
+                "`{name}` is generic, so it needs arguments, as in `{name}<...>`"
+            ),
+            Self::NotGeneric(name) => {
+                write!(f, "`{name}` isn't generic, so it can't be given arguments")
+            }
+            Self::WrongGenericCount {
+                ty,
+                expected,
+                found,
+            } => {
+                let s = if *expected == 1 { "" } else { "s" };
+                write!(
+                    f,
+                    "`{ty}` has {expected} generic parameter{s}, but was given {found}"
+                )
+            }
+            Self::CannotInferGeneric(name) => write!(
+                f,
+                "the arguments of `{name}` can't be inferred here, so they must be given, as in `{name}<...>`"
+            ),
+            Self::SelfParamOutsideGeneric(param) => write!(
+                f,
+                "`Self.{param}` can only be used in the `impl` of a generic type"
+            ),
+            Self::UnknownSelfParam { ty, param } => {
+                write!(f, "`{ty}` has no generic parameter `{param}`")
+            }
+            Self::GenericTooDeep(ty) => write!(
+                f,
+                "`{ty}` nests generic types too deeply, which usually means a generic type uses itself with different arguments"
+            ),
+            Self::GenericInFunction(name) => write!(
+                f,
+                "`{name}` can't be generic, since only types at the top level can be"
+            ),
             Self::TraitTypeInTuple(name) => write!(
                 f,
-                "`{name}` can't be used in a tuple type in a trait's signatures, since it's a different type in each `impl`"
+                "`{name}` can't be used inside another type in a trait's signatures, since it's a different type in each `impl`"
             ),
             Self::InferredAliasUsed(name) => write!(
                 f,
@@ -750,6 +809,14 @@ pub fn check(modules: &[Module]) -> Result<ir::Program, Vec<ModuleError>> {
         checker.add_module(None, module);
     }
     checker.check_modules();
+    // Each generic type is checked once on its own, so the types made from it
+    // shouldn't have errors of their own. If one does anyway, it's reported,
+    // rather than being lost.
+    if checker.errors.is_empty()
+        && let Some(error) = checker.quietened.first()
+    {
+        checker.errors.push(error.clone());
+    }
 
     if checker.errors.is_empty() {
         Ok(checker.program())
@@ -833,6 +900,22 @@ enum Binding {
     Alias(usize),
     /// An index into `Checker::traits`.
     Trait(usize),
+    /// A generic group or choice, as an index into `Checker::templates`,
+    /// which is a different type for each set of arguments it's given.
+    Generic(usize),
+}
+
+/// A generic group or choice, which types are made from by giving its
+/// parameters arguments, as in `Optional<Int>`.
+struct Template<'a> {
+    name: &'a str,
+    module: usize,
+    params: &'a [String],
+    /// The group or choice declaring it.
+    stmt: &'a Stmt,
+    /// Its `impl`s, with the modules they're in, whose functions are
+    /// declared for each type made from it.
+    impls: Vec<(usize, &'a Stmt)>,
 }
 
 /// A trait, whose functions an `impl` with it must implement exactly.
@@ -1075,6 +1158,10 @@ enum Pending<'a> {
         /// The `impl` aliases its body can use, as an index into
         /// `Checker::impl_aliases`, if it's in an `impl` that gives any.
         aliases: Option<usize>,
+        /// Whether its errors aren't reported, as for the functions of the
+        /// types made from a generic type, whose `impl` is checked once on
+        /// its own.
+        quiet: bool,
     },
 }
 
@@ -1110,6 +1197,31 @@ struct Checker<'a> {
     current_impl_aliases: Option<usize>,
     functions: Vec<Signature<'a>>,
     traits: Vec<TraitInfo<'a>>,
+    templates: Vec<Template<'a>>,
+    /// For each type made from a generic type, by `id`, the index in
+    /// `templates` of what it's made from, and its arguments.
+    instances: HashMap<usize, (usize, Vec<Type>)>,
+    /// The `id` of each type made from a generic type, by the index in
+    /// `templates` of what it's made from and its arguments' `id`s.
+    instance_ids: HashMap<(usize, Vec<usize>), usize>,
+    /// The types made from generic types with stand-ins for their parameters,
+    /// which check them once, so their errors are reported.
+    checked_instances: HashSet<usize>,
+    /// While a type made from a generic type is defined, the index in
+    /// `templates` of what it's made from, and its arguments, which its
+    /// parameters stand for.
+    type_params: Option<(usize, Vec<Type>)>,
+    /// Whether every `impl` has been found, so the functions of a type made
+    /// from a generic type can be declared once it's made.
+    methods_ready: bool,
+    /// The types made from generic types before `methods_ready`, whose
+    /// functions are declared once it is.
+    undeclared_instances: Vec<usize>,
+    /// The values and function bodies still to check, with their modules.
+    pending: Vec<(usize, Pending<'a>)>,
+    /// The errors that weren't reported, from checking the types made from
+    /// generic types, which are checked once on their own.
+    quietened: Vec<ModuleError>,
     /// Which types implement which traits, as a type `id` and an index into
     /// `traits`.
     implementations: HashSet<(usize, usize)>,
@@ -1213,6 +1325,11 @@ impl<'a> Checker<'a> {
             self.module = module;
             for stmt in self.modules[module].program {
                 match stmt {
+                    Stmt::Group { name, params, .. } | Stmt::Choice { name, params, .. }
+                        if !params.is_empty() =>
+                    {
+                        self.declare_template(name, params, stmt);
+                    }
                     Stmt::Group { name, .. }
                     | Stmt::Choice { name, .. }
                     | Stmt::Primitive { name } => {
@@ -1235,6 +1352,13 @@ impl<'a> Checker<'a> {
             self.module = module;
             self.define_type(id, stmt);
         }
+        // Each generic type is checked once, with stand-ins for its
+        // parameters, so its errors are reported once.
+        let mut checked = vec![];
+        for template in 0..self.templates.len() {
+            self.module = self.templates[template].module;
+            checked.extend(self.check_template(template));
+        }
         for index in 0..self.traits.len() {
             self.define_trait(index);
         }
@@ -1244,10 +1368,13 @@ impl<'a> Checker<'a> {
                 self.check_not_recursive(id, name);
             }
         }
+        for (module, ty) in checked {
+            self.module = module;
+            self.check_not_recursive(ty.id, &ty.name);
+        }
 
         // Functions, methods and values come after groups, since their types
         // can be groups.
-        let mut pending = vec![];
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
@@ -1255,7 +1382,7 @@ impl<'a> Checker<'a> {
                     Stmt::Fn(function) => {
                         let index =
                             self.declare_fn(&function.name, &function.params, &function.ret);
-                        pending.push((
+                        self.pending.push((
                             module,
                             Pending::Fn {
                                 index,
@@ -1263,6 +1390,7 @@ impl<'a> Checker<'a> {
                                 body: &function.body,
                                 kind: FnKind::Function,
                                 aliases: None,
+                                quiet: false,
                             },
                         ));
                     }
@@ -1276,89 +1404,23 @@ impl<'a> Checker<'a> {
                         aliases,
                         functions,
                     } => {
+                        // A generic type's `impl` is for every type made from
+                        // it, so its functions are declared for each of them.
+                        if let Ok(Binding::Generic(template)) = self.lookup(ty) {
+                            self.templates[template].impls.push((module, stmt));
+                            continue;
+                        }
                         let self_ty = self.resolve_named_type(ty);
-                        let trait_index = with.as_ref().and_then(|with| self.resolve_trait(with));
-                        if with.is_none() {
-                            for alias in aliases {
-                                let name = alias.name.clone();
-                                self.error(CheckError::ImplAliasWithoutTrait(name));
-                            }
-                        }
-                        // Signatures can use `Self` and the `impl`'s aliases,
-                        // just like bodies.
-                        let outer_impl_type = self.impl_type.replace(self_ty.clone());
-                        let impl_aliases = self.define_impl_aliases(aliases, trait_index);
-                        let mut indexes = vec![];
-                        for ImplFunction {
-                            is_static,
-                            is_primitive,
-                            function,
-                        } in functions
-                        {
-                            let name = format!("{}.{}", ty.name, function.name);
-                            let full_name = self.full_name(&name);
-                            let index = self.declare_method(
-                                self_ty.as_ref(),
-                                (&function.name, &function.params, &function.ret),
-                                *is_static,
-                                full_name,
-                            );
-                            indexes.push(index);
-                            let kind = if *is_static {
-                                FnKind::Static(self_ty.clone())
-                            } else {
-                                FnKind::Method(self_ty.clone())
-                            };
-                            if *is_primitive {
-                                self.define_primitive_fn(index, &name, kind);
-                                continue;
-                            }
-                            pending.push((
-                                module,
-                                Pending::Fn {
-                                    index,
-                                    name: &function.name,
-                                    body: &function.body,
-                                    kind,
-                                    aliases: impl_aliases,
-                                },
-                            ));
-                        }
-                        self.impl_type = outer_impl_type;
-                        self.current_impl_aliases = None;
-                        if let Some((with, (trait_index, aliases))) =
-                            with.as_ref().zip(trait_index.zip(impl_aliases))
-                        {
-                            let implemented: Vec<_> = functions.iter().zip(&indexes).collect();
-                            self.infer_impl_aliases(ty, with, trait_index, aliases, &implemented);
-                        }
-                        if let Some(trait_index) = trait_index {
-                            let defaults = self.declare_defaults(
-                                ty,
-                                self_ty.as_ref(),
-                                trait_index,
-                                functions,
-                                impl_aliases,
-                            );
-                            pending.extend(defaults.into_iter().map(|default| (module, default)));
-                        }
-                        if let Some((with, (trait_index, self_ty))) =
-                            with.as_ref().zip(trait_index.zip(self_ty))
-                        {
-                            self.implementations.insert((self_ty.id, trait_index));
-                            let implemented = functions.iter().zip(indexes).collect();
-                            self.check_implements(
-                                Implementation {
-                                    ty,
-                                    self_ty: &self_ty,
-                                    trait_name: with,
-                                    index: trait_index,
-                                    aliases,
-                                    alias_types: impl_aliases,
-                                },
-                                implemented,
-                            );
-                        }
+                        let declared = self.declare_impl(
+                            ty,
+                            self_ty,
+                            with.as_ref(),
+                            aliases,
+                            functions,
+                            false,
+                        );
+                        self.pending
+                            .extend(declared.into_iter().map(|pending| (module, pending)));
                     }
                     Stmt::Decl {
                         name, ty, value, ..
@@ -1373,7 +1435,7 @@ impl<'a> Checker<'a> {
                         });
                         let index = self.globals.len() - 1;
                         self.declare(name, Binding::Global(index));
-                        pending.push((module, Pending::Global(index)));
+                        self.pending.push((module, Pending::Global(index)));
                     }
                     Stmt::Use(_)
                     | Stmt::Group { .. }
@@ -1386,21 +1448,147 @@ impl<'a> Checker<'a> {
             }
         }
 
-        for (module, pending) in pending {
-            self.module = module;
-            match pending {
-                Pending::Global(index) => {
-                    self.global_type(index);
+        // The types made from generic types so far can now have their
+        // functions declared, and later ones have them declared straight away.
+        self.methods_ready = true;
+        for id in std::mem::take(&mut self.undeclared_instances) {
+            self.declare_instance_methods(id);
+        }
+
+        // Checking a body can make more types from generic types, whose
+        // functions' bodies are then checked too.
+        loop {
+            let pending = std::mem::take(&mut self.pending);
+            if pending.is_empty() {
+                break;
+            }
+            for (module, pending) in pending {
+                self.module = module;
+                match pending {
+                    Pending::Global(index) => {
+                        self.global_type(index);
+                    }
+                    Pending::Fn {
+                        index,
+                        name,
+                        body,
+                        kind,
+                        aliases,
+                        quiet,
+                    } => {
+                        let errors = self.errors.len();
+                        self.fn_body(index, name, body, kind, aliases);
+                        if quiet {
+                            self.quieten(errors);
+                        }
+                    }
                 }
-                Pending::Fn {
-                    index,
-                    name,
-                    body,
-                    kind,
-                    aliases,
-                } => self.fn_body(index, name, body, kind, aliases),
             }
         }
+    }
+
+    /// Declares the functions of `impl ty`, whose type is `self_ty`, `with`
+    /// a trait if given, returning their bodies to check. Its errors are
+    /// reported unless it's `quiet`, which it is for the types made from a
+    /// generic type, whose `impl` is checked once on its own.
+    fn declare_impl(
+        &mut self,
+        ty: &'a Name,
+        self_ty: Option<Type>,
+        with: Option<&'a Name>,
+        aliases: &'a [ImplAlias],
+        functions: &'a [ImplFunction],
+        quiet: bool,
+    ) -> Vec<Pending<'a>> {
+        let errors = self.errors.len();
+        // A type made from a generic type is named with its arguments, so
+        // each one's functions have their own names.
+        let type_name = match &self_ty {
+            Some(self_ty) if self.instances.contains_key(&self_ty.id) => self_ty.name.clone(),
+            _ => ty.name.clone(),
+        };
+        let mut pending = vec![];
+        let trait_index = with.and_then(|with| self.resolve_trait(with));
+        if with.is_none() {
+            for alias in aliases {
+                let name = alias.name.clone();
+                self.error(CheckError::ImplAliasWithoutTrait(name));
+            }
+        }
+        // Signatures can use `Self` and the `impl`'s aliases,
+        // just like bodies.
+        let outer_impl_type = self.impl_type.replace(self_ty.clone());
+        let impl_aliases = self.define_impl_aliases(aliases, trait_index);
+        let mut indexes = vec![];
+        for ImplFunction {
+            is_static,
+            is_primitive,
+            function,
+        } in functions
+        {
+            let name = format!("{type_name}.{}", function.name);
+            let full_name = self.full_name(&name);
+            let index = self.declare_method(
+                self_ty.as_ref(),
+                (&function.name, &function.params, &function.ret),
+                *is_static,
+                full_name,
+            );
+            indexes.push(index);
+            let kind = if *is_static {
+                FnKind::Static(self_ty.clone())
+            } else {
+                FnKind::Method(self_ty.clone())
+            };
+            if *is_primitive {
+                self.define_primitive_fn(index, &name, kind);
+                continue;
+            }
+            pending.push(Pending::Fn {
+                index,
+                name: &function.name,
+                body: &function.body,
+                kind,
+                aliases: impl_aliases,
+                quiet,
+            });
+        }
+        self.impl_type = outer_impl_type;
+        self.current_impl_aliases = None;
+        if let Some((with, (trait_index, aliases))) = with.zip(trait_index.zip(impl_aliases)) {
+            let implemented: Vec<_> = functions.iter().zip(&indexes).collect();
+            self.infer_impl_aliases(ty, with, trait_index, aliases, &implemented);
+        }
+        if let Some(trait_index) = trait_index {
+            let defaults = self.declare_defaults(
+                &type_name,
+                self_ty.as_ref(),
+                trait_index,
+                functions,
+                impl_aliases,
+                quiet,
+            );
+            pending.extend(defaults);
+        }
+        if let Some((with, (trait_index, self_ty))) = with.zip(trait_index.zip(self_ty)) {
+            self.implementations.insert((self_ty.id, trait_index));
+            let implemented = functions.iter().zip(indexes).collect();
+            self.check_implements(
+                Implementation {
+                    ty,
+                    self_ty: &self_ty,
+                    trait_name: with,
+                    index: trait_index,
+                    aliases,
+                    alias_types: impl_aliases,
+                },
+                implemented,
+            );
+        }
+        if quiet {
+            self.quieten(errors);
+        }
+        pending
     }
 
     /// Finds the modules imported by the current module. Modules in the
@@ -1597,6 +1785,16 @@ impl<'a> Checker<'a> {
                     .ok_or(LookupError::Undeclared)?
             }
             None => {
+                // While a type made from a generic type is defined, its
+                // parameters stand for its arguments.
+                if let Some((template, args)) = &self.type_params
+                    && let Some(index) = self.templates[*template]
+                        .params
+                        .iter()
+                        .position(|param| *param == name.name)
+                {
+                    return Ok(Binding::Type(args[index].clone()));
+                }
                 let local = self
                     .scopes
                     .iter()
@@ -1712,6 +1910,8 @@ impl<'a> Checker<'a> {
     fn find_type(&mut self, ty: &TypeName) -> Option<Type> {
         match ty {
             TypeName::Named(name) => self.find_named_type(name),
+            TypeName::Generic { name, args } => self.generic_type(name, args, false),
+            TypeName::SelfParam(param) => self.self_param(param, false),
             TypeName::Tuple(elements) => {
                 let elements = elements
                     .iter()
@@ -1741,6 +1941,8 @@ impl<'a> Checker<'a> {
     fn resolve_type(&mut self, ty: &TypeName) -> Option<Type> {
         match ty {
             TypeName::Named(name) => self.resolve_named_type(name),
+            TypeName::Generic { name, args } => self.generic_type(name, args, true),
+            TypeName::SelfParam(param) => self.self_param(param, true),
             TypeName::Tuple(elements) => {
                 // Every element is resolved, so each one's errors are found.
                 let elements: Vec<_> = elements
@@ -1783,10 +1985,315 @@ impl<'a> Checker<'a> {
         Type { id, name }
     }
 
+    /// The type made from the generic type called `name` with `args`,
+    /// reporting errors if `report` is set.
+    fn generic_type(&mut self, name: &Name, args: &[TypeName], report: bool) -> Option<Type> {
+        let template = match self.lookup(name) {
+            Ok(Binding::Generic(template)) => template,
+            Ok(Binding::Type(_)) if report => {
+                self.error(CheckError::NotGeneric(name.to_string()));
+                return None;
+            }
+            _ if !report => return None,
+            _ => {
+                self.resolve_named_type(name);
+                return None;
+            }
+        };
+        let expected = self.templates[template].params.len();
+        if args.len() != expected {
+            if report {
+                self.error(CheckError::WrongGenericCount {
+                    ty: name.to_string(),
+                    expected,
+                    found: args.len(),
+                });
+            }
+            return None;
+        }
+        // Every argument is resolved, so each one's errors are found.
+        let args: Vec<_> = args
+            .iter()
+            .map(|arg| {
+                if report {
+                    self.resolve_type(arg)
+                } else {
+                    self.find_type(arg)
+                }
+            })
+            .collect();
+        let args = args.into_iter().collect::<Option<_>>()?;
+        self.instance(template, args, true)
+    }
+
+    /// What `Self.param` stands for in the `impl` of a type made from a
+    /// generic type, reporting errors if `report` is set.
+    fn self_param(&mut self, param: &str, report: bool) -> Option<Type> {
+        let impl_type = match &self.impl_type {
+            Some(Some(ty)) => ty.clone(),
+            // The `impl`'s type is unknown, which has been reported.
+            Some(None) => return None,
+            None => {
+                if report {
+                    self.error(CheckError::SelfParamOutsideGeneric(param.to_string()));
+                }
+                return None;
+            }
+        };
+        let Some((template, args)) = self.instances.get(&impl_type.id) else {
+            if report {
+                self.error(CheckError::SelfParamOutsideGeneric(param.to_string()));
+            }
+            return None;
+        };
+        match self.templates[*template]
+            .params
+            .iter()
+            .position(|found| found == param)
+        {
+            Some(index) => Some(args[index].clone()),
+            None => {
+                if report {
+                    self.error(CheckError::UnknownSelfParam {
+                        ty: impl_type,
+                        param: param.to_string(),
+                    });
+                }
+                None
+            }
+        }
+    }
+
+    /// The type `type_name` refers to where a value of one of `contexts` is
+    /// expected or matched, reporting errors if `report` is set. A generic
+    /// type's name without arguments refers to the first of `contexts` that's
+    /// made from it, since that's what its arguments must be.
+    fn type_in_context(
+        &mut self,
+        type_name: &TypeName,
+        contexts: &[Option<&Type>],
+        report: bool,
+    ) -> Option<Type> {
+        if let TypeName::Named(name) = type_name
+            && let Ok(Binding::Generic(template)) = self.lookup(name)
+        {
+            let found = contexts.iter().flatten().find(|ty| {
+                self.instances
+                    .get(&ty.id)
+                    .is_some_and(|(found, _)| *found == template)
+            });
+            if found.is_none() && report {
+                self.error(CheckError::CannotInferGeneric(name.to_string()));
+            }
+            return found.map(|&ty| ty.clone());
+        }
+        if report {
+            self.resolve_type(type_name)
+        } else {
+            self.find_type(type_name)
+        }
+    }
+
+    /// Declares the generic group or choice called `name`, with `params`,
+    /// which `stmt` declares.
+    fn declare_template(&mut self, name: &'a str, params: &'a [String], stmt: &'a Stmt) {
+        let mut seen = HashSet::new();
+        for param in params {
+            if !seen.insert(param) {
+                self.error(CheckError::Redeclared(param.clone()));
+            }
+        }
+        self.templates.push(Template {
+            name,
+            module: self.module,
+            params,
+            stmt,
+            impls: vec![],
+        });
+        self.declare(name, Binding::Generic(self.templates.len() - 1));
+    }
+
+    /// Checks the generic type at `template` in `templates` once, by making
+    /// a type from it with a stand-in for each parameter, which can't be
+    /// used as anything else. Returns that type, with the module it's in.
+    fn check_template(&mut self, template: usize) -> Option<(usize, Type)> {
+        let Template { module, params, .. } = self.templates[template];
+        let stand_ins = params
+            .iter()
+            .map(|param| {
+                let id = self.group_fields.len();
+                self.group_fields.push(vec![]);
+                self.group_modules.push(module);
+                self.type_names.push(param.clone());
+                Type {
+                    id,
+                    name: param.clone(),
+                }
+            })
+            .collect();
+        let ty = self.instance(template, stand_ins, false)?;
+        self.checked_instances.insert(ty.id);
+        Some((module, ty))
+    }
+
+    /// The type made from the generic type at `template` in `templates` with
+    /// `args`, which is made the first time it's needed. Its errors aren't
+    /// reported if it's `quiet`, since each generic type is checked once on
+    /// its own.
+    fn instance(&mut self, template: usize, args: Vec<Type>, quiet: bool) -> Option<Type> {
+        // Arguments nested deeper than this almost certainly mean a type uses
+        // itself with ever larger arguments, which would never end.
+        const MAX_DEPTH: usize = 32;
+
+        let shown: Vec<_> = args.iter().map(|arg| arg.name.clone()).collect();
+        let name = format!("{}<{}>", self.templates[template].name, shown.join(", "));
+        let key = (template, args.iter().map(|arg| arg.id).collect());
+        if let Some(&id) = self.instance_ids.get(&key) {
+            return Some(Type { id, name });
+        }
+        let depth = 1 + args
+            .iter()
+            .map(|arg| self.type_depth(arg.id))
+            .max()
+            .unwrap_or(0);
+        if depth > MAX_DEPTH {
+            self.error(CheckError::GenericTooDeep(name));
+            return None;
+        }
+
+        let Template { module, stmt, .. } = self.templates[template];
+        let id = self.group_fields.len();
+        self.group_fields.push(vec![]);
+        self.group_modules.push(module);
+        self.type_names
+            .push(format!("{}::{name}", self.modules[module].display));
+        self.instance_ids.insert(key, id);
+        self.instances.insert(id, (template, args.clone()));
+
+        // Defined like the generic type, in its module, with its parameters
+        // standing for `args`.
+        let errors = self.errors.len();
+        self.at_top_level(module, Some((template, args)), |checker| match stmt {
+            Stmt::Group { fields, .. } => checker.define_group(id, &name, fields),
+            Stmt::Choice { options, .. } => checker.define_choice(id, &name, options),
+            _ => unreachable!("only groups and choices are generic"),
+        });
+        if quiet {
+            self.quieten(errors);
+        }
+        if self.methods_ready {
+            self.declare_instance_methods(id);
+        } else {
+            self.undeclared_instances.push(id);
+        }
+        Some(Type { id, name })
+    }
+
+    /// How deeply the type with `id` nests types made from generic types and
+    /// tuples, which is 0 for other types.
+    fn type_depth(&self, id: usize) -> usize {
+        let parts: Vec<_> = match (self.instances.get(&id), self.tuples.get(&id)) {
+            (Some((_, args)), _) => args.iter().map(|arg| arg.id).collect(),
+            (None, Some(elements)) => elements.iter().map(|element| element.ty.id).collect(),
+            (None, None) => return 0,
+        };
+        1 + parts
+            .into_iter()
+            .map(|part| self.type_depth(part))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Declares the functions of the generic type's `impl`s for the type
+    /// with `id` made from it, queueing their bodies to be checked.
+    fn declare_instance_methods(&mut self, id: usize) {
+        let (template, args) = &self.instances[&id];
+        let shown: Vec<_> = args.iter().map(|arg| arg.name.clone()).collect();
+        let template = *template;
+        let ty = Type {
+            id,
+            name: format!("{}<{}>", self.templates[template].name, shown.join(", ")),
+        };
+        let quiet = !self.checked_instances.contains(&id);
+        for (module, stmt) in self.templates[template].impls.clone() {
+            let Stmt::Impl {
+                ty: type_name,
+                with,
+                aliases,
+                functions,
+            } = stmt
+            else {
+                unreachable!("only `impl`s are recorded");
+            };
+            let declared = self.at_top_level(module, None, |checker| {
+                checker.declare_impl(
+                    type_name,
+                    Some(ty.clone()),
+                    with.as_ref(),
+                    aliases,
+                    functions,
+                    quiet,
+                )
+            });
+            self.pending
+                .extend(declared.into_iter().map(|pending| (module, pending)));
+        }
+    }
+
+    /// Runs `check` as if it were at the top level of `module`, outside any
+    /// function or `impl`, with `type_params` as `Checker::type_params`.
+    /// Types made from generic types are defined like this, wherever they're
+    /// first needed.
+    fn at_top_level<T>(
+        &mut self,
+        module: usize,
+        type_params: Option<(usize, Vec<Type>)>,
+        check: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let module = std::mem::replace(&mut self.module, module);
+        let scopes = std::mem::take(&mut self.scopes);
+        let fn_scope_start = std::mem::replace(&mut self.fn_scope_start, 0);
+        let current_fn = self.current_fn.take();
+        let impl_type = self.impl_type.take();
+        let impl_aliases = self.current_impl_aliases.take();
+        let type_params = std::mem::replace(&mut self.type_params, type_params);
+        let checked = check(self);
+        self.module = module;
+        self.scopes = scopes;
+        self.fn_scope_start = fn_scope_start;
+        self.current_fn = current_fn;
+        self.impl_type = impl_type;
+        self.current_impl_aliases = impl_aliases;
+        self.type_params = type_params;
+        checked
+    }
+
+    /// Stops reporting the errors after the first `errors`, keeping them in
+    /// `quietened`. A generic type nested too deeply is still reported, since
+    /// it's only found while making the types nested in it, but only the
+    /// first time, since the types around it are too deep for the same reason.
+    fn quieten(&mut self, errors: usize) {
+        for error in self.errors.split_off(errors) {
+            if !matches!(error.error, CheckError::GenericTooDeep(_)) {
+                self.quietened.push(error);
+            } else if !self
+                .errors
+                .iter()
+                .any(|found| matches!(found.error, CheckError::GenericTooDeep(_)))
+            {
+                self.errors.push(error);
+            }
+        }
+    }
+
     /// Finds the type called `name`, reporting an error if it can't be found.
     fn resolve_named_type(&mut self, name: &Name) -> Option<Type> {
         match self.lookup(name) {
             Ok(Binding::Type(ty)) => Some(ty),
+            Ok(Binding::Generic(_)) => {
+                self.error(CheckError::GenericArgsNeeded(name.to_string()));
+                None
+            }
             // A value from outside the function is still not a type.
             Ok(_) | Err(LookupError::Captured) => {
                 self.error(CheckError::NotAType(name.to_string()));
@@ -2288,11 +2795,12 @@ impl<'a> Checker<'a> {
     /// they can be used like its own functions.
     fn declare_defaults(
         &mut self,
-        ty: &Name,
+        type_name: &str,
         self_ty: Option<&Type>,
         trait_index: usize,
         functions: &'a [ImplFunction],
         aliases: Option<usize>,
+        quiet: bool,
     ) -> Vec<Pending<'a>> {
         let is_implemented = |declared: &TraitFunction| {
             functions
@@ -2313,7 +2821,7 @@ impl<'a> Checker<'a> {
             let Some(body) = &declared.body else {
                 continue;
             };
-            let name = format!("{}.{}", ty.name, declared.name);
+            let name = format!("{type_name}.{}", declared.name);
             let index = self.declare_method(
                 self_ty,
                 (&declared.name, &declared.params, &declared.ret),
@@ -2332,6 +2840,7 @@ impl<'a> Checker<'a> {
                     body,
                     kind,
                     aliases,
+                    quiet,
                 });
             }
         }
@@ -2573,8 +3082,8 @@ impl<'a> Checker<'a> {
     /// `id`.
     fn define_type(&mut self, id: usize, stmt: &'a Stmt) {
         match stmt {
-            Stmt::Group { name, fields } => self.define_group(id, name, fields),
-            Stmt::Choice { name, options } => self.define_choice(id, name, options),
+            Stmt::Group { name, fields, .. } => self.define_group(id, name, fields),
+            Stmt::Choice { name, options, .. } => self.define_choice(id, name, options),
             Stmt::Primitive { name } => self.define_primitive(id, name),
             _ => unreachable!("only groups, choices and primitives declare types"),
         }
@@ -2749,7 +3258,7 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Function(_)) => {
                         self.error(CheckError::NotAValue(name.clone()));
                     }
-                    Ok(Binding::Type(_) | Binding::Alias(_)) => {
+                    Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
                         self.error(CheckError::TypeAsValue(name.clone()));
                     }
                     Ok(Binding::Trait(_)) => {
@@ -2797,6 +3306,12 @@ impl<'a> Checker<'a> {
                     FnKind::Function,
                     None,
                 );
+                None
+            }
+            Stmt::Group { name, params, .. } | Stmt::Choice { name, params, .. }
+                if !params.is_empty() =>
+            {
+                self.error(CheckError::GenericInFunction(name.clone()));
                 None
             }
             Stmt::Group { name, .. } | Stmt::Choice { name, .. } => {
@@ -3046,10 +3561,12 @@ impl<'a> Checker<'a> {
     fn option_pattern(
         &mut self,
         ty: &Type,
-        type_name: &Name,
+        type_name: &TypeName,
         option: &str,
     ) -> Option<(usize, Option<Type>)> {
-        let found = self.resolve_named_type(type_name)?;
+        // A generic type's arguments can be left out, since they're the
+        // matched value's.
+        let found = self.type_in_context(type_name, &[Some(ty)], true)?;
         if found != *ty {
             self.error(CheckError::WrongPatternType {
                 expected: ty.clone(),
@@ -3349,7 +3866,7 @@ impl<'a> Checker<'a> {
                     self.error(CheckError::NotAValue(name.to_string()));
                     Typed::UNKNOWN
                 }
-                Ok(Binding::Type(_) | Binding::Alias(_)) => {
+                Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
                     self.error(CheckError::TypeAsValue(name.to_string()));
                     Typed::UNKNOWN
                 }
@@ -3379,7 +3896,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
             Expr::Call { callee, args } => self.call(callee, args),
-            Expr::Construct { ty, fields } => self.construct(ty, fields),
+            Expr::Construct { ty, fields } => self.construct(ty, fields, expected),
             Expr::Paren(value) => match expected.and_then(|ty| self.tuples.get(&ty.id)) {
                 // A tuple with one unlabelled element is built from a value in
                 // brackets, as in `(1)`.
@@ -3397,8 +3914,12 @@ impl<'a> Checker<'a> {
                 receiver,
                 method,
                 args,
-            } => self.method_call(receiver, method, args),
-            Expr::Field { receiver, field } => self.field(receiver, field),
+            } => self.method_call(receiver, method, args, expected),
+            Expr::Field { receiver, field } => self.field(receiver, field, expected),
+            Expr::GenericType { name, .. } => {
+                self.error(CheckError::TypeAsValue(name.to_string()));
+                Typed::UNKNOWN
+            }
             Expr::SelfValue => {
                 let name = Name::new("self");
                 match self.lookup(&name) {
@@ -3839,10 +4360,27 @@ impl<'a> Checker<'a> {
     /// by `.member`. A type's name is the type itself, for its static
     /// functions. A module's name gets its own error, since `::` was probably
     /// meant.
-    fn receiver(&mut self, receiver: &Expr, member: &str) -> Option<Receiver> {
+    ///
+    /// A generic type's name can leave out its arguments when the value is
+    /// used as `expected`, if that's made from it, as in `Optional.none`.
+    fn receiver(
+        &mut self,
+        receiver: &Expr,
+        member: &str,
+        expected: Option<&Type>,
+    ) -> Option<Receiver> {
+        if let Expr::GenericType { name, args } = receiver {
+            let ty = self.generic_type(name, args, true)?;
+            return Some(Receiver::Type(ty));
+        }
         if let Expr::Var(name) = receiver {
             match self.lookup(name) {
                 Ok(Binding::Type(ty)) => return Some(Receiver::Type(ty)),
+                Ok(Binding::Generic(_)) => {
+                    let type_name = TypeName::Named(name.clone());
+                    let ty = self.type_in_context(&type_name, &[expected], true)?;
+                    return Some(Receiver::Type(ty));
+                }
                 Err(LookupError::Undeclared)
                     if name.module.is_none()
                         && self
@@ -3944,8 +4482,8 @@ impl<'a> Checker<'a> {
 
     /// Checks a field access, returning the field's type, or `None` if it
     /// can't be determined, along with what it compiles to.
-    fn field(&mut self, receiver: &Expr, field: &str) -> Typed {
-        let Some(receiver) = self.receiver(receiver, field) else {
+    fn field(&mut self, receiver: &Expr, field: &str, expected: Option<&Type>) -> Typed {
+        let Some(receiver) = self.receiver(receiver, field, expected) else {
             return Typed::UNKNOWN;
         };
         let error = match receiver {
@@ -4009,12 +4547,18 @@ impl<'a> Checker<'a> {
     /// Checks a call to a method on a value, or a static function on a type,
     /// returning its return type, or `None` if it can't be determined, along
     /// with what it compiles to.
-    fn method_call(&mut self, receiver: &Expr, method: &str, args: &[Arg]) -> Typed {
+    fn method_call(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Arg],
+        expected: Option<&Type>,
+    ) -> Typed {
         // The receiver and arguments are checked first, so their errors come
         // before the call's. What's called is found in between, without
         // reporting errors, so the arguments can take their types from its
         // parameters.
-        let receiver = self.receiver(receiver, method);
+        let receiver = self.receiver(receiver, method, expected);
         let params = match &receiver {
             Some(Receiver::Type(ty)) => match self.option(ty, method) {
                 Some((_, value_ty)) => vec![value_ty],
@@ -4135,11 +4679,21 @@ impl<'a> Checker<'a> {
 
     /// Checks the construction of a group, returning its type, or `None` if
     /// it can't be determined, along with what it compiles to.
-    fn construct(&mut self, type_name: &Name, values: &[FieldValue]) -> Typed {
+    ///
+    /// A generic group's name can leave out its arguments when the group is
+    /// used as `expected`, or is the `impl`'s type, if that's made from it.
+    fn construct(
+        &mut self,
+        type_name: &TypeName,
+        values: &[FieldValue],
+        expected: Option<&Type>,
+    ) -> Typed {
+        let impl_type = self.impl_type.clone().flatten();
+        let contexts = [expected, impl_type.as_ref()];
         // Values are checked first, so their errors come before the group's,
         // but the group is found first, without reporting errors, so they
         // can take their types from its fields.
-        let fields = match self.find_named_type(type_name) {
+        let fields = match self.type_in_context(type_name, &contexts, false) {
             Some(ty) => self.group_fields[ty.id].clone(),
             None => vec![],
         };
@@ -4152,7 +4706,7 @@ impl<'a> Checker<'a> {
         });
         let (found, lowered) = split(typed.collect());
 
-        let Some(ty) = self.resolve_named_type(type_name) else {
+        let Some(ty) = self.type_in_context(type_name, &contexts, true) else {
             return Typed::UNKNOWN;
         };
         let with_error = |ty| Typed {
@@ -4247,7 +4801,8 @@ impl<'a> Checker<'a> {
                 | Binding::Global(_)
                 | Binding::Type(_)
                 | Binding::Alias(_)
-                | Binding::Trait(_),
+                | Binding::Trait(_)
+                | Binding::Generic(_),
             ) => {
                 self.error(CheckError::NotAFunction(callee.to_string()));
                 return Typed::UNKNOWN;
@@ -4433,12 +4988,15 @@ fn trait_names<'b>(
             let is_trait_name = name.name == "Self" || aliases.contains(&name.name);
             Box::new(is_trait_name.then_some(name.name.as_str()).into_iter())
         }
-        TypeName::Named(_) => Box::new(iter::empty()),
+        TypeName::Named(_) | TypeName::SelfParam(_) => Box::new(iter::empty()),
         TypeName::Tuple(elements) => Box::new(
             elements
                 .iter()
                 .flat_map(move |element| trait_names(&element.ty, aliases)),
         ),
+        TypeName::Generic { args, .. } => {
+            Box::new(args.iter().flat_map(move |arg| trait_names(arg, aliases)))
+        }
     }
 }
 
@@ -9749,7 +10307,7 @@ primitive Float"
                 "
             ),
             [
-                "`Self` can't be used in a tuple type in a trait's signatures, since it's a different type in each `impl`",
+                "`Self` can't be used inside another type in a trait's signatures, since it's a different type in each `impl`",
                 "`Node` contains itself",
                 "unknown type `Missing`",
             ]
@@ -9959,6 +10517,260 @@ primitive Float"
                 "`missing` is not declared",
             ]
         );
+    }
+
+    /// Generic types for generics tests.
+    const GENERICS: &str = "
+        choice Optional<T> {
+            none
+            some: T
+        }
+
+        group Box<T> {
+            let value: T
+        }
+
+        impl Box {
+            static fn of(_ value: Self.T) -> Self {
+                return Box { value: value }
+            }
+
+            fn get() -> Self.T {
+                return self.value
+            }
+        }
+        ";
+
+    #[test]
+    fn generic_types_can_be_used_with_any_arguments() {
+        let src = format!(
+            "
+            {GENERICS}
+            group Pair<A, B> {{
+                let first: A
+                let second: B
+            }}
+
+            alias Maybe = Optional<(x: Int, y: Bool)>
+
+            group Holder {{
+                let boxes: Pair<Box<Int>, Optional<Box<Bool>>>
+            }}
+
+            fn f(holder: Holder, maybe: Maybe) -> Int {{
+                let first: Box<Int> = holder.boxes.first
+                let other: Optional<Box<Bool>> = holder.boxes.second
+                match maybe {{
+                    Optional.some((x: let x, y: true)) => {{
+                        return x + first.get()
+                    }}
+                    Optional<(x: Int, y: Bool)>.some(_) => {{}}
+                    Optional.none => {{}}
+                }}
+                return Box<Int>.of(1).value
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn generic_arguments_are_inferred_where_they_are_known() {
+        // From where a value is used, from a pattern's matched value, and in
+        // an `impl`, from `Self`.
+        let src = format!(
+            "
+            {GENERICS}
+            impl Box {{
+                fn rebuilt() -> Self {{
+                    return Box {{ value: self.value }}
+                }}
+            }}
+
+            fn none() -> Optional<Int> {{
+                return Optional.none
+            }}
+
+            fn f(_ value: Optional<Box<Bool>>) -> Box<Int> {{
+                let some: Optional<Int> = Optional.some(1)
+                let boxed: Box<Int> = Box.of(2)
+                match value {{
+                    Optional.some(let found) => {{
+                        let flag: Bool = found.get()
+                    }}
+                    Optional.none => {{}}
+                }}
+                return Box.of(some == none())
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            // `Box.of(some == none())` is a `Box<Bool>`, inferred from the
+            // return type, which `==` can't compare.
+            ["operator `==` expects a type that implements `Equal`, found `Optional<Int>`"]
+        );
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {GENERICS}
+                fn f() {{
+                    let a = Optional.none
+                    let b: Int = Box.of(1).value
+                    match 1 {{
+                        Optional.none => {{}}
+                        _ => {{}}
+                    }}
+                }}
+                "
+            )),
+            [
+                "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
+                "the arguments of `Box` can't be inferred here, so they must be given, as in `Box<...>`",
+                "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_types_need_the_right_arguments() {
+        let src = format!(
+            "
+            {GENERICS}
+            fn f(a: Optional, b: Int<Bool>, c: Box<Int, Bool>, d: Optional<Missing>) {{
+                let e = Optional
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`Optional` is generic, so it needs arguments, as in `Optional<...>`",
+                "`Int` isn't generic, so it can't be given arguments",
+                "`Box` has 1 generic parameter, but was given 2",
+                "unknown type `Missing`",
+                "`Optional` is a type, not a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_impls_use_self_params() {
+        let src = format!(
+            "
+            {GENERICS}
+            impl Box {{
+                fn other() -> Self.U {{
+                    let t: T = self.value
+                }}
+            }}
+
+            impl Int {{
+                fn f() -> Self.T {{}}
+            }}
+
+            fn g() -> Self.T {{}}
+            "
+        );
+        // A generic type's `impl`s are checked after the other declarations.
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`Self.T` can only be used in the `impl` of a generic type",
+                "`Self.T` can only be used in the `impl` of a generic type",
+                "`Box<T>` has no generic parameter `U`",
+                "unknown type `T`",
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_types_are_checked_once() {
+        // A generic type's parameters can't be used as anything in particular,
+        // and its mistakes are reported once, however many types are made
+        // from it.
+        let src = "
+            group Box<T, T> {
+                let value: T
+                let value: Missing
+            }
+
+            group Counter<T> {
+                let value: T
+            }
+
+            impl Counter {
+                fn next() -> Self.T {
+                    return self.value + 1
+                }
+            }
+
+            fn f(a: Counter<Int>, b: Counter<Bool>, c: Counter<IntU8>) {}
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "`T` is already declared",
+                "`Box<T, T>` already has a field `value`",
+                "unknown type `Missing`",
+                "operator `+` expects an integer, found `T`",
+                "`next` must return `T`, found `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_types_cannot_contain_themselves() {
+        let src = "
+            group Wrap<T> {
+                let inner: Wrap<T>
+            }
+
+            choice Optional<T> {
+                none
+                some: T
+            }
+
+            group Grow<T> {
+                let next: Optional<Grow<(_: T)>>
+            }
+
+            fn f() {
+                group Local<T> {}
+            }
+            ";
+        let messages = messages_top(src);
+        assert!(
+            messages[0].starts_with("`Grow<(_: (_: ")
+                && messages[0].ends_with(
+                    "nests generic types too deeply, which usually means a generic type uses itself with different arguments"
+                ),
+            "{messages:?}"
+        );
+        assert_eq!(messages[1], "`Wrap<T>` contains itself");
+        assert_eq!(
+            messages[2..],
+            ["`Local` can't be generic, since only types at the top level can be"]
+        );
+    }
+
+    #[test]
+    fn generic_impls_can_implement_traits() {
+        let src = format!(
+            "
+            {GENERICS}
+            impl Box with Equal {{
+                fn isEqual(to rhs: Self) -> Bool {{
+                    return true
+                }}
+            }}
+
+            fn f() -> Bool {{
+                return Box<Int>.of(1) == Box.of(2) & Box<Bool>.of(true) != Box.of(false)
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
     }
 
     #[test]

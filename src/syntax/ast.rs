@@ -105,12 +105,20 @@ impl fmt::Display for Name {
     }
 }
 
-/// A type as it's written, such as `Int`, `other::User`, or the tuple
-/// `(x: Int, y: Int)`.
+/// A type as it's written, such as `Int`, `other::User`, the tuple
+/// `(x: Int, y: Int)`, or the generic type `Optional<Int>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeName {
     Named(Name),
     Tuple(Vec<TupleElement>),
+    /// A generic type, given the types its generic parameters stand for.
+    Generic {
+        name: Name,
+        args: Vec<TypeName>,
+    },
+    /// `Self.T`: what the generic parameter `T` of the `impl`'s type stands
+    /// for.
+    SelfParam(String),
 }
 
 impl TypeName {
@@ -128,6 +136,11 @@ impl fmt::Display for TypeName {
                 let elements: Vec<_> = elements.iter().map(ToString::to_string).collect();
                 write!(f, "({})", elements.join(", "))
             }
+            Self::Generic { name, args } => {
+                let args: Vec<_> = args.iter().map(ToString::to_string).collect();
+                write!(f, "{name}<{}>", args.join(", "))
+            }
+            Self::SelfParam(param) => write!(f, "Self.{param}"),
         }
     }
 }
@@ -248,10 +261,18 @@ pub enum Expr {
         args: Vec<Arg>,
     },
     /// `Type { field: value, ... }`: constructs a group, giving every field
-    /// a value in the order they're declared.
+    /// a value in the order they're declared. The type is a name, which can
+    /// be given generic arguments, as in `Box<Int> { ... }`.
     Construct {
-        ty: Name,
+        ty: TypeName,
         fields: Vec<FieldValue>,
+    },
+    /// `Type<Arg, ...>` before a `.`, as in `Optional<Int>.none`: a generic
+    /// type given its arguments, whose options and static functions can be
+    /// used.
+    GenericType {
+        name: Name,
+        args: Vec<TypeName>,
     },
     /// `receiver.method(label: value, ...)`: calls a function from an `impl`
     /// of the receiver's type.
@@ -347,9 +368,13 @@ pub enum Stmt {
         aliases: Vec<String>,
         functions: Vec<TraitFunction>,
     },
-    /// `group Name { let field: Type ... }`
+    /// `group Name { let field: Type ... }`, or `group Name<T, ...> { ... }`
+    /// for a generic group, whose fields can use its generic parameters as
+    /// types.
     Group {
         name: String,
+        /// The names of its generic parameters, if it's generic.
+        params: Vec<String>,
         fields: Vec<Field>,
     },
     /// `alias Name = Type`: another name for a type, which can be used in
@@ -372,9 +397,12 @@ pub enum Stmt {
         ret: TypeName,
     },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
-    /// options, each holding a value of its own type.
+    /// options, each holding a value of its own type. Like a group, it can be
+    /// generic, as in `choice Optional<T> { ... }`.
     Choice {
         name: String,
+        /// The names of its generic parameters, if it's generic.
+        params: Vec<String>,
         options: Vec<ChoiceOption>,
     },
     /// `match value { pattern => { ... } ... }`: runs the block of the first
@@ -496,9 +524,10 @@ pub enum Pattern {
     /// with the labels its type builds it with.
     Tuple(Vec<TuplePattern>),
     /// `Type.option` or `Type.option(pattern)`: matches the option of a
-    /// choice, and if given, its value against `pattern`.
+    /// choice, and if given, its value against `pattern`. The type is a name,
+    /// which can be given generic arguments.
     Option {
-        ty: Name,
+        ty: TypeName,
         option: String,
         value: Option<Box<Pattern>>,
     },

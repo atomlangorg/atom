@@ -2295,6 +2295,71 @@ mod tests {
     }
 
     #[test]
+    fn generic_types_are_compiled_for_each_use() {
+        let src = "
+            choice Optional<T> {
+                none
+                some: T
+            }
+
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+
+                fn get() -> Self.T {
+                    return self.value
+                }
+
+                fn maybe() -> Optional<Self.T> {
+                    return Optional.some(self.value)
+                }
+            }
+
+            group Pair<A, B> {
+                let first: A
+                let second: B
+            }
+
+            impl Pair {
+                static fn of(_ first: Self.A, _ second: Self.B) -> Self {
+                    return Self { first: first, second: second }
+                }
+            }
+
+            fn unwrap(_ value: Optional<Int>, or fallback: Int) -> Int {
+                match value {
+                    Optional.some(let found) => {
+                        return found
+                    }
+                    Optional.none => {
+                        return fallback
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let a: Optional<Int> = Optional.some(40)
+                let b = Optional<Int>.none
+                let boxed: Box<Bool> = Box.of(true)
+                let count = Box<Int>.of(1).get()
+                let pair = Pair<Int, Box<Bool>>.of(100, boxed)
+                let flag = pair.second.get()
+                var total = unwrap(a, or: 0) + unwrap(b, or: 1) + count
+                if flag {
+                    total = total + pair.first
+                }
+                return total + unwrap(Box<Int>.of(1000).maybe(), or: 0)
+            }
+            ";
+        assert_eq!(run(src), 1142);
+    }
+
+    #[test]
     fn trait_functions_are_called_like_any_other() {
         let src = "
             group Counter {
