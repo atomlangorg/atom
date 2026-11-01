@@ -4597,14 +4597,10 @@ impl<'a> Checker<'a> {
 
     /// Checks calling `callee`, of type `ty`, called `name`, with `args`, which
     /// calls its `call` from the standard library's `Call` trait, as in
-    /// `adder(a: 3)` for `adder.call(input: (a: 3))`. The arguments are its
-    /// `Input`, written like a tuple without its brackets, so `negate(3)`
-    /// passes `3`, unless `Input` is a tuple of one value without a label.
+    /// `adder(a: 3)` for `adder.call(input: (a: 3))`. If `Input` is a tuple,
+    /// the arguments are its elements, so a tuple is never unpacked into them.
+    /// Otherwise, the only argument is the `Input`, as in `negate(3)`.
     fn call_value(&mut self, ty: Option<Type>, callee: Callee, name: &str, args: &[Arg]) -> Typed {
-        let input = match args {
-            [Arg { label: None, value }] => Expr::Paren(Box::new(value.clone())),
-            _ => Expr::Tuple(args.to_vec()),
-        };
         // Like a function's arguments, the input is checked first, so its
         // errors come before the call's, and it's used as `Input`, which is
         // found without reporting errors.
@@ -4620,6 +4616,13 @@ impl<'a> Checker<'a> {
                 _ => None,
             })
             .and_then(|param| param.ty.clone());
+        let input_is_tuple = param
+            .as_ref()
+            .is_some_and(|param| self.tuples.contains_key(&param.id));
+        let input = match args {
+            [Arg { label: None, value }] if !input_is_tuple => value.clone(),
+            _ => Expr::Tuple(args.to_vec()),
+        };
         let Typed {
             ty: found,
             expr: input,
@@ -4633,17 +4636,10 @@ impl<'a> Checker<'a> {
             self.trait_method("Call", "call", ty, not_callable)
         });
         let returns = function.and_then(|function| self.functions[function].returns.clone());
-        let errors = self.errors.len();
-        if let Callee::Function(index) = callee
-            && found != param
-        {
-            self.check_function_args(index, name, args);
-        }
-        if let Some((expected, found)) = param.zip(found)
-            && expected != found
-        {
-            // A function's parameters may have explained what's wrong already.
-            if self.errors.len() == errors {
+        if found != param {
+            if let Callee::Function(index) = callee {
+                self.check_function_args(index, name, args);
+            } else if let (Some(expected), Some(found)) = (param, found) {
                 self.error(CheckError::WrongCallInput {
                     name: name.to_string(),
                     expected,
@@ -4660,7 +4656,7 @@ impl<'a> Checker<'a> {
                 function: call,
                 args: vec![value, input],
             }),
-            Callee::Function(index) => Some(self.call_function(index, call, input)),
+            Callee::Function(index) => Some(self.call_function(index, input)),
         });
         Typed { ty: returns, expr }
     }
@@ -4680,21 +4676,13 @@ impl<'a> Checker<'a> {
     }
 
     /// What calling the function at `index` with `input`, its `Input`,
-    /// compiles to. It's the same as using `call`, the index of `Fn.call` for
-    /// its type, but the function is called directly when the input's values
-    /// are known, rather than through a pointer.
-    fn call_function(&mut self, index: usize, call: usize, input: ir::Expr) -> ir::Expr {
-        let args = match (&self.functions[index].params[..], input) {
-            ([ParamSignature { label: None, .. }], input) => vec![input],
-            (_, ir::Expr::Construct { fields, .. }) => fields,
-            // A tuple from elsewhere, as in `add(pair)`.
-            (_, input) => {
-                let value = self.function_value(index);
-                return ir::Expr::Call {
-                    function: call,
-                    args: vec![value, input],
-                };
-            }
+    /// compiles to. It's the same as using `Fn.call`, but the function is called
+    /// directly, rather than through a pointer. If `Input` is a tuple, it's
+    /// always built in the call, with its elements as the arguments.
+    fn call_function(&self, index: usize, input: ir::Expr) -> ir::Expr {
+        let args = match input {
+            ir::Expr::Construct { group, fields } if self.tuples.contains_key(&group) => fields,
+            input => vec![input],
         };
         ir::Expr::Call {
             function: index,
@@ -4980,8 +4968,9 @@ impl<'a> Checker<'a> {
 
     /// The type `Fn<Input, Output>` of the function at `index` in `functions`,
     /// or `None` if it's unknown. Its `Input` is the type of its only parameter
-    /// if that has no label, and otherwise a tuple of its parameters, which
-    /// have only their labels, since their names are private to the function.
+    /// if that has no label and isn't a tuple, and otherwise a tuple of its
+    /// parameters, which have only their labels, since their names are private
+    /// to the function. So a tuple `Input` always holds the arguments.
     fn function_type(&mut self, index: usize) -> Option<Type> {
         let Signature {
             params, returns, ..
@@ -4989,9 +4978,11 @@ impl<'a> Checker<'a> {
         let input = match &params[..] {
             [
                 ParamSignature {
-                    label: None, ty, ..
+                    label: None,
+                    ty: Some(ty),
+                    ..
                 },
-            ] => ty.clone()?,
+            ] if !self.tuples.contains_key(&ty.id) => ty.clone(),
             params => {
                 let elements = params.iter().map(|param| {
                     Some(TupleElementType {
@@ -5028,14 +5019,15 @@ impl<'a> Checker<'a> {
             returns,
         } = self.functions[index].clone();
         let returns = returns.expect(KNOWN);
-        let args = match &params[..] {
-            [ParamSignature { label: None, .. }] => vec![ir::Expr::Local(0)],
-            params => (0..params.len())
+        let args = if self.tuples.contains_key(&input) {
+            (0..params.len())
                 .map(|index| ir::Expr::Field {
                     receiver: Box::new(ir::Expr::Local(0)),
                     index,
                 })
-                .collect(),
+                .collect()
+        } else {
+            vec![ir::Expr::Local(0)]
         };
         let value = self.functions.len();
         let value_name = format!("{name}.value");
@@ -10844,8 +10836,9 @@ primitive Float"
 
     #[test]
     fn functions_are_values_of_type_fn() {
-        // The `Input` is the type of an only parameter without a label, and
-        // otherwise a tuple of the parameters, by their labels.
+        // The `Input` is the type of an only parameter without a label that
+        // isn't a tuple, and otherwise a tuple of the parameters, by their
+        // labels.
         let src = "
             fn add(a: Int, b: Int) -> Int {
                 return a + b
@@ -10874,13 +10867,13 @@ primitive Float"
                 let b: Fn<Int, Int> = negate
                 let c: Fn<(_: Int, by: Int), Int> = scale
                 let d: Fn<(to: Int), Int> = same
-                let e: Fn<(a: Int, b: Int), Int> = sum
+                let e: Fn<(_: (a: Int, b: Int)), Int> = sum
                 let g: Fn<(), Void> = nothing
-                let i: Int = a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e(a: 7, b: 8)
+                let i: Int = a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e((a: 7, b: 8))
                 let j: Void = g()
                 let k: Int = add.call(input: (a: 1, b: 2))
                 let pair = (a: 1, b: 2)
-                let l: Int = add(pair)
+                let l: Int = add.call(input: pair) + sum(pair) + sum.call(input: (pair))
             }
             ";
         assert_eq!(check_top(src), Ok(()));
@@ -10921,19 +10914,10 @@ primitive Float"
         let src = "
             fn small(a: IntU8, b: IntU8) {}
 
-            fn wrapped(_ value: (_: Int)) {}
-
-            fn add(a: Int, b: Int) -> Int {
-                return a + b
-            }
-
-            fn f(value: (_: Int)) {
+            fn f() {
                 small(a: 1, c: 2)
                 small(a: 1 + true, c: 2)
                 small(a: missing)
-                wrapped(value)
-                let pair = (a: 1, c: 2)
-                add(pair)
             }
             ";
         assert_eq!(
@@ -10945,10 +10929,80 @@ primitive Float"
                 "argument to `small` should be labelled `b`, found `c`",
                 "`missing` is not declared",
                 "`small` takes 2 arguments, found 1",
-                "`wrapped` is called with `(_: Int)`, but was given `(_: (_: Int))`",
-                "`add` takes 2 arguments, found 1",
             ]
         );
+    }
+
+    #[test]
+    fn tuples_are_not_unpacked_into_arguments() {
+        let src = format!(
+            "
+            {CALLABLES}
+            fn add(x: Int, y: Int) -> Int {{
+                return x + y
+            }}
+
+            fn f(adder: Adder) {{
+                let pair = (x: 3, y: 5)
+                let sum = add
+                add(pair)
+                add((x: 3, y: 5))
+                sum(pair)
+                adder((a: 3, b: 5))
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`add` takes 2 arguments, found 1",
+                "`add` takes 2 arguments, found 1",
+                "`sum` is called with `(x: Int, y: Int)`, but was given `(_: (x: Int, y: Int))`",
+                "`adder` is called with `(a: Int, b: Int)`, but was given `(_: (a: Int, b: Int))`",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tuple_is_one_argument_to_a_function_taking_a_tuple() {
+        let src = "
+            fn sum(_ pair: (x: Int, y: Int)) -> Int {
+                return pair.x + pair.y
+            }
+
+            fn only(_ value: (_ inner: Int)) -> Int {
+                return value.inner
+            }
+
+            fn f(value: (_ inner: Int)) -> Int {
+                let pair = (x: 3, y: 5)
+                return sum(pair) + sum((x: 3, y: 5)) + only(value) + only((1))
+            }
+
+            fn g() {
+                sum(x: 3, y: 5)
+            }
+            ";
+        assert_eq!(messages_top(src), ["`sum` takes 1 argument, found 2"]);
+    }
+
+    #[test]
+    fn call_takes_a_whole_tuple_as_its_input() {
+        let src = format!(
+            "
+            {CALLABLES}
+            fn add(x: Int, y: Int) -> Int {{
+                return x + y
+            }}
+
+            fn f(adder: Adder) -> Int {{
+                let pair = (x: 3, y: 5)
+                let input = (a: 3, b: 5)
+                return add.call(input: pair) + adder.call(input: input)
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
     }
 
     #[test]

@@ -2478,7 +2478,7 @@ mod tests {
                 let d = same
                 let e = sum
                 let f = ten
-                return a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e(a: 7, b: 8) + f()
+                return a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e((a: 7, b: 8)) + f()
             }
             ";
         // 3 - 3 + 20 + 6 + 15 + 10
@@ -2498,7 +2498,7 @@ mod tests {
 
             fn main() -> Int {
                 let pair = (a: 30, b: 12)
-                let sums = add(a: 100, b: 1) + add.call(input: (a: 200, b: 2)) + add(pair)
+                let sums = add(a: 100, b: 1) + add.call(input: (a: 200, b: 2)) + add.call(input: pair)
                 return sums + negate(1) + negate.call(input: 2)
             }
             ";
@@ -2559,6 +2559,23 @@ mod tests {
             ";
         // 2 + 20 + 200 + 2000 + 10001
         assert_eq!(run(src), 12223);
+    }
+
+    #[test]
+    fn functions_can_take_a_tuple_as_a_value() {
+        let src = "
+            fn sum(_ pair: (a: Int, b: Int)) -> Int {
+                return pair.a + pair.b
+            }
+
+            fn main() -> Int {
+                let pair = (a: 1, b: 2)
+                let value = sum
+                // 3 + 7 + 3 + 3
+                return sum(pair) + sum((a: 3, b: 4)) + value(pair) + value.call(input: (pair))
+            }
+            ";
+        assert_eq!(run(src), 16);
     }
 
     #[test]
