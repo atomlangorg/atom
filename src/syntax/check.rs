@@ -4633,14 +4633,23 @@ impl<'a> Checker<'a> {
             self.trait_method("Call", "call", ty, not_callable)
         });
         let returns = function.and_then(|function| self.functions[function].returns.clone());
+        let errors = self.errors.len();
+        if let Callee::Function(index) = callee
+            && found != param
+        {
+            self.check_function_args(index, name, args);
+        }
         if let Some((expected, found)) = param.zip(found)
             && expected != found
         {
-            self.error(CheckError::WrongCallInput {
-                name: name.to_string(),
-                expected,
-                found,
-            });
+            // A function's parameters may have explained what's wrong already.
+            if self.errors.len() == errors {
+                self.error(CheckError::WrongCallInput {
+                    name: name.to_string(),
+                    expected,
+                    found,
+                });
+            }
             return Typed {
                 ty: returns,
                 expr: None,
@@ -4654,6 +4663,20 @@ impl<'a> Checker<'a> {
             Callee::Function(index) => Some(self.call_function(index, call, input)),
         });
         Typed { ty: returns, expr }
+    }
+
+    /// Reports what's wrong with each of `args`, which don't make the `Input`
+    /// of the function at `index`, called `name`, against its parameters. Each
+    /// is checked again as its parameter, as it may not have had a type to use
+    /// as part of the input, so errors in the arguments themselves, which have
+    /// already been reported, are dropped.
+    fn check_function_args(&mut self, index: usize, name: &str, args: &[Arg]) {
+        let errors = self.errors.len();
+        let params = self.param_types(index);
+        let (found, _) = self.args(args, &params);
+        self.errors.truncate(errors);
+        let signature = self.functions[index].clone();
+        self.check_args(name.to_string(), args, found, signature);
     }
 
     /// What calling the function at `index` with `input`, its `Input`,
@@ -6456,13 +6479,13 @@ mod tests {
         assert_eq!(
             messages("fn f(a: Int) {}\nf()\nf(a: 1, a: 2)"),
             [
-                "`f` is called with `(a: Int)`, but was given `()`",
-                "`f` is called with `(a: Int)`, but was given `(a: Int, a: Int)`",
+                "`f` takes 1 argument, found 0",
+                "`f` takes 1 argument, found 2",
             ]
         );
         assert_eq!(
             messages("fn g() {}\ng(1)"),
-            ["`g` is called with `()`, but was given `Int`"]
+            ["`g` takes 0 arguments, found 1"]
         );
     }
 
@@ -6479,10 +6502,10 @@ mod tests {
                 "
             ),
             [
-                "`f` is called with `(to: Int, _: Int)`, but was given `(from: Int, _: Int)`",
-                "`f` is called with `(to: Int, _: Int)`, but was given `(_: Int, _: Int)`",
-                "`f` is called with `(to: Int, _: Int)`, but was given `(to: Int, other: Int)`",
-                "`f` is called with `(to: Int, _: Int)`, but was given `(value: Int, _: Int)`",
+                "argument to `f` should be labelled `to`, found `from`",
+                "argument to `f` is missing the label `to`",
+                "argument to `f` should not have a label, found `other`",
+                "argument to `f` should be labelled `to`, found `value`",
             ]
         );
     }
@@ -6491,7 +6514,10 @@ mod tests {
     fn labels_must_be_in_order() {
         assert_eq!(
             messages("fn f(a: Int, b: Int) {}\nf(b: 1, a: 2)"),
-            ["`f` is called with `(a: Int, b: Int)`, but was given `(b: Int, a: Int)`"]
+            [
+                "argument to `f` should be labelled `a`, found `b`",
+                "argument to `f` should be labelled `b`, found `a`",
+            ]
         );
     }
 
@@ -6499,7 +6525,10 @@ mod tests {
     fn rejects_wrong_argument_types() {
         assert_eq!(
             messages("fn f(to value: Int, _ flag: Bool) {}\nf(to: true, 1)"),
-            ["`f` is called with `(to: Int, _: Bool)`, but was given `(to: Bool, _: Int)`"]
+            [
+                "argument `to` of `f` expects `Int`, found `Bool`",
+                "argument `flag` of `f` expects `Bool`, found `Int`",
+            ]
         );
     }
 
@@ -6509,6 +6538,11 @@ mod tests {
             check_body("fn f() {}\nf(x)\nlet y = 1\ny(z)"),
             Err(vec![
                 CheckError::Undeclared("x".to_string()),
+                CheckError::WrongArgumentCount {
+                    function: "f".to_string(),
+                    expected: 0,
+                    found: 1,
+                },
                 CheckError::Undeclared("z".to_string()),
                 CheckError::NotCallable {
                     name: "y".to_string(),
@@ -6655,7 +6689,7 @@ mod tests {
         );
         assert_eq!(
             messages("fn take(value: Void) {}\ntake(value: 1)"),
-            ["`take` is called with `(value: Void)`, but was given `(value: Int)`"]
+            ["argument `value` of `take` expects `Void`, found `Int`"]
         );
     }
 
@@ -6908,7 +6942,7 @@ mod tests {
                 "cannot assign `User` to `x`, which has type `Int`",
                 "operator `+` expects an integer, found `User`",
                 "`if` condition must be `Bool`, found `User`",
-                "`f` is called with `(user: User)`, but was given `(user: Int)`",
+                "argument `user` of `f` expects `User`, found `Int`",
                 "`f` must return `User`, found `Bool`",
             ]
         );
@@ -6949,7 +6983,7 @@ mod tests {
                 }
                 "
             ),
-            ["`g` is called with `(b: A)`, but was given `(b: A)`"]
+            ["argument `b` of `g` expects `A`, found `A`"]
         );
     }
 
@@ -10878,6 +10912,41 @@ primitive Float"
                 "`Fn<Int, Int>` is a primitive, so it can only be created by the compiler, such as with a literal",
                 "cannot assign `Int` to `h`, which has type `Bool`",
                 "`g` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
+            ]
+        );
+    }
+
+    #[test]
+    fn function_arguments_are_checked_as_their_parameters() {
+        let src = "
+            fn small(a: IntU8, b: IntU8) {}
+
+            fn wrapped(_ value: (_: Int)) {}
+
+            fn add(a: Int, b: Int) -> Int {
+                return a + b
+            }
+
+            fn f(value: (_: Int)) {
+                small(a: 1, c: 2)
+                small(a: 1 + true, c: 2)
+                small(a: missing)
+                wrapped(value)
+                let pair = (a: 1, c: 2)
+                add(pair)
+            }
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "argument to `small` should be labelled `b`, found `c`",
+                "operator `+` expects an integer, found `Bool`",
+                "argument `a` of `small` expects `IntU8`, found `Int`",
+                "argument to `small` should be labelled `b`, found `c`",
+                "`missing` is not declared",
+                "`small` takes 2 arguments, found 1",
+                "`wrapped` is called with `(_: Int)`, but was given `(_: (_: Int))`",
+                "`add` takes 2 arguments, found 1",
             ]
         );
     }
