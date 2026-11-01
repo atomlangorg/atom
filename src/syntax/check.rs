@@ -197,8 +197,8 @@ pub enum CheckError {
     NotAType(String),
     /// Something that isn't a function was called.
     NotAFunction(String),
-    /// A function was used as a value, or assigned to.
-    NotAValue(String),
+    /// A function was assigned to.
+    AssignToFunction(String),
     /// A type was used as a value, or assigned to.
     TypeAsValue(String),
     /// A function was called with the wrong number of arguments.
@@ -547,7 +547,9 @@ impl fmt::Display for CheckError {
             Self::UnknownType(name) => write!(f, "unknown type `{name}`"),
             Self::NotAFunction(name) => write!(f, "`{name}` is not a function"),
             Self::NotAType(name) => write!(f, "`{name}` is not a type"),
-            Self::NotAValue(name) => write!(f, "`{name}` is a function, not a value"),
+            Self::AssignToFunction(name) => {
+                write!(f, "cannot assign to `{name}`, since it's a function")
+            }
             Self::TypeAsValue(name) => write!(f, "`{name}` is a type, not a value"),
             Self::WrongArgumentCount {
                 function,
@@ -915,18 +917,19 @@ enum Binding {
     Alias(usize),
     /// An index into `Checker::traits`.
     Trait(usize),
-    /// A generic group or choice, as an index into `Checker::templates`,
-    /// which is a different type for each set of arguments it's given.
+    /// A generic group, choice or primitive, as an index into
+    /// `Checker::templates`, which is a different type for each set of
+    /// arguments it's given.
     Generic(usize),
 }
 
-/// A generic group or choice, which types are made from by giving its
-/// parameters arguments, as in `Optional<Int>`.
+/// A generic group, choice or primitive, which types are made from by giving
+/// its parameters arguments, as in `Optional<Int>`.
 struct Template<'a> {
     name: &'a str,
     module: usize,
     params: &'a [String],
-    /// The group or choice declaring it.
+    /// The group, choice or primitive declaring it.
     stmt: &'a Stmt,
     /// Its `impl`s, with the modules they're in, whose functions are
     /// declared for each type made from it.
@@ -1084,6 +1087,14 @@ enum Receiver {
     Type(Type),
 }
 
+/// What's called by `Checker::call_value`.
+enum Callee {
+    /// A value, which compiles to this if it has no errors.
+    Value(Option<ir::Expr>),
+    /// A function by its name, as an index into `Checker::functions`.
+    Function(usize),
+}
+
 struct ModuleInfo<'a> {
     /// The module's path, such as `/dir/other` or `stdlib/core`.
     display: String,
@@ -1189,6 +1200,10 @@ struct Checker<'a> {
     core: usize,
     /// The primitive types, by `id`.
     primitives: HashMap<usize, ir::Primitive>,
+    /// For each function used as a value, by its index in `functions`, the
+    /// index of the function that a pointer to it really points to, which
+    /// takes its `Input` as a single parameter.
+    function_values: HashMap<usize, usize>,
     /// The index in `modules` of the module being checked.
     module: usize,
     /// One scope per enclosing block inside functions, innermost last. Empty
@@ -1340,14 +1355,16 @@ impl<'a> Checker<'a> {
             self.module = module;
             for stmt in self.modules[module].program {
                 match stmt {
-                    Stmt::Group { name, params, .. } | Stmt::Choice { name, params, .. }
+                    Stmt::Group { name, params, .. }
+                    | Stmt::Choice { name, params, .. }
+                    | Stmt::Primitive { name, params }
                         if !params.is_empty() =>
                     {
                         self.declare_template(name, params, stmt);
                     }
                     Stmt::Group { name, .. }
                     | Stmt::Choice { name, .. }
-                    | Stmt::Primitive { name } => {
+                    | Stmt::Primitive { name, .. } => {
                         types.push((module, self.declare_type(name), stmt));
                     }
                     Stmt::Alias { name, ty } => self.declare_alias(name, ty, LazyType::Unchecked),
@@ -2109,8 +2126,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Declares the generic group or choice called `name`, with `params`,
-    /// which `stmt` declares.
+    /// Declares the generic group, choice or primitive called `name`, with
+    /// `params`, which `stmt` declares.
     fn declare_template(&mut self, name: &'a str, params: &'a [String], stmt: &'a Stmt) {
         let mut seen = HashSet::new();
         for param in params {
@@ -2191,7 +2208,8 @@ impl<'a> Checker<'a> {
         self.at_top_level(module, Some((template, args)), |checker| match stmt {
             Stmt::Group { fields, .. } => checker.define_group(id, &name, fields),
             Stmt::Choice { options, .. } => checker.define_choice(id, &name, options),
-            _ => unreachable!("only groups and choices are generic"),
+            Stmt::Primitive { name, .. } => checker.define_primitive(id, name),
+            _ => unreachable!("only groups, choices and primitives are generic"),
         });
         if quiet {
             self.quieten(errors);
@@ -3012,6 +3030,8 @@ impl<'a> Checker<'a> {
             | "IntS32.isNotEqual" | "IntS64.isNotEqual" | "Bool.isNotEqual" => {
                 ir::PrimitiveFn::NotEqual
             }
+            // Every type made from `Fn` has its own `call`.
+            _ if name.starts_with("Fn<") && name.ends_with(">.call") => ir::PrimitiveFn::CallFn,
             _ => panic!("the compiler doesn't know how to implement `{name}`"),
         };
         let Signature {
@@ -3099,7 +3119,7 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Group { name, fields, .. } => self.define_group(id, name, fields),
             Stmt::Choice { name, options, .. } => self.define_choice(id, name, options),
-            Stmt::Primitive { name } => self.define_primitive(id, name),
+            Stmt::Primitive { name, .. } => self.define_primitive(id, name),
             _ => unreachable!("only groups, choices and primitives declare types"),
         }
     }
@@ -3122,6 +3142,7 @@ impl<'a> Checker<'a> {
             "IntS32" => int(32, true),
             "IntS64" => int(64, true),
             "Bool" => ir::Primitive::Bool,
+            "Fn" => ir::Primitive::Fn,
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
         };
         self.primitives.insert(id, primitive);
@@ -3271,7 +3292,7 @@ impl<'a> Checker<'a> {
                         self.error(CheckError::AssignToConstant(name.clone()));
                     }
                     Ok(Binding::Function(_)) => {
-                        self.error(CheckError::NotAValue(name.clone()));
+                        self.error(CheckError::AssignToFunction(name.clone()));
                     }
                     Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
                         self.error(CheckError::TypeAsValue(name.clone()));
@@ -3877,9 +3898,10 @@ impl<'a> Checker<'a> {
                     ty: self.global_type(index),
                     expr: Some(ir::Expr::Global(index)),
                 },
-                Ok(Binding::Function(_)) => {
-                    self.error(CheckError::NotAValue(name.to_string()));
-                    Typed::UNKNOWN
+                Ok(Binding::Function(index)) => {
+                    let ty = self.function_type(index);
+                    let expr = ty.is_some().then(|| self.function_value(index));
+                    Typed { ty, expr }
                 }
                 Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
                     self.error(CheckError::TypeAsValue(name.to_string()));
@@ -4573,15 +4595,12 @@ impl<'a> Checker<'a> {
         Typed::UNKNOWN
     }
 
-    /// Checks a call to a method on a value, or a static function on a type,
-    /// returning its return type, or `None` if it can't be determined, along
-    /// with what it compiles to.
-    /// Checks calling `value`, called `name`, with `args`, which calls its
-    /// `call` from the standard library's `Call` trait, as in `adder(a: 3)`
-    /// for `adder.call(input: (a: 3))`. The arguments are its `Input`, written
-    /// like a tuple without its brackets, so `negate(3)` passes `3`, unless
-    /// `Input` is a tuple of one value without a label.
-    fn call_value(&mut self, value: Typed, name: &str, args: &[Arg]) -> Typed {
+    /// Checks calling `callee`, of type `ty`, called `name`, with `args`, which
+    /// calls its `call` from the standard library's `Call` trait, as in
+    /// `adder(a: 3)` for `adder.call(input: (a: 3))`. The arguments are its
+    /// `Input`, written like a tuple without its brackets, so `negate(3)`
+    /// passes `3`, unless `Input` is a tuple of one value without a label.
+    fn call_value(&mut self, ty: Option<Type>, callee: Callee, name: &str, args: &[Arg]) -> Typed {
         let input = match args {
             [Arg { label: None, value }] => Expr::Paren(Box::new(value.clone())),
             _ => Expr::Tuple(args.to_vec()),
@@ -4593,8 +4612,7 @@ impl<'a> Checker<'a> {
             Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `Call`"),
         };
-        let param = value
-            .ty
+        let param = ty
             .as_ref()
             .filter(|ty| self.implementations.contains(&(ty.id, call_trait)))
             .and_then(|ty| match self.member(ty, "call") {
@@ -4607,7 +4625,7 @@ impl<'a> Checker<'a> {
             expr: input,
         } = self.expr_as(&input, param.as_ref());
 
-        let function = value.ty.as_ref().and_then(|ty| {
+        let function = ty.as_ref().and_then(|ty| {
             let not_callable = CheckError::NotCallable {
                 name: name.to_string(),
                 ty: ty.clone(),
@@ -4628,15 +4646,42 @@ impl<'a> Checker<'a> {
                 expr: None,
             };
         }
-        let expr = function
-            .zip(value.expr.zip(input))
-            .map(|(function, (value, input))| ir::Expr::Call {
-                function,
+        let expr = function.zip(input).and_then(|(call, input)| match callee {
+            Callee::Value(value) => value.map(|value| ir::Expr::Call {
+                function: call,
                 args: vec![value, input],
-            });
+            }),
+            Callee::Function(index) => Some(self.call_function(index, call, input)),
+        });
         Typed { ty: returns, expr }
     }
 
+    /// What calling the function at `index` with `input`, its `Input`,
+    /// compiles to. It's the same as using `call`, the index of `Fn.call` for
+    /// its type, but the function is called directly when the input's values
+    /// are known, rather than through a pointer.
+    fn call_function(&mut self, index: usize, call: usize, input: ir::Expr) -> ir::Expr {
+        let args = match (&self.functions[index].params[..], input) {
+            ([ParamSignature { label: None, .. }], input) => vec![input],
+            (_, ir::Expr::Construct { fields, .. }) => fields,
+            // A tuple from elsewhere, as in `add(pair)`.
+            (_, input) => {
+                let value = self.function_value(index);
+                return ir::Expr::Call {
+                    function: call,
+                    args: vec![value, input],
+                };
+            }
+        };
+        ir::Expr::Call {
+            function: index,
+            args,
+        }
+    }
+
+    /// Checks a call to a method on a value, or a static function on a type,
+    /// returning its return type, or `None` if it can't be determined, along
+    /// with what it compiles to.
     fn method_call(
         &mut self,
         receiver: &Expr,
@@ -4653,14 +4698,11 @@ impl<'a> Checker<'a> {
         let receiver = match receiver {
             Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
                 Some(Member::Field(index, field_ty)) => {
-                    let value = Typed {
-                        ty: field_ty,
-                        expr: lowered.map(|receiver| ir::Expr::Field {
-                            receiver: Box::new(receiver),
-                            index,
-                        }),
-                    };
-                    return self.call_value(value, method, args);
+                    let value = lowered.map(|receiver| ir::Expr::Field {
+                        receiver: Box::new(receiver),
+                        index,
+                    });
+                    return self.call_value(field_ty, Callee::Value(value), method, args);
                 }
                 _ => Some(Receiver::Value(ty, lowered)),
             },
@@ -4884,50 +4926,113 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a call, returning the function's return type, or `None` if it
-    /// can't be determined, along with what it compiles to.
+    /// Checks a call, returning what's called's return type, or `None` if it
+    /// can't be determined, along with what it compiles to. Functions and other
+    /// values are called alike, through the standard library's `Call` trait.
     fn call(&mut self, callee: &Name, args: &[Arg]) -> Typed {
-        // Arguments are checked first, so their errors come before the call's,
-        // but the function is found first so they can take their types from
-        // its parameters.
-        let binding = self.lookup(callee);
-        if let Ok(Binding::Value { .. } | Binding::Global(_)) = &binding {
-            let value = self.expr(&Expr::Var(callee.clone()));
-            return self.call_value(value, &callee.to_string(), args);
-        }
-        let params = match &binding {
-            Ok(Binding::Function(index)) => self.param_types(*index),
-            _ => vec![],
-        };
-        let (found, lowered) = self.args(args, &params);
-
-        let index = match binding {
-            Ok(Binding::Function(index)) => index,
-            Ok(
-                Binding::Value { .. }
-                | Binding::Global(_)
-                | Binding::Type(_)
-                | Binding::Alias(_)
-                | Binding::Trait(_)
-                | Binding::Generic(_),
-            ) => {
-                // Values were handled above.
-                self.error(CheckError::NotAFunction(callee.to_string()));
-                return Typed::UNKNOWN;
+        let name = callee.to_string();
+        match self.lookup(callee) {
+            Ok(Binding::Function(index)) => {
+                let ty = self.function_type(index);
+                self.call_value(ty, Callee::Function(index), &name, args)
+            }
+            Ok(Binding::Value { .. } | Binding::Global(_)) => {
+                let Typed { ty, expr } = self.expr(&Expr::Var(callee.clone()));
+                self.call_value(ty, Callee::Value(expr), &name, args)
+            }
+            // Arguments are checked first, so their errors come before the
+            // call's.
+            Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Trait(_) | Binding::Generic(_)) => {
+                self.args(args, &[]);
+                self.error(CheckError::NotAFunction(name));
+                Typed::UNKNOWN
             }
             Err(error) => {
+                self.args(args, &[]);
                 self.lookup_error(callee, error);
-                return Typed::UNKNOWN;
+                Typed::UNKNOWN
+            }
+        }
+    }
+
+    /// The type `Fn<Input, Output>` of the function at `index` in `functions`,
+    /// or `None` if it's unknown. Its `Input` is the type of its only parameter
+    /// if that has no label, and otherwise a tuple of its parameters, which
+    /// have only their labels, since their names are private to the function.
+    fn function_type(&mut self, index: usize) -> Option<Type> {
+        let Signature {
+            params, returns, ..
+        } = self.functions[index].clone();
+        let input = match &params[..] {
+            [
+                ParamSignature {
+                    label: None, ty, ..
+                },
+            ] => ty.clone()?,
+            params => {
+                let elements = params.iter().map(|param| {
+                    Some(TupleElementType {
+                        label: param.label.map(str::to_string),
+                        name: param.label.map(str::to_string),
+                        ty: param.ty.clone()?,
+                    })
+                });
+                let elements = elements.collect::<Option<_>>()?;
+                self.tuple_type(elements)
             }
         };
-        let signature = self.functions[index].clone();
-        Typed {
-            ty: self.check_args(callee.to_string(), args, found, signature),
-            expr: lowered.map(|args| ir::Expr::Call {
+        let template = match self.modules[self.core].scope.get("Fn") {
+            Some(Binding::Generic(template)) => *template,
+            _ => panic!("the standard library should declare `Fn`"),
+        };
+        self.instance(template, vec![input, returns?], true)
+    }
+
+    /// What the function at `index` in `functions` compiles to as a value, once
+    /// `function_type` has found its type, which is a pointer to a function
+    /// taking its `Input` as a single parameter, made the first time it's
+    /// needed, so that every `Fn` can be called in the same way.
+    fn function_value(&mut self, index: usize) -> ir::Expr {
+        if let Some(&value) = self.function_values.get(&index) {
+            return ir::Expr::Function(value);
+        }
+        const KNOWN: &str = "the function's type is known";
+        let ty = self.function_type(index).expect(KNOWN);
+        let input = self.instances[&ty.id].1[0].id;
+        let Signature {
+            name,
+            params,
+            returns,
+        } = self.functions[index].clone();
+        let returns = returns.expect(KNOWN);
+        let args = match &params[..] {
+            [ParamSignature { label: None, .. }] => vec![ir::Expr::Local(0)],
+            params => (0..params.len())
+                .map(|index| ir::Expr::Field {
+                    receiver: Box::new(ir::Expr::Local(0)),
+                    index,
+                })
+                .collect(),
+        };
+        let value = self.functions.len();
+        let value_name = format!("{name}.value");
+        self.functions.push(Signature {
+            name: value_name.clone(),
+            params: vec![],
+            returns: Some(returns.clone()),
+        });
+        self.lowered_functions.push(Some(ir::Function {
+            name: value_name,
+            locals: vec![input],
+            params: 1,
+            returns: returns.id,
+            body: ir::Body::Stmts(vec![ir::Stmt::Return(ir::Expr::Call {
                 function: index,
                 args,
-            }),
-        }
+            })]),
+        }));
+        self.function_values.insert(index, value);
+        ir::Expr::Function(value)
     }
 
     /// The types of the parameters of the function at `index` in `functions`.
@@ -6351,13 +6456,13 @@ mod tests {
         assert_eq!(
             messages("fn f(a: Int) {}\nf()\nf(a: 1, a: 2)"),
             [
-                "`f` takes 1 argument, found 0",
-                "`f` takes 1 argument, found 2",
+                "`f` is called with `(a: Int)`, but was given `()`",
+                "`f` is called with `(a: Int)`, but was given `(a: Int, a: Int)`",
             ]
         );
         assert_eq!(
             messages("fn g() {}\ng(1)"),
-            ["`g` takes 0 arguments, found 1"]
+            ["`g` is called with `()`, but was given `Int`"]
         );
     }
 
@@ -6374,10 +6479,10 @@ mod tests {
                 "
             ),
             [
-                "argument to `f` should be labelled `to`, found `from`",
-                "argument to `f` is missing the label `to`",
-                "argument to `f` should not have a label, found `other`",
-                "argument to `f` should be labelled `to`, found `value`",
+                "`f` is called with `(to: Int, _: Int)`, but was given `(from: Int, _: Int)`",
+                "`f` is called with `(to: Int, _: Int)`, but was given `(_: Int, _: Int)`",
+                "`f` is called with `(to: Int, _: Int)`, but was given `(to: Int, other: Int)`",
+                "`f` is called with `(to: Int, _: Int)`, but was given `(value: Int, _: Int)`",
             ]
         );
     }
@@ -6386,10 +6491,7 @@ mod tests {
     fn labels_must_be_in_order() {
         assert_eq!(
             messages("fn f(a: Int, b: Int) {}\nf(b: 1, a: 2)"),
-            [
-                "argument to `f` should be labelled `a`, found `b`",
-                "argument to `f` should be labelled `b`, found `a`",
-            ]
+            ["`f` is called with `(a: Int, b: Int)`, but was given `(b: Int, a: Int)`"]
         );
     }
 
@@ -6397,10 +6499,7 @@ mod tests {
     fn rejects_wrong_argument_types() {
         assert_eq!(
             messages("fn f(to value: Int, _ flag: Bool) {}\nf(to: true, 1)"),
-            [
-                "argument `to` of `f` expects `Int`, found `Bool`",
-                "argument `flag` of `f` expects `Bool`, found `Int`",
-            ]
+            ["`f` is called with `(to: Int, _: Bool)`, but was given `(to: Bool, _: Int)`"]
         );
     }
 
@@ -6410,11 +6509,6 @@ mod tests {
             check_body("fn f() {}\nf(x)\nlet y = 1\ny(z)"),
             Err(vec![
                 CheckError::Undeclared("x".to_string()),
-                CheckError::WrongArgumentCount {
-                    function: "f".to_string(),
-                    expected: 0,
-                    found: 1,
-                },
                 CheckError::Undeclared("z".to_string()),
                 CheckError::NotCallable {
                     name: "y".to_string(),
@@ -6425,13 +6519,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_using_functions_as_values() {
+    fn rejects_assigning_to_functions() {
         assert_eq!(
-            messages("fn f() {}\nlet x = f\nf = 2"),
-            [
-                "`f` is a function, not a value",
-                "`f` is a function, not a value",
-            ]
+            messages("fn f() {}\nf = 2"),
+            ["cannot assign to `f`, since it's a function"]
         );
     }
 
@@ -6564,7 +6655,7 @@ mod tests {
         );
         assert_eq!(
             messages("fn take(value: Void) {}\ntake(value: 1)"),
-            ["argument `value` of `take` expects `Void`, found `Int`"]
+            ["`take` is called with `(value: Void)`, but was given `(value: Int)`"]
         );
     }
 
@@ -6817,7 +6908,7 @@ mod tests {
                 "cannot assign `User` to `x`, which has type `Int`",
                 "operator `+` expects an integer, found `User`",
                 "`if` condition must be `Bool`, found `User`",
-                "argument `user` of `f` expects `User`, found `Int`",
+                "`f` is called with `(user: User)`, but was given `(user: Int)`",
                 "`f` must return `User`, found `Bool`",
             ]
         );
@@ -6858,7 +6949,7 @@ mod tests {
                 }
                 "
             ),
-            ["argument `b` of `g` expects `A`, found `A`"]
+            ["`g` is called with `(b: A)`, but was given `(b: A)`"]
         );
     }
 
@@ -10714,6 +10805,142 @@ primitive Float"
                 "`missing` is not declared",
                 "`unknown` is not declared",
             ]
+        );
+    }
+
+    #[test]
+    fn functions_are_values_of_type_fn() {
+        // The `Input` is the type of an only parameter without a label, and
+        // otherwise a tuple of the parameters, by their labels.
+        let src = "
+            fn add(a: Int, b: Int) -> Int {
+                return a + b
+            }
+
+            fn negate(_ value: Int) -> Int {
+                return -value
+            }
+
+            fn scale(_ value: Int, by factor: Int) -> Int {
+                return value * factor
+            }
+
+            fn same(to value: Int) -> Int {
+                return value
+            }
+
+            fn sum(_ pair: (a: Int, b: Int)) -> Int {
+                return pair.a + pair.b
+            }
+
+            fn nothing() {}
+
+            fn f() {
+                let a: Fn<(a: Int, b: Int), Int> = add
+                let b: Fn<Int, Int> = negate
+                let c: Fn<(_: Int, by: Int), Int> = scale
+                let d: Fn<(to: Int), Int> = same
+                let e: Fn<(a: Int, b: Int), Int> = sum
+                let g: Fn<(), Void> = nothing
+                let i: Int = a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e(a: 7, b: 8)
+                let j: Void = g()
+                let k: Int = add.call(input: (a: 1, b: 2))
+                let pair = (a: 1, b: 2)
+                let l: Int = add(pair)
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn functions_as_values_are_checked_like_other_values() {
+        let src = "
+            fn add(a: Int, b: Int) -> Int {
+                return a + b
+            }
+
+            fn f() {
+                let a: Fn<Int, Int> = add
+                let b: Fn<Int> = add
+                let c = add.missing
+                let d = Fn<Int, Int> {}
+                let g = add
+                let h: Bool = g(a: 1, b: 2)
+                let i = g(a: 1)
+            }
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "cannot assign `Fn<(a: Int, b: Int), Int>` to `a`, which has type `Fn<Int, Int>`",
+                "`Fn` has 2 generic parameters, but was given 1",
+                "`Fn<(a: Int, b: Int), Int>` has no field or method `missing`",
+                "`Fn<Int, Int>` is a primitive, so it can only be created by the compiler, such as with a literal",
+                "cannot assign `Int` to `h`, which has type `Bool`",
+                "`g` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
+            ]
+        );
+    }
+
+    #[test]
+    fn functions_that_never_return_end_their_path_as_values_too() {
+        let src = "
+            fn f() -> Int {
+                let stop = exit
+                stop()
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn functions_from_other_modules_are_values_once_imported() {
+        let other = "
+            fn one() -> Int {
+                return 1
+            }
+            ";
+        assert_eq!(
+            check_files(&[
+                ("/other", other),
+                (
+                    "/main",
+                    "use /other\nfn f() -> Fn<(), Int> {\nreturn other::one\n}"
+                ),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/other", other),
+                ("/main", "fn f() -> Fn<(), Int> {\nreturn other::one\n}"),
+            ]),
+            ["/main: `other` is not an imported module"]
+        );
+    }
+
+    #[test]
+    fn a_type_called_fn_does_not_change_function_values() {
+        let src = "
+            group Fn {}
+
+            fn one() -> Int {
+                return 1
+            }
+
+            fn f(mine: Fn) -> Int {
+                let value = one
+                return value() + one()
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn rejects_generic_primitives_outside_the_stdlib() {
+        assert_eq!(
+            messages_top("primitive Pointer<T>"),
+            ["`Pointer` can't be a primitive, since only the standard library can declare them"]
         );
     }
 

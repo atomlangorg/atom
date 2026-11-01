@@ -384,9 +384,12 @@ pub enum Stmt {
         ty: TypeName,
     },
     /// `primitive Name`: a type that the compiler represents itself, such as
-    /// `Int`. Only allowed at the top level of the standard library.
+    /// `Int`, which can be generic, as in `primitive Fn<Input, Output>`. Only
+    /// allowed at the top level of the standard library.
     Primitive {
         name: String,
+        /// The names of its generic parameters, if it's generic.
+        params: Vec<String>,
     },
     /// `primitive fn name(params) -> Type`: a function that the compiler
     /// implements itself, such as `exit`. Only allowed at the top level of

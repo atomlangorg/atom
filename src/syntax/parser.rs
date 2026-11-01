@@ -532,7 +532,7 @@ where
     // Like a block, one field per line with blank lines allowed, and the `{`
     // on the same line as `group`.
     // `<T, U>` after a type's name, naming its generic parameters.
-    let params = ident
+    let generic_params = ident
         .separated_by(just(Token::Comma))
         .at_least(1)
         .collect::<Vec<_>>()
@@ -542,7 +542,7 @@ where
 
     let group_ = just(Token::Group)
         .ignore_then(ident)
-        .then(params.clone())
+        .then(generic_params.clone())
         .then(
             newlines
                 .clone()
@@ -578,7 +578,7 @@ where
     // Laid out like a group, with one option per line.
     let choice_ = just(Token::Choice)
         .ignore_then(ident)
-        .then(params)
+        .then(generic_params.clone())
         .then(
             newlines
                 .clone()
@@ -866,12 +866,15 @@ where
             }
         });
 
-    // `primitive Name` or `primitive fn name(params) -> Type`, which the
-    // checker only allows in the standard library.
+    // `primitive Name`, `primitive Name<T, U>`, or
+    // `primitive fn name(params) -> Type`, which the checker only allows in
+    // the standard library.
     let primitive = just(Token::Primitive).ignore_then(
         signature
             .map(|((name, params), ret)| Stmt::PrimitiveFn { name, params, ret })
-            .or(ident.map(|name| Stmt::Primitive { name })),
+            .or(ident
+                .then(generic_params)
+                .map(|(name, params)| Stmt::Primitive { name, params })),
     );
 
     // The top level can only declare things, so a module never runs code
@@ -2743,12 +2746,21 @@ mod tests {
             parse("primitive Int\nprimitive Bool"),
             Ok(vec![
                 Stmt::Primitive {
-                    name: "Int".to_string()
+                    name: "Int".to_string(),
+                    params: vec![],
                 },
                 Stmt::Primitive {
-                    name: "Bool".to_string()
+                    name: "Bool".to_string(),
+                    params: vec![],
                 },
             ])
+        );
+        assert_eq!(
+            parse("primitive Fn<Input, Output>"),
+            Ok(vec![Stmt::Primitive {
+                name: "Fn".to_string(),
+                params: vec!["Input".to_string(), "Output".to_string()],
+            }])
         );
         for src in [
             "primitive",

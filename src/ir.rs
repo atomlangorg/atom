@@ -57,6 +57,9 @@ pub enum Primitive {
         signed: bool,
     },
     Bool,
+    /// `Fn`, which is a pointer to a function that takes its `Input` as a
+    /// single parameter.
+    Fn,
 }
 
 #[derive(Debug)]
@@ -98,6 +101,9 @@ pub enum PrimitiveFn {
     Equal,
     /// `isNotEqual` on an integer or `Bool`, the opposite of `Equal`.
     NotEqual,
+    /// `Fn.call`, which calls the function that the `Fn` points to with the
+    /// input.
+    CallFn,
 }
 
 #[derive(Debug)]
@@ -194,6 +200,9 @@ pub enum Expr {
         function: usize,
         args: Vec<Expr>,
     },
+    /// A pointer to the function at an index into `Program::functions`, which
+    /// is a value of the primitive type `Fn`.
+    Function(usize),
     /// Creates a group, as an index into `Program::types`, from its fields'
     /// values in the order they're declared.
     Construct {

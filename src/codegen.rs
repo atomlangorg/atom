@@ -19,7 +19,7 @@
 //!
 //! The primitive integer types are LLVM integers of their width, such as `i8`
 //! for `IntU8` and `IntS8`, since LLVM leaves signedness to the operations
-//! used on them. `Bool` is `i1`. Every group is an
+//! used on them. `Bool` is `i1`. An `Fn` is a pointer. Every group is an
 //! LLVM struct of its fields, so `Void` is `{}`. A choice is a struct of an
 //! `i32` tag, the index of its option, then space for the largest of its
 //! options' values, which they share. Every Atom function becomes an
@@ -34,6 +34,7 @@
 use std::{fmt, io, num::NonZeroU32, path::Path, process::Command};
 
 use inkwell::{
+    AddressSpace,
     IntPredicate::{EQ, NE, SGE, SGT, SLE, SLT, UGE, UGT, ULE, ULT},
     OptimizationLevel,
     basic_block::BasicBlock,
@@ -228,6 +229,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .expect("integer types have valid widths")
                     .into(),
                 TypeDef::Primitive(Primitive::Bool) => self.context.bool_type().into(),
+                TypeDef::Primitive(Primitive::Fn) => {
+                    self.context.ptr_type(AddressSpace::default()).into()
+                }
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
                     self.context.opaque_struct_type(name).into()
                 }
@@ -326,16 +330,34 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.build_call(exit, &[code.into()], "")?;
                 self.builder.build_unreachable()?;
             }
+            Body::Primitive(PrimitiveFn::CallFn) => {
+                let input = self.types[function.locals[1]];
+                let fn_type = self.types[function.returns].fn_type(&[input.into()], false);
+                let pointer = value
+                    .get_nth_param(0)
+                    .expect("`self` is the first parameter");
+                let input = value
+                    .get_nth_param(1)
+                    .expect("the input is the second parameter");
+                let result = self
+                    .builder
+                    .build_indirect_call(
+                        fn_type,
+                        pointer.into_pointer_value(),
+                        &[input.into()],
+                        "",
+                    )?
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("every function returns a value, even if it's `Void`");
+                self.builder.build_return(Some(&result))?;
+            }
             // Calls are built as the instruction itself, but the function
             // is still defined like any other.
             &Body::Primitive(primitive) => {
-                let params: Vec<_> = value
-                    .get_param_iter()
-                    .map(|param| param.into_int_value())
-                    .collect();
                 let result = self
-                    .primitive_instruction(primitive, &params)?
-                    .expect("only `exit` isn't a single instruction");
+                    .primitive_instruction(primitive, &value.get_params())?
+                    .expect("only `exit` and `Fn.call` aren't a single instruction");
                 self.builder.build_return(Some(&result))?;
             }
         }
@@ -348,15 +370,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn primitive_instruction(
         &self,
         primitive: PrimitiveFn,
-        args: &[IntValue<'ctx>],
+        args: &[BasicValueEnum<'ctx>],
     ) -> Result<Option<IntValue<'ctx>>, BuilderError> {
+        let int = |index: usize| args[index].into_int_value();
         Ok(Some(match primitive {
-            PrimitiveFn::Exit => return Ok(None),
-            PrimitiveFn::BoolAnd => self.builder.build_and(args[0], args[1], "")?,
-            PrimitiveFn::BoolOr => self.builder.build_or(args[0], args[1], "")?,
-            PrimitiveFn::BoolNot => self.builder.build_not(args[0], "")?,
-            PrimitiveFn::Equal => self.builder.build_int_compare(EQ, args[0], args[1], "")?,
-            PrimitiveFn::NotEqual => self.builder.build_int_compare(NE, args[0], args[1], "")?,
+            PrimitiveFn::Exit | PrimitiveFn::CallFn => return Ok(None),
+            PrimitiveFn::BoolAnd => self.builder.build_and(int(0), int(1), "")?,
+            PrimitiveFn::BoolOr => self.builder.build_or(int(0), int(1), "")?,
+            PrimitiveFn::BoolNot => self.builder.build_not(int(0), "")?,
+            PrimitiveFn::Equal => self.builder.build_int_compare(EQ, int(0), int(1), "")?,
+            PrimitiveFn::NotEqual => self.builder.build_int_compare(NE, int(0), int(1), "")?,
         }))
     }
 
@@ -551,11 +574,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .collect::<Result<Vec<_>, BuilderError>>()?;
                 // A primitive that's a single instruction, such as `==` on
                 // integers, is built in place rather than called.
-                if let Body::Primitive(primitive) = self.program.functions[*function].body {
-                    let ints: Vec<_> = args.iter().map(|arg| arg.into_int_value()).collect();
-                    if let Some(result) = self.primitive_instruction(primitive, &ints)? {
-                        return Ok(result.into());
-                    }
+                if let Body::Primitive(primitive) = self.program.functions[*function].body
+                    && let Some(result) = self.primitive_instruction(primitive, &args)?
+                {
+                    return Ok(result.into());
                 }
                 let args: Vec<_> = args.into_iter().map(Into::into).collect();
                 self.builder
@@ -564,6 +586,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .basic()
                     .expect("every function returns a value, even if it's `Void`")
             }
+            Expr::Function(index) => self.functions[*index]
+                .as_global_value()
+                .as_pointer_value()
+                .into(),
             Expr::Construct { group, fields } => {
                 let mut value = self.types[*group].into_struct_type().get_poison();
                 for (index, field) in fields.iter().enumerate() {
@@ -2416,6 +2442,207 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 2151);
+    }
+
+    #[test]
+    fn functions_can_be_used_as_values() {
+        let src = "
+            fn add(a: Int, b: Int) -> Int {
+                return a + b
+            }
+
+            fn negate(_ value: Int) -> Int {
+                return -value
+            }
+
+            fn scale(_ value: Int, by factor: Int) -> Int {
+                return value * factor
+            }
+
+            fn same(to value: Int) -> Int {
+                return value
+            }
+
+            fn sum(_ pair: (a: Int, b: Int)) -> Int {
+                return pair.a + pair.b
+            }
+
+            fn ten() -> Int {
+                return 10
+            }
+
+            fn main() -> Int {
+                let a = add
+                let b = negate
+                let c = scale
+                let d = same
+                let e = sum
+                let f = ten
+                return a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e(a: 7, b: 8) + f()
+            }
+            ";
+        // 3 - 3 + 20 + 6 + 15 + 10
+        assert_eq!(run(src), 51);
+    }
+
+    #[test]
+    fn calling_a_function_is_the_same_as_using_call() {
+        let src = "
+            fn add(a: Int, b: Int) -> Int {
+                return a + b
+            }
+
+            fn negate(_ value: Int) -> Int {
+                return -value
+            }
+
+            fn main() -> Int {
+                let pair = (a: 30, b: 12)
+                let sums = add(a: 100, b: 1) + add.call(input: (a: 200, b: 2)) + add(pair)
+                return sums + negate(1) + negate.call(input: 2)
+            }
+            ";
+        // 101 + 202 + 42 - 1 - 2
+        assert_eq!(run(src), 342);
+    }
+
+    #[test]
+    fn fn_values_can_be_passed_stored_and_returned() {
+        let src = "
+            choice Maybe {
+                one: Fn<Int, Int>
+                none
+            }
+
+            group Tools {
+                let double: Fn<Int, Int>
+            }
+
+            impl Tools {
+                static fn new() -> Self {
+                    fn double(_ value: Int) -> Int {
+                        return value * 2
+                    }
+
+                    return Self { double: double }
+                }
+            }
+
+            fn inc(_ value: Int) -> Int {
+                return value + 1
+            }
+
+            fn applying(_ function: Fn<Int, Int>, to value: Int) -> Int {
+                return function(value)
+            }
+
+            fn chosen() -> Fn<Int, Int> {
+                return inc
+            }
+
+            fn main() -> Int {
+                var function = chosen()
+                let a = function(1)
+                function = Tools.new().double
+                let b = function(10)
+                let c = applying(Tools.new().double, to: 100)
+                let d = Tools.new().double(1000)
+                match Maybe.one(inc) {
+                    Maybe.one(let found) => {
+                        return a + b + c + d + found(10000)
+                    }
+                    Maybe.none => {
+                        return 0
+                    }
+                }
+            }
+            ";
+        // 2 + 20 + 200 + 2000 + 10001
+        assert_eq!(run(src), 12223);
+    }
+
+    #[test]
+    fn functions_can_recurse_through_fn_values() {
+        let src = "
+            fn sum(to value: Int) -> Int {
+                if value < 1 {
+                    return 0
+                }
+                let again = sum
+                return value + again(to: value - 1)
+            }
+
+            fn main() -> Int {
+                return sum(to: 10)
+            }
+            ";
+        assert_eq!(run(src), 55);
+    }
+
+    #[test]
+    fn fn_can_use_generic_parameters() {
+        let src = "
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+
+                fn mapped(with function: Fn<Self.T, Self.T>) -> Self {
+                    return Self { value: function(self.value) }
+                }
+            }
+
+            fn doubled(_ value: Int) -> Int {
+                return value * 2
+            }
+
+            fn inverted(_ value: Bool) -> Bool {
+                return !value
+            }
+
+            fn main() -> Int {
+                let flag = Box<Bool>.of(false).mapped(with: inverted)
+                if !flag.value {
+                    return 0
+                }
+                return Box<Int>.of(21).mapped(with: doubled).value
+            }
+            ";
+        assert_eq!(run(src), 42);
+    }
+
+    #[test]
+    fn top_level_values_can_hold_functions() {
+        let src = "
+            let divider = divide
+            let result = divider(10, by: 2)
+
+            fn divide(_ value: Int, by divisor: Int) -> Int {
+                return value / divisor
+            }
+
+            fn main() -> Int {
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 0);
+        // The call is really made, since dividing by zero stops the program.
+        assert!(traps("fn_global_trap", &src.replace("by: 2", "by: 0")));
+    }
+
+    #[test]
+    fn exit_stops_the_program_as_a_value() {
+        let src = "
+            fn main() -> Int {
+                let stop = exit
+                stop()
+            }
+            ";
+        assert_eq!(run_executable("exit_as_value", src).code(), Some(1));
     }
 
     #[test]
