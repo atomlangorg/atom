@@ -25,8 +25,8 @@ use chumsky::{
 use super::{
     ast::{
         Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplAlias, ImplFunction,
-        Import, MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction,
-        UnOp,
+        Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, Program, Stmt,
+        TraitFunction, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
 };
@@ -318,9 +318,13 @@ where
             None => Expr::Var(name),
         });
 
-    let parenthesised = expr
-        .clone()
-        .delimited_by(just(Token::LParen), just(Token::RParen));
+    // `(value)` is a value in brackets, or a tuple with one unlabelled
+    // element, which the checker decides. Anything else in brackets, such as
+    // `()`, `(x: 1)` or `(1, 2)`, is a tuple.
+    let parenthesised = args.clone().map(|mut values| match &values[..] {
+        [Arg { label: None, .. }] => Expr::Paren(Box::new(values.remove(0).value)),
+        _ => Expr::Tuple(values),
+    });
 
     // `Type { field: value, ... }`. Every field must be labelled.
     let field_value = ident
@@ -378,13 +382,72 @@ where
             .boxed(),
     ));
 
+    // `_`, `let name`, a literal, a tuple of patterns, or `Type.option` with
+    // an optional pattern for its value, as in `Shape.circle(let radius)`.
+    let pattern = recursive(|pattern| {
+        let int = just(Token::Minus)
+            .or_not()
+            .then(select! { Token::Int(n) => n })
+            .map(|(minus, value)| Pattern::Int {
+                value,
+                negative: minus.is_some(),
+            });
+        let element = ident
+            .then_ignore(just(Token::Colon))
+            .or_not()
+            .then(pattern.clone())
+            .map(|(label, pattern)| TuplePattern { label, pattern });
+        let option = name
+            .clone()
+            .then_ignore(just(Token::Dot))
+            .then(ident)
+            .then(
+                pattern
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not(),
+            )
+            .map(|((ty, option), value)| Pattern::Option {
+                ty,
+                option,
+                value: value.map(Box::new),
+            });
+        choice((
+            just(Token::Underscore).to(Pattern::Any),
+            just(Token::Let).ignore_then(ident).map(Pattern::Binding),
+            select! { Token::Bool(b) => Pattern::Bool(b) },
+            int,
+            comma_list(element, Token::LParen, Token::RParen).map(Pattern::Tuple),
+            option,
+        ))
+        .labelled("pattern")
+    })
+    .boxed();
+
     let mutability = select! {
         Token::Let => Mutability::Let,
         Token::Var => Mutability::Var,
     };
 
-    // Type names are resolved by the checker, not reserved by the lexer.
-    let type_name = name.labelled("type");
+    // Type names are resolved by the checker, not reserved by the lexer. A
+    // tuple type is written like parameters, as in `(at x: Int, y: Int)`,
+    // except that `_: Int` has neither a label nor a name.
+    let type_name = recursive(|type_name| {
+        let element = just(Token::Underscore)
+            .ignore_then(ident.or_not())
+            .map(|name| (None, name))
+            .or(ident
+                .then(ident)
+                .map(|(label, name)| (Some(label), Some(name))))
+            .or(ident.map(|name| (Some(name.clone()), Some(name))))
+            .then_ignore(just(Token::Colon))
+            .then(type_name)
+            .map(|((label, name), ty)| TupleElement { label, name, ty });
+        name.clone()
+            .map(TypeName::Named)
+            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
+            .labelled("type")
+    })
+    .boxed();
     let annotation = just(Token::Colon).ignore_then(type_name.clone());
 
     let decl = mutability
@@ -452,7 +515,7 @@ where
         .then(annotation.or_not())
         .map(|(name, ty)| ChoiceOption {
             name,
-            ty: ty.unwrap_or_else(|| Name::new("Void")),
+            ty: ty.unwrap_or_else(|| TypeName::new("Void")),
         });
 
     // Laid out like a group, with one option per line.
@@ -491,7 +554,7 @@ where
             just(Token::Arrow)
                 .ignore_then(type_name.clone())
                 .or_not()
-                .map(|ret| ret.unwrap_or_else(|| Name::new("Void"))),
+                .map(|ret| ret.unwrap_or_else(|| TypeName::new("Void"))),
         )
         .boxed();
 
@@ -525,26 +588,12 @@ where
                 })
         });
 
-        // `Type.option` or `Type.option(let name)`, then the option's block,
-        // with the `{` on the same line.
-        let match_option = type_name
+        // A pattern, then its block, with the `{` on the same line.
+        let match_arm = pattern
             .clone()
-            .then_ignore(just(Token::Dot))
-            .then(ident)
-            .then(
-                just(Token::Let)
-                    .ignore_then(ident)
-                    .delimited_by(just(Token::LParen), just(Token::RParen))
-                    .or_not(),
-            )
             .then_ignore(just(Token::FatArrow))
             .then(block.clone())
-            .map(|(((ty, name), binding), body)| MatchOption {
-                ty,
-                name,
-                binding,
-                body,
-            });
+            .map(|(pattern, body)| MatchArm { pattern, body });
 
         // Like a block, one option per line with blank lines allowed, and the
         // `{` on the same line as `match`.
@@ -554,14 +603,14 @@ where
                 newlines
                     .clone()
                     .ignore_then(
-                        match_option
+                        match_arm
                             .separated_by(newlines.clone().at_least(1))
                             .allow_trailing()
                             .collect(),
                     )
                     .delimited_by(just(Token::LBrace), just(Token::RBrace)),
             )
-            .map(|(value, options)| Stmt::Match { value, options });
+            .map(|(value, arms)| Stmt::Match { value, arms });
 
         let function = signature
             .clone()
@@ -661,12 +710,13 @@ where
         .then(type_name.clone())
         .map(|(name, ty)| ImplItem::Alias(ImplAlias { name, ty }));
 
-    // `with` is only special here, so it can still be a label.
+    // `with` is only special here, so it can still be a label. Only a named
+    // type can have an `impl`, and only a trait can follow `with`.
     let impl_ = just(Token::Impl)
-        .ignore_then(type_name.clone())
+        .ignore_then(name.clone().labelled("type"))
         .then(
             just(Token::Ident("with"))
-                .ignore_then(type_name.clone())
+                .ignore_then(name.clone().labelled("trait"))
                 .or_not(),
         )
         .then(
@@ -866,17 +916,153 @@ mod tests {
         );
     }
 
+    /// `expr` in brackets, which the checker decides is either just `expr`,
+    /// or a tuple holding it.
+    fn paren(expr: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Paren(expr))
+    }
+
+    fn decl_type(src: &str) -> TypeName {
+        match parse_body(src).unwrap().remove(0) {
+            Stmt::Decl { ty: Some(ty), .. } => ty,
+            stmt => panic!("expected a declaration with a type, got {stmt:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tuple_types() {
+        let element = |label: Option<&str>, name: Option<&str>, ty| TupleElement {
+            label: label.map(str::to_string),
+            name: name.map(str::to_string),
+            ty,
+        };
+        assert_eq!(
+            decl_type("let t: (at x: Int, y: Bool, _: Int, _ z: Int) = t"),
+            TypeName::Tuple(vec![
+                element(Some("at"), Some("x"), TypeName::new("Int")),
+                element(Some("y"), Some("y"), TypeName::new("Bool")),
+                element(None, None, TypeName::new("Int")),
+                element(None, Some("z"), TypeName::new("Int")),
+            ])
+        );
+        assert_eq!(decl_type("let t: () = t"), TypeName::Tuple(vec![]));
+        assert_eq!(
+            decl_type("let t: (inner: (x: Int)) = t"),
+            TypeName::Tuple(vec![element(
+                Some("inner"),
+                Some("inner"),
+                TypeName::Tuple(vec![element(Some("x"), Some("x"), TypeName::new("Int"))]),
+            )])
+        );
+        for src in [
+            "let t: (Int) = t",
+            "let t: (x) = t",
+            "let t: (x: ) = t",
+            "let t: (a b c: Int) = t",
+            "let t: (_ _: Int) = t",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn parses_tuple_values() {
+        assert_eq!(parse_expr("()"), Expr::Tuple(vec![]));
+        assert_eq!(
+            parse_expr("(x: 1)"),
+            Expr::Tuple(vec![arg(Some("x"), Expr::Int(1))])
+        );
+        assert_eq!(
+            parse_expr("(at: 1, y: true, 2)"),
+            Expr::Tuple(vec![
+                arg(Some("at"), Expr::Int(1)),
+                arg(Some("y"), Expr::Bool(true)),
+                arg(None, Expr::Int(2)),
+            ])
+        );
+        // A value in brackets might be a tuple, which the checker decides.
+        assert_eq!(parse_expr("(1)"), *paren(int(1)));
+        assert_eq!(
+            parse_expr("(x: 1).x"),
+            field_access(Expr::Tuple(vec![arg(Some("x"), Expr::Int(1))]), "x")
+        );
+    }
+
+    #[test]
+    fn parses_patterns() {
+        let pattern = |src: &str| match parse_body(&format!("match v {{\n{src} => {{}}\n}}")) {
+            Ok(mut stmts) => match stmts.remove(0) {
+                Stmt::Match { mut arms, .. } => arms.remove(0).pattern,
+                stmt => panic!("expected a match, got {stmt:?}"),
+            },
+            Err(errs) => panic!("{src:?} should parse: {errs:?}"),
+        };
+        let element = |label: Option<&str>, pattern| TuplePattern {
+            label: label.map(str::to_string),
+            pattern,
+        };
+        assert_eq!(pattern("_"), Pattern::Any);
+        assert_eq!(pattern("let x"), Pattern::Binding("x".to_string()));
+        assert_eq!(pattern("true"), Pattern::Bool(true));
+        assert_eq!(
+            pattern("-12"),
+            Pattern::Int {
+                value: 12,
+                negative: true,
+            }
+        );
+        assert_eq!(pattern("()"), Pattern::Tuple(vec![]));
+        assert_eq!(
+            pattern("(x: 0, y: let y, _)"),
+            Pattern::Tuple(vec![
+                element(
+                    Some("x"),
+                    Pattern::Int {
+                        value: 0,
+                        negative: false,
+                    }
+                ),
+                element(Some("y"), Pattern::Binding("y".to_string())),
+                element(None, Pattern::Any),
+            ])
+        );
+        assert_eq!(
+            pattern("Shape.pair((left: Shape.empty, right: _))"),
+            Pattern::Option {
+                ty: Name::new("Shape"),
+                option: "pair".to_string(),
+                value: Some(Box::new(Pattern::Tuple(vec![
+                    element(
+                        Some("left"),
+                        Pattern::Option {
+                            ty: Name::new("Shape"),
+                            option: "empty".to_string(),
+                            value: None,
+                        }
+                    ),
+                    element(Some("right"), Pattern::Any),
+                ]))),
+            }
+        );
+        for src in [
+            "match v { x => {} }",
+            "match v { let => {} }",
+            "match v { (let x let y) => {} }",
+            "match v { 1 + 1 => {} }",
+            "match v { -true => {} }",
+            "match v { (x: ) => {} }",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
     #[test]
     fn parentheses_group() {
         assert_eq!(
             parse_body("x = 1 - (2 + 3)"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(
-                    int(1),
-                    BinOp::Sub,
-                    Box::new(Expr::Binary(int(2), BinOp::Add, int(3))),
-                ),
+                Expr::Binary(int(1), BinOp::Sub, paren(bin(int(2), BinOp::Add, int(3)))),
             )])
         );
     }
@@ -892,7 +1078,7 @@ mod tests {
             Ok(vec![
                 assign("x", *neg(int(5))),
                 assign("y", *neg(var("y"))),
-                assign("z", *neg(neg(int(1)))),
+                assign("z", *neg(neg(paren(int(1))))),
             ])
         );
     }
@@ -985,7 +1171,7 @@ mod tests {
         Stmt::Decl {
             mutability,
             name: name.to_string(),
-            ty: ty.map(Name::new),
+            ty: ty.map(TypeName::new),
             value,
         }
     }
@@ -1134,7 +1320,7 @@ mod tests {
         );
         assert_eq!(
             parse_expr("!(a & b)"),
-            *not(bin(var("a"), BinOp::And, var("b")))
+            *not(paren(bin(var("a"), BinOp::And, var("b"))))
         );
     }
 
@@ -1288,7 +1474,11 @@ mod tests {
     fn bracketed_comparisons_can_be_compared() {
         assert_eq!(
             parse_expr("(a == b) == c"),
-            *bin(bin(var("a"), BinOp::Eq, var("b")), BinOp::Eq, var("c"))
+            *bin(
+                paren(bin(var("a"), BinOp::Eq, var("b"))),
+                BinOp::Eq,
+                var("c")
+            )
         );
     }
 
@@ -1602,7 +1792,7 @@ mod tests {
         Param {
             label: label.map(str::to_string),
             name: name.to_string(),
-            ty: Name::new(ty),
+            ty: TypeName::new(ty),
         }
     }
 
@@ -1633,7 +1823,7 @@ mod tests {
             Ok(vec![Stmt::Fn(Function {
                 name: "addFive".to_string(),
                 params: vec![param(Some("to"), "value", "Int")],
-                ret: Name::new("Int"),
+                ret: TypeName::new("Int"),
                 body: vec![Stmt::Return(Some(Expr::Binary(
                     var("value"),
                     BinOp::Add,
@@ -1656,7 +1846,7 @@ mod tests {
                     // `_` means no label.
                     param(None, "c", "Int"),
                 ],
-                ret: Name::new("Void"),
+                ret: TypeName::new("Void"),
                 body: vec![],
             })])
         );
@@ -1676,7 +1866,7 @@ mod tests {
             Ok(vec![Stmt::Fn(Function {
                 name: "reset".to_string(),
                 params: vec![],
-                ret: Name::new("Void"),
+                ret: TypeName::new("Void"),
                 body: vec![assign("count", Expr::Int(0)), Stmt::Return(None)],
             })])
         );
@@ -1786,7 +1976,7 @@ mod tests {
         Field {
             mutability,
             name: name.to_string(),
-            ty: Name::new(ty),
+            ty: TypeName::new(ty),
         }
     }
 
@@ -1866,7 +2056,7 @@ mod tests {
             Ok(vec![Stmt::Fn(Function {
                 name: "f".to_string(),
                 params: vec![],
-                ret: Name::new("Void"),
+                ret: TypeName::new("Void"),
                 body: vec![group_("Inner", vec![])],
             })])
         );
@@ -1934,7 +2124,7 @@ mod tests {
     fn option(name: &str, ty: &str) -> ChoiceOption {
         ChoiceOption {
             name: name.to_string(),
-            ty: Name::new(ty),
+            ty: TypeName::new(ty),
         }
     }
 
@@ -1989,7 +2179,10 @@ mod tests {
                     option("success", "Int"),
                     ChoiceOption {
                         name: "failure".to_string(),
-                        ty: qualified(ModulePath::Named("other".to_string()), "Error"),
+                        ty: TypeName::Named(qualified(
+                            ModulePath::Named("other".to_string()),
+                            "Error"
+                        )),
                     },
                 ],
             )])
@@ -2009,7 +2202,7 @@ mod tests {
             Ok(vec![Stmt::Fn(Function {
                 name: "f".to_string(),
                 params: vec![],
-                ret: Name::new("Void"),
+                ret: TypeName::new("Void"),
                 body: vec![choice_("Inner", vec![])],
             })])
         );
@@ -2050,11 +2243,15 @@ mod tests {
         }
     }
 
-    fn match_option(ty: &str, name: &str, binding: Option<&str>, body: Vec<Stmt>) -> MatchOption {
-        MatchOption {
-            ty: Name::new(ty),
-            name: name.to_string(),
-            binding: binding.map(str::to_string),
+    /// An arm matching the option `name` of `ty`, binding its value to
+    /// `binding` if given.
+    fn match_option(ty: &str, name: &str, binding: Option<&str>, body: Vec<Stmt>) -> MatchArm {
+        MatchArm {
+            pattern: Pattern::Option {
+                ty: Name::new(ty),
+                option: name.to_string(),
+                value: binding.map(|binding| Box::new(Pattern::Binding(binding.to_string()))),
+            },
             body,
         }
     }
@@ -2074,7 +2271,7 @@ mod tests {
             ),
             Ok(vec![Stmt::Match {
                 value: *var("shape"),
-                options: vec![
+                arms: vec![
                     match_option(
                         "Shape",
                         "circle",
@@ -2093,14 +2290,14 @@ mod tests {
             parse_body("match s {}"),
             Ok(vec![Stmt::Match {
                 value: *var("s"),
-                options: vec![],
+                arms: vec![],
             }])
         );
         assert_eq!(
             parse_body("match s { A.a => {} }"),
             Ok(vec![Stmt::Match {
                 value: *var("s"),
-                options: vec![match_option("A", "a", None, vec![])],
+                arms: vec![match_option("A", "a", None, vec![])],
             }])
         );
         assert_eq!(
@@ -2118,11 +2315,13 @@ mod tests {
             ),
             Ok(vec![Stmt::Match {
                 value: method_call(*var("s"), "shape", vec![]),
-                options: vec![
-                    MatchOption {
-                        ty: qualified(ModulePath::Named("other".to_string()), "Shape"),
-                        name: "circle".to_string(),
-                        binding: Some("r".to_string()),
+                arms: vec![
+                    MatchArm {
+                        pattern: Pattern::Option {
+                            ty: qualified(ModulePath::Named("other".to_string()), "Shape"),
+                            option: "circle".to_string(),
+                            value: Some(Box::new(Pattern::Binding("r".to_string()))),
+                        },
                         body: vec![Stmt::Return(Some(*var("r")))],
                     },
                     match_option("Shape", "empty", None, vec![]),
@@ -2138,14 +2337,14 @@ mod tests {
             parse_body("match s {}"),
             Ok(vec![Stmt::Match {
                 value: *var("s"),
-                options: vec![],
+                arms: vec![],
             }])
         );
         assert_eq!(
             parse_body("match (S {}) {}"),
             Ok(vec![Stmt::Match {
-                value: construct(Name::new("S"), vec![]),
-                options: vec![],
+                value: Expr::Paren(Box::new(construct(Name::new("S"), vec![]))),
+                arms: vec![],
             }])
         );
     }
@@ -2244,17 +2443,17 @@ mod tests {
                 Stmt::Fn(Function {
                     name: "f".to_string(),
                     params: vec![],
-                    ret: Name::new("Void"),
+                    ret: TypeName::new("Void"),
                     body: vec![],
                 }),
                 group_("S", vec![]),
                 choice_("C", vec![]),
-                alias("A", Name::new("S")),
+                alias("A", TypeName::new("S")),
             ])
         );
     }
 
-    fn alias(name: &str, ty: Name) -> Stmt {
+    fn alias(name: &str, ty: TypeName) -> Stmt {
         Stmt::Alias {
             name: name.to_string(),
             ty,
@@ -2265,16 +2464,16 @@ mod tests {
     fn parses_aliases() {
         assert_eq!(
             parse_body("alias ID = Int"),
-            Ok(vec![alias("ID", Name::new("Int"))])
+            Ok(vec![alias("ID", TypeName::new("Int"))])
         );
         assert_eq!(
             parse_body("alias Shape = /shapes/shape::Shape"),
             Ok(vec![alias(
                 "Shape",
-                qualified(
+                TypeName::Named(qualified(
                     ModulePath::Absolute(vec!["shapes".to_string(), "shape".to_string()]),
                     "Shape"
-                ),
+                )),
             )])
         );
     }
@@ -2332,16 +2531,16 @@ mod tests {
                 Stmt::PrimitiveFn {
                     name: "exit".to_string(),
                     params: vec![],
-                    ret: Name::new("Never"),
+                    ret: TypeName::new("Never"),
                 },
                 Stmt::PrimitiveFn {
                     name: "wait".to_string(),
                     params: vec![Param {
                         label: Some("for".to_string()),
                         name: "seconds".to_string(),
-                        ty: Name::new("Int"),
+                        ty: TypeName::new("Int"),
                     }],
-                    ret: Name::new("Void"),
+                    ret: TypeName::new("Void"),
                 },
             ])
         );
@@ -2406,7 +2605,10 @@ mod tests {
             Ok(vec![Stmt::Decl {
                 mutability: Mutability::Let,
                 name: "x".to_string(),
-                ty: Some(qualified(ModulePath::Named("stdlib".to_string()), "Int")),
+                ty: Some(TypeName::Named(qualified(
+                    ModulePath::Named("stdlib".to_string()),
+                    "Int"
+                ))),
                 value: Expr::Int(1),
             }])
         );
@@ -2521,7 +2723,7 @@ mod tests {
         assert_eq!(
             parse_body("if (Flag {}) {}"),
             Ok(vec![if_(
-                construct(Name::new("Flag"), vec![]),
+                *paren(Box::new(construct(Name::new("Flag"), vec![]))),
                 vec![],
                 None
             )])
@@ -3103,7 +3305,7 @@ mod tests {
                             function: Function {
                                 name: "score".to_string(),
                                 params: vec![],
-                                ret: Name::new("Int"),
+                                ret: TypeName::new("Int"),
                                 body: vec![Stmt::Return(Some(method_call(
                                     Expr::SelfValue,
                                     "base",
@@ -3117,7 +3319,7 @@ mod tests {
                             function: Function {
                                 name: "rename".to_string(),
                                 params: vec![param(Some("to"), "name", "Int")],
-                                ret: Name::new("Void"),
+                                ret: TypeName::new("Void"),
                                 body: vec![],
                             },
                         },
@@ -3127,7 +3329,7 @@ mod tests {
                             function: Function {
                                 name: "make".to_string(),
                                 params: vec![],
-                                ret: Name::new("User"),
+                                ret: TypeName::new("User"),
                                 body: vec![Stmt::Return(Some(method_call(
                                     *var("User"),
                                     "make",
@@ -3163,7 +3365,11 @@ mod tests {
                 bin(
                     Box::new(method_call(*call("f", vec![]), "g", vec![])),
                     BinOp::Add,
-                    Box::new(method_call(*bin(int(1), BinOp::Add, int(2)), "h", vec![])),
+                    Box::new(method_call(
+                        *paren(bin(int(1), BinOp::Add, int(2))),
+                        "h",
+                        vec![],
+                    )),
                 ),
                 BinOp::Add,
                 Box::new(method_call(Expr::Int(3), "i", vec![])),
@@ -3268,7 +3474,7 @@ mod tests {
         let param = |label: Option<&str>, name: &str, ty: &str| Param {
             label: label.map(str::to_string),
             name: name.to_string(),
-            ty: Name::new(ty),
+            ty: TypeName::new(ty),
         };
         assert_eq!(
             parse(
@@ -3291,21 +3497,21 @@ mod tests {
                             is_static: false,
                             name: "and".to_string(),
                             params: vec![param(None, "rhs", "Self")],
-                            ret: Name::new("Bool"),
+                            ret: TypeName::new("Bool"),
                             body: None,
                         },
                         TraitFunction {
                             is_static: true,
                             name: "zero".to_string(),
                             params: vec![],
-                            ret: Name::new("Self"),
+                            ret: TypeName::new("Self"),
                             body: None,
                         },
                         TraitFunction {
                             is_static: false,
                             name: "reset".to_string(),
                             params: vec![param(Some("to"), "value", "Int")],
-                            ret: Name::new("Void"),
+                            ret: TypeName::new("Void"),
                             body: None,
                         },
                     ],
@@ -3358,9 +3564,9 @@ mod tests {
                         params: vec![Param {
                             label: None,
                             name: "rhs".to_string(),
-                            ty: Name::new("Self"),
+                            ty: TypeName::new("Self"),
                         }],
-                        ret: Name::new("Bool"),
+                        ret: TypeName::new("Bool"),
                         body: vec![],
                     },
                 }],
@@ -3406,11 +3612,11 @@ mod tests {
             &[
                 ImplAlias {
                     name: "Rhs".to_string(),
-                    ty: Name::new("Self"),
+                    ty: TypeName::new("Self"),
                 },
                 ImplAlias {
                     name: "Output".to_string(),
-                    ty: qualified(ModulePath::Named("core".to_string()), "Bool"),
+                    ty: TypeName::Named(qualified(ModulePath::Named("core".to_string()), "Bool")),
                 },
             ]
         );
@@ -3483,7 +3689,7 @@ mod tests {
             Ok(vec![Stmt::Decl {
                 mutability: Mutability::Let,
                 name: "p".to_string(),
-                ty: Some(Name::new("Self")),
+                ty: Some(TypeName::new("Self")),
                 value: construct(
                     Name::new("Self"),
                     vec![FieldValue {
@@ -3615,7 +3821,7 @@ mod tests {
                 Stmt::Decl {
                     mutability: Mutability::Let,
                     name: "x".to_string(),
-                    ty: Some(qualified(package(), "Int")),
+                    ty: Some(TypeName::Named(qualified(package(), "Int"))),
                     value: method_call(Expr::Var(qualified(package(), "Int")), "zero", vec![]),
                 },
             ])

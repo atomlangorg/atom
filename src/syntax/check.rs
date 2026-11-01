@@ -49,8 +49,9 @@ use std::{
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, ImplAlias, ImplFunction, Import,
-        MatchOption, ModulePath, Mutability, Name, Param, Program, Stmt, TraitFunction, UnOp,
+        self as ast, Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, ImplAlias, ImplFunction,
+        Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, Program, Stmt,
+        TraitFunction, TypeName, UnOp,
     },
     parser::parse,
 };
@@ -265,16 +266,18 @@ pub enum CheckError {
     },
     /// A choice was constructed like a group, rather than from an option.
     ConstructedChoice(Type),
-    /// A `match` was used on a value that isn't a choice.
-    MatchNotChoice(Type),
-    /// A `match` names an option of a different type to the matched value's.
+    /// A pattern can't match the type of value it's matched against.
+    PatternMismatch { pattern: String, ty: Type },
+    /// A pattern names an option of a different type to the matched value's.
     WrongPatternType { expected: Type, found: Type },
-    /// A `match` names an option that the choice doesn't have.
+    /// A pattern names an option that the choice doesn't have.
     UnknownOption { ty: Type, option: String },
-    /// A `match` matches an option more than once, such as `Shape.circle`.
-    DuplicateOption(String),
-    /// A `match` doesn't match some options, such as `Shape.circle`.
-    MissingOptions(Vec<String>),
+    /// A pattern in a `match` can't be reached, since the ones before it
+    /// match everything it does.
+    UnreachablePattern(String),
+    /// A `match` doesn't match some values, shown as these patterns, with
+    /// `more` if there are more than are shown.
+    MissingPatterns { patterns: Vec<String>, more: bool },
     /// A field was called like a method.
     FieldNotMethod { ty: Type, field: String },
     /// A method or static function was used without calling it.
@@ -333,6 +336,9 @@ pub enum CheckError {
     /// An `impl` without a trait has an alias, which only a trait can
     /// declare.
     ImplAliasWithoutTrait(String),
+    /// `Self` or one of a trait's aliases was used in a tuple type in the
+    /// trait's signatures.
+    TraitTypeInTuple(String),
     /// An alias that's inferred from an `impl`'s signatures was used in them,
     /// or in another of its aliases, without being given.
     InferredAliasUsed(String),
@@ -591,7 +597,9 @@ impl fmt::Display for CheckError {
             Self::NoOption { ty, option } => {
                 write!(f, "`{ty}` has no option or static function `{option}`")
             }
-            Self::MatchNotChoice(ty) => write!(f, "`match` needs a choice, found `{ty}`"),
+            Self::PatternMismatch { pattern, ty } => {
+                write!(f, "pattern `{pattern}` can't match `{ty}`")
+            }
             Self::WrongPatternType { expected, found } => write!(
                 f,
                 "`match` is on `{expected}`, so it can't match an option of `{found}`"
@@ -599,16 +607,26 @@ impl fmt::Display for CheckError {
             Self::UnknownOption { ty, option } => {
                 write!(f, "`{ty}` has no option `{option}`")
             }
-            Self::DuplicateOption(option) => {
-                write!(f, "`{option}` is matched more than once")
-            }
-            Self::MissingOptions(options) => {
-                let s = if options.len() == 1 { "" } else { "s" };
-                write!(
-                    f,
-                    "`match` is missing the option{s} {}",
-                    quoted_list(options, "and")
-                )
+            Self::UnreachablePattern(pattern) => write!(
+                f,
+                "pattern `{pattern}` can't be reached, since the patterns before it match everything it does"
+            ),
+            Self::MissingPatterns { patterns, more } => {
+                let s = if patterns.len() == 1 && !more {
+                    ""
+                } else {
+                    "s"
+                };
+                let patterns = if *more {
+                    let quoted: Vec<_> = patterns
+                        .iter()
+                        .map(|pattern| format!("`{pattern}`"))
+                        .collect();
+                    format!("{} and others", quoted.join(", "))
+                } else {
+                    quoted_list(patterns, "and")
+                };
+                write!(f, "`match` is missing the pattern{s} {patterns}")
             }
             Self::OptionNeedsValue {
                 ty,
@@ -675,6 +693,10 @@ impl fmt::Display for CheckError {
             Self::ImplAliasWithoutTrait(name) => write!(
                 f,
                 "`alias {name}` can only be given in an `impl` with a trait that declares it"
+            ),
+            Self::TraitTypeInTuple(name) => write!(
+                f,
+                "`{name}` can't be used in a tuple type in a trait's signatures, since it's a different type in each `impl`"
             ),
             Self::InferredAliasUsed(name) => write!(
                 f,
@@ -746,6 +768,30 @@ struct ParamSignature<'a> {
     ty: Option<Type>,
 }
 
+/// An element of a tuple type as `Checker::tuple_ids` tells them apart: its
+/// label, name and type `id`.
+type TupleKey = (Option<String>, Option<String>, usize);
+
+/// An element of a tuple type, which is built with its label, and read by
+/// its name.
+#[derive(Debug, Clone)]
+struct TupleElementType {
+    label: Option<String>,
+    name: Option<String>,
+    ty: Type,
+}
+
+impl fmt::Display for TupleElementType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let element = ast::TupleElement {
+            label: self.label.clone(),
+            name: self.name.clone(),
+            ty: TypeName::new(&self.ty.name),
+        };
+        write!(f, "{element}")
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FieldSignature<'a> {
     name: &'a str,
@@ -795,6 +841,41 @@ struct TraitInfo<'a> {
     signatures: Vec<(Vec<Option<TraitType>>, Option<TraitType>)>,
 }
 
+/// Which values a pattern matches, for checking that a `match`'s patterns
+/// match every value, and that each matches something new.
+#[derive(Debug, Clone)]
+enum Space {
+    Any,
+    /// The values made with `Ctor`, whose parts match each of these in turn.
+    Ctor(Ctor, Vec<Space>),
+}
+
+/// A way of making a value that patterns can tell apart from the others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ctor {
+    Int(i128),
+    Bool(bool),
+    /// A tuple, whose parts are its elements.
+    Tuple,
+    /// The option of a choice at this index, whose part is its value.
+    Option(usize),
+}
+
+/// The names of the values that `pattern` binds, in order.
+fn bindings(pattern: &Pattern) -> Vec<&str> {
+    match pattern {
+        Pattern::Binding(name) => vec![name],
+        Pattern::Tuple(elements) => elements
+            .iter()
+            .flat_map(|element| bindings(&element.pattern))
+            .collect(),
+        Pattern::Option {
+            value: Some(value), ..
+        } => bindings(value),
+        Pattern::Any | Pattern::Int { .. } | Pattern::Bool(_) | Pattern::Option { .. } => vec![],
+    }
+}
+
 /// An `impl ty with trait_name`, whose functions are checked against the
 /// trait at `index` in `Checker::traits`.
 struct Implementation<'b, 'a> {
@@ -835,7 +916,7 @@ enum TraitType {
 struct Global<'a> {
     module: usize,
     name: &'a str,
-    ty: Option<&'a Name>,
+    ty: Option<&'a TypeName>,
     value: &'a Expr,
     state: LazyType,
     /// What its initialiser compiles to, once it's been checked, or `None` if
@@ -857,8 +938,8 @@ enum LazyType {
 struct Alias<'a> {
     module: usize,
     name: &'a str,
-    /// The name of the type it's an alias of.
-    target: &'a Name,
+    /// The type it's an alias of.
+    target: &'a TypeName,
     state: LazyType,
 }
 
@@ -1060,6 +1141,11 @@ struct Checker<'a> {
     /// For each choice, by `id`, its options in the order they're declared.
     /// Other types aren't in it.
     choice_options: HashMap<usize, Vec<OptionSignature<'a>>>,
+    /// For each tuple type, by `id`, its elements. Other types aren't in it.
+    tuples: HashMap<usize, Vec<TupleElementType>>,
+    /// The `id` of each tuple type, by its elements' labels, names and type
+    /// `id`s. Tuples are the same type only if all of those are the same.
+    tuple_ids: HashMap<Vec<TupleKey>, usize>,
     errors: Vec<ModuleError>,
 }
 
@@ -1183,7 +1269,7 @@ impl<'a> Checker<'a> {
                         aliases,
                         functions,
                     } => {
-                        let self_ty = self.resolve_type(ty);
+                        let self_ty = self.resolve_named_type(ty);
                         let trait_index = with.as_ref().and_then(|with| self.resolve_trait(with));
                         if with.is_none() {
                             for alias in aliases {
@@ -1615,16 +1701,83 @@ impl<'a> Checker<'a> {
         scope.insert(name, binding);
     }
 
+    /// Finds the type `ty`, without reporting an error if there isn't one.
+    fn find_type(&mut self, ty: &TypeName) -> Option<Type> {
+        match ty {
+            TypeName::Named(name) => self.find_named_type(name),
+            TypeName::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| {
+                        Some(TupleElementType {
+                            label: element.label.clone(),
+                            name: element.name.clone(),
+                            ty: self.find_type(&element.ty)?,
+                        })
+                    })
+                    .collect::<Option<_>>()?;
+                Some(self.tuple_type(elements))
+            }
+        }
+    }
+
     /// Finds the type called `name`, without reporting an error if there
     /// isn't one.
-    fn find_type(&mut self, name: &Name) -> Option<Type> {
+    fn find_named_type(&mut self, name: &Name) -> Option<Type> {
         match self.lookup(name) {
             Ok(Binding::Type(ty)) => Some(ty),
             _ => None,
         }
     }
 
-    fn resolve_type(&mut self, name: &Name) -> Option<Type> {
+    /// Finds the type `ty`, reporting an error if it can't be found.
+    fn resolve_type(&mut self, ty: &TypeName) -> Option<Type> {
+        match ty {
+            TypeName::Named(name) => self.resolve_named_type(name),
+            TypeName::Tuple(elements) => {
+                // Every element is resolved, so each one's errors are found.
+                let elements: Vec<_> = elements
+                    .iter()
+                    .map(|element| {
+                        Some(TupleElementType {
+                            label: element.label.clone(),
+                            name: element.name.clone(),
+                            ty: self.resolve_type(&element.ty)?,
+                        })
+                    })
+                    .collect();
+                let elements = elements.into_iter().collect::<Option<_>>()?;
+                Some(self.tuple_type(elements))
+            }
+        }
+    }
+
+    /// The tuple type with `elements`, which is created the first time it's
+    /// needed.
+    fn tuple_type(&mut self, elements: Vec<TupleElementType>) -> Type {
+        let shown: Vec<_> = elements.iter().map(ToString::to_string).collect();
+        let name = format!("({})", shown.join(", "));
+        let key: Vec<_> = elements
+            .iter()
+            .map(|element| (element.label.clone(), element.name.clone(), element.ty.id))
+            .collect();
+        let id = match self.tuple_ids.get(&key) {
+            Some(&id) => id,
+            None => {
+                let id = self.group_fields.len();
+                self.group_fields.push(vec![]);
+                self.group_modules.push(self.module);
+                self.type_names.push(name.clone());
+                self.tuple_ids.insert(key, id);
+                self.tuples.insert(id, elements);
+                id
+            }
+        };
+        Type { id, name }
+    }
+
+    /// Finds the type called `name`, reporting an error if it can't be found.
+    fn resolve_named_type(&mut self, name: &Name) -> Option<Type> {
         match self.lookup(name) {
             Ok(Binding::Type(ty)) => Some(ty),
             // A value from outside the function is still not a type.
@@ -1703,7 +1856,7 @@ impl<'a> Checker<'a> {
 
     /// Checks a `let` or `var` declaration's value, returning the type it's
     /// declared with, along with what the value compiles to.
-    fn decl_type(&mut self, name: &str, type_name: Option<&Name>, value: &Expr) -> Typed {
+    fn decl_type(&mut self, name: &str, type_name: Option<&TypeName>, value: &Expr) -> Typed {
         // Checked first so that `let x = x` refers to an earlier `x`. The
         // explicit type is found first so the value can take its type from
         // it, but its errors are reported after the value's.
@@ -1735,7 +1888,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Declares a function, returning its index into `functions`.
-    fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &Name) -> usize {
+    fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &TypeName) -> usize {
         let index = self.signature(params, ret, self.full_name(name));
         self.declare(name, Binding::Function(index));
         index
@@ -1746,7 +1899,7 @@ impl<'a> Checker<'a> {
     fn declare_method(
         &mut self,
         self_ty: Option<&Type>,
-        method: (&'a String, &'a [Param], &Name),
+        method: (&'a String, &'a [Param], &TypeName),
         is_static: bool,
         full_name: String,
     ) -> usize {
@@ -1796,7 +1949,7 @@ impl<'a> Checker<'a> {
 
     /// Resolves the parameter and return types of the function called
     /// `full_name`, returning its index into `functions`.
-    fn signature(&mut self, params: &'a [Param], ret: &Name, full_name: String) -> usize {
+    fn signature(&mut self, params: &'a [Param], ret: &TypeName, full_name: String) -> usize {
         let params = params
             .iter()
             .map(|param| ParamSignature {
@@ -1912,9 +2065,9 @@ impl<'a> Checker<'a> {
             self.never_returns.contains(&(stmt as *const Stmt))
                 || match stmt {
                     Stmt::Return(_) => true,
-                    Stmt::Match { options, .. } => options
-                        .iter()
-                        .all(|option| self.always_returns(&option.body)),
+                    Stmt::Match { arms, .. } => {
+                        arms.iter().all(|arm| self.always_returns(&arm.body))
+                    }
                     Stmt::If {
                         then_block,
                         else_block: Some(else_block),
@@ -1989,9 +2142,17 @@ impl<'a> Checker<'a> {
         self.traits[index].signatures = signatures;
     }
 
-    /// Resolves the type called `name` in the signature of a trait with
-    /// `aliases`.
-    fn trait_type(&mut self, aliases: &[String], name: &Name) -> Option<TraitType> {
+    /// Resolves the type `ty` in the signature of a trait with `aliases`.
+    fn trait_type(&mut self, aliases: &[String], ty: &TypeName) -> Option<TraitType> {
+        let TypeName::Named(name) = ty else {
+            // `Self` and the aliases are a different type in each `impl`, so
+            // they can't be in a tuple, whose type is always the same.
+            if let Some(name) = trait_names(ty, aliases).next() {
+                self.error(CheckError::TraitTypeInTuple(name.to_string()));
+                return None;
+            }
+            return self.resolve_type(ty).map(TraitType::Type);
+        };
         if *name == Name::new("Self") {
             return Some(TraitType::SelfType);
         }
@@ -2000,7 +2161,7 @@ impl<'a> Checker<'a> {
         {
             return Some(TraitType::Alias(index));
         }
-        self.resolve_type(name).map(TraitType::Type)
+        self.resolve_named_type(name).map(TraitType::Type)
     }
 
     /// Works out the types of an `impl`'s `aliases`, which can use `Self`
@@ -2377,7 +2538,7 @@ impl<'a> Checker<'a> {
 
     /// Declares an alias called `name` of the type called `target`, whose
     /// type has been worked out if `state` says so.
-    fn declare_alias(&mut self, name: &'a str, target: &'a Name, state: LazyType) {
+    fn declare_alias(&mut self, name: &'a str, target: &'a TypeName, state: LazyType) {
         self.aliases.push(Alias {
             module: self.module,
             name,
@@ -2486,11 +2647,13 @@ impl<'a> Checker<'a> {
     /// group's fields, or the values of a choice's options.
     fn contained_types(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
         let options = self.choice_options.get(&id).into_iter().flatten();
+        let elements = self.tuples.get(&id).into_iter().flatten();
         self.group_fields[id]
             .iter()
             .map(|field| &field.ty)
             .chain(options.map(|option| &option.ty))
             .filter_map(|ty| ty.as_ref().map(|ty| ty.id))
+            .chain(elements.map(|element| element.ty.id))
     }
 
     /// Reports an error if the group or choice with `id` contains itself,
@@ -2642,7 +2805,7 @@ impl<'a> Checker<'a> {
                 self.declare_alias(name, ty, LazyType::Checked(target));
                 None
             }
-            Stmt::Match { value, options } => self.match_(stmt, value, options),
+            Stmt::Match { value, arms } => self.match_(stmt, value, arms),
             Stmt::Return(value) => {
                 let FnContext { name, returns, .. } = self
                     .current_fn
@@ -2691,100 +2854,413 @@ impl<'a> Checker<'a> {
         checked
     }
 
-    /// Checks a `match` on `value`, which must be a choice whose every option
-    /// is matched exactly once by `options`, returning what it compiles to.
-    fn match_(
-        &mut self,
-        stmt: &'a Stmt,
-        value: &Expr,
-        options: &'a [MatchOption],
-    ) -> Option<ir::Stmt> {
+    /// Checks a `match` on `value`, whose arms' patterns must together match
+    /// every value it could be, with each matching something the ones before
+    /// it don't, returning what it compiles to.
+    fn match_(&mut self, stmt: &'a Stmt, value: &Expr, arms: &'a [MatchArm]) -> Option<ir::Stmt> {
         let Typed { ty, expr } = self.evaluating(stmt, |checker| checker.expr(value));
-        let choice = match ty {
-            Some(ty) if self.choice_options.contains_key(&ty.id) => Some(ty),
-            Some(found) => {
-                self.error(CheckError::MatchNotChoice(found));
-                None
-            }
-            None => None,
-        };
-
-        let mut matched = HashSet::new();
         let mut lowered = vec![];
-        for option in options {
-            // Options are still checked when the choice is unknown, so the
-            // errors in their blocks are found.
-            let found = choice
-                .as_ref()
-                .and_then(|choice| self.matched_option(choice, option, &mut matched));
-
-            // The binding is only visible in its option's block.
+        let mut spaces = vec![];
+        for arm in arms {
+            // A pattern's bindings are only visible in its arm's block. Arms
+            // are still checked when the type is unknown, so the errors in
+            // their blocks are found.
             self.scopes.push(HashMap::new());
-            let binding = option.binding.as_ref().map(|name| {
-                let ty = found.as_ref().and_then(|(_, ty)| ty.clone());
-                self.declare_local(name, Mutability::Let, ty)
-            });
-            let body = option
-                .body
-                .iter()
-                .filter_map(|stmt| self.stmt(stmt))
-                .collect();
+            let (pattern, space) = self.pattern(&arm.pattern, ty.as_ref());
+            let body = arm.body.iter().filter_map(|stmt| self.stmt(stmt)).collect();
             self.scopes.pop();
-
-            if let Some((index, _)) = found {
-                lowered.push(ir::MatchOption {
-                    index,
-                    binding,
-                    body,
-                });
+            spaces.push(space);
+            if let Some(pattern) = pattern {
+                lowered.push(ir::MatchArm { pattern, body });
             }
         }
 
-        let choice = choice?;
-        let missing: Vec<_> = self.choice_options[&choice.id]
-            .iter()
-            .filter(|option| !matched.contains(option.name))
-            .map(|option| format!("{choice}.{}", option.name))
-            .collect();
-        if !missing.is_empty() {
-            self.error(CheckError::MissingOptions(missing));
+        // Patterns with errors have already been reported, and can't be told
+        // apart from patterns that match anything.
+        let ty = ty?;
+        if lowered.len() < arms.len() {
+            return None;
         }
-
+        self.check_exhaustive(&ty, arms, spaces);
         Some(ir::Stmt::Match {
             value: expr?,
-            choice: choice.id,
-            options: lowered,
+            ty: ty.id,
+            arms: lowered,
         })
     }
 
-    /// Finds the option of `choice` that `option` from a `match` names,
+    /// Checks `pattern` against a value of type `ty`, declaring the values it
+    /// binds in the current scope. Returns what it compiles to, or `None` if
+    /// it has an error or `ty` is unknown, along with which values it matches.
+    fn pattern(&mut self, pattern: &'a Pattern, ty: Option<&Type>) -> (Option<ir::Pattern>, Space) {
+        let Some(ty) = ty else {
+            // The values it binds are still declared, so their uses aren't
+            // reported as undeclared.
+            for binding in bindings(pattern) {
+                self.declare_local(binding, Mutability::Let, None);
+            }
+            return (None, Space::Any);
+        };
+        let mismatch = |checker: &mut Self| {
+            checker.error(CheckError::PatternMismatch {
+                pattern: pattern.to_string(),
+                ty: ty.clone(),
+            });
+            for binding in bindings(pattern) {
+                checker.declare_local(binding, Mutability::Let, None);
+            }
+            (None, Space::Any)
+        };
+        match pattern {
+            Pattern::Any => (Some(ir::Pattern::Any), Space::Any),
+            Pattern::Binding(name) => {
+                let local = self.declare_local(name, Mutability::Let, Some(ty.clone()));
+                (Some(ir::Pattern::Binding(local)), Space::Any)
+            }
+            Pattern::Int { value, negative } => {
+                let Some((bits, signed)) = self.int_type(ty) else {
+                    return mismatch(self);
+                };
+                let value = if *negative {
+                    -i128::from(*value)
+                } else {
+                    i128::from(*value)
+                };
+                let (min, max) = int_range(bits, signed);
+                if !(min..=max).contains(&value) {
+                    self.error(CheckError::IntOutOfRange {
+                        value,
+                        ty: ty.clone(),
+                        min,
+                        max,
+                    });
+                    return (None, Space::Any);
+                }
+                // Stored as its bits, like an integer literal.
+                let bits = (value as u128 & (u128::MAX >> (128 - bits))) as u64;
+                (
+                    Some(ir::Pattern::Int(bits)),
+                    Space::Ctor(Ctor::Int(value), vec![]),
+                )
+            }
+            Pattern::Bool(value) if *ty == self.std_type("Bool") => (
+                Some(ir::Pattern::Bool(*value)),
+                Space::Ctor(Ctor::Bool(*value), vec![]),
+            ),
+            Pattern::Bool(_) => mismatch(self),
+            Pattern::Tuple(elements) => {
+                // The labels must be the ones the tuple is built with.
+                let types = self.tuples.get(&ty.id).cloned().filter(|types| {
+                    types.len() == elements.len()
+                        && types
+                            .iter()
+                            .zip(elements)
+                            .all(|(ty, element)| ty.label == element.label)
+                });
+                let Some(types) = types else {
+                    return mismatch(self);
+                };
+                let mut lowered = vec![];
+                let mut spaces = vec![];
+                for (element, element_ty) in elements.iter().zip(&types) {
+                    let (pattern, space) = self.pattern(&element.pattern, Some(&element_ty.ty));
+                    lowered.push(pattern);
+                    spaces.push(space);
+                }
+                let lowered = lowered.into_iter().collect::<Option<_>>();
+                (
+                    lowered.map(ir::Pattern::Tuple),
+                    Space::Ctor(Ctor::Tuple, spaces),
+                )
+            }
+            Pattern::Option {
+                ty: type_name,
+                option,
+                value,
+            } => {
+                let found = self.option_pattern(ty, type_name, option);
+                let value_ty = found.as_ref().and_then(|(_, value_ty)| value_ty.as_ref());
+                let (value, space) = match value {
+                    Some(value) => self.pattern(value, value_ty),
+                    None => (Some(ir::Pattern::Any), Space::Any),
+                };
+                let Some((index, _)) = found else {
+                    return (None, Space::Any);
+                };
+                (
+                    value.map(|value| ir::Pattern::Option {
+                        index,
+                        value: Box::new(value),
+                    }),
+                    Space::Ctor(Ctor::Option(index), vec![space]),
+                )
+            }
+        }
+    }
+
+    /// Finds the option called `option` of `type_name`, which must be `ty`,
     /// returning its index and the type of its value, as `Checker::option`
-    /// does, or `None` if it has an error. `matched` holds the names of the
-    /// options matched before it.
-    fn matched_option(
+    /// does, or `None` if it has an error.
+    fn option_pattern(
         &mut self,
-        choice: &Type,
-        option: &'a MatchOption,
-        matched: &mut HashSet<&'a str>,
+        ty: &Type,
+        type_name: &Name,
+        option: &str,
     ) -> Option<(usize, Option<Type>)> {
-        let ty = self.resolve_type(&option.ty)?;
-        if ty != *choice {
+        let found = self.resolve_named_type(type_name)?;
+        if found != *ty {
             self.error(CheckError::WrongPatternType {
-                expected: choice.clone(),
-                found: ty,
+                expected: ty.clone(),
+                found,
             });
             return None;
         }
-        let Some(found) = self.option(&ty, &option.name) else {
-            let option = option.name.clone();
-            self.error(CheckError::UnknownOption { ty, option });
+        let Some(option) = self.option(&found, option) else {
+            let option = option.to_string();
+            self.error(CheckError::UnknownOption { ty: found, option });
             return None;
         };
-        if !matched.insert(&option.name) {
-            self.error(CheckError::DuplicateOption(format!("{ty}.{}", option.name)));
-            return None;
+        Some(option)
+    }
+
+    /// Reports the patterns of `arms`, which match `spaces`, that can't be
+    /// reached, since the ones before them match everything they do, and the
+    /// values of type `ty` that none of them match.
+    fn check_exhaustive(&mut self, ty: &Type, arms: &[MatchArm], spaces: Vec<Space>) {
+        // A few missing values are shown, and one more shows there are more.
+        const SHOWN: usize = 3;
+
+        let mut rows: Vec<Vec<Space>> = vec![];
+        let mut errors = vec![];
+        let tys = std::slice::from_ref(ty);
+        for (arm, space) in arms.iter().zip(spaces) {
+            if self
+                .unmatched(&rows, std::slice::from_ref(&space), tys, 1)
+                .is_empty()
+            {
+                errors.push(CheckError::UnreachablePattern(arm.pattern.to_string()));
+            }
+            rows.push(vec![space]);
         }
-        Some(found)
+        let missing = self.unmatched(&rows, &[Space::Any], tys, SHOWN + 1);
+        if !missing.is_empty() {
+            let shown = missing.iter().take(SHOWN);
+            errors.push(CheckError::MissingPatterns {
+                patterns: shown
+                    .map(|values| self.show_space(&values[0], ty))
+                    .collect(),
+                more: missing.len() > SHOWN,
+            });
+        }
+        for error in errors {
+            self.error(error);
+        }
+    }
+
+    /// Up to `limit` values that `values` matches but none of `rows` do,
+    /// where `values` and each row match a value of each of `tys` in turn.
+    ///
+    /// This is the usual way of checking patterns: values are split up by
+    /// how they're made, as far as patterns can tell, such as which option
+    /// of a choice they are, and each way is checked against the rows that
+    /// match it.
+    fn unmatched(
+        &self,
+        rows: &[Vec<Space>],
+        values: &[Space],
+        tys: &[Type],
+        limit: usize,
+    ) -> Vec<Vec<Space>> {
+        let Some((first, rest)) = values.split_first() else {
+            // Nothing is left to match, so the values are unmatched only if
+            // there are no rows.
+            return if rows.is_empty() {
+                vec![vec![]]
+            } else {
+                vec![]
+            };
+        };
+        let (ty, rest_tys) = (&tys[0], &tys[1..]);
+        if let Space::Ctor(ctor, parts) = first {
+            return self.unmatched_ctor(rows, ctor, parts.clone(), rest, ty, rest_tys, limit);
+        }
+
+        let ctors = self.ctors(ty);
+        // When no row is left, every value is unmatched, which is shown as
+        // `_` rather than each way of making it, unless there are no values,
+        // as for `Never`.
+        if rows.is_empty() && ctors.as_ref().is_none_or(|ctors| !ctors.is_empty()) {
+            return vec![vec![Space::Any; values.len()]];
+        }
+
+        let mut used: Vec<&Ctor> = vec![];
+        for row in rows {
+            if let Space::Ctor(ctor, _) = &row[0]
+                && !used.contains(&ctor)
+            {
+                used.push(ctor);
+            }
+        }
+        // Each way of making a value that a row uses is checked against the
+        // rows that match it, in the order they're declared if they're known.
+        let checked: Vec<&Ctor> = match &ctors {
+            Some(ctors) => ctors.iter().filter(|ctor| used.contains(ctor)).collect(),
+            None => used.clone(),
+        };
+        let mut found = vec![];
+        for ctor in checked {
+            let parts = vec![Space::Any; self.ctor_types(ty, ctor).len()];
+            let left = limit - found.len();
+            found.extend(self.unmatched_ctor(rows, ctor, parts, rest, ty, rest_tys, left));
+            if found.len() >= limit {
+                return found;
+            }
+        }
+
+        // A value made any other way is only matched by the rows that match
+        // anything first. It's shown as each way that no row uses, if they're
+        // known, and `_` otherwise.
+        let unused: Vec<Space> = match &ctors {
+            Some(ctors) => ctors
+                .iter()
+                .filter(|ctor| !used.contains(ctor))
+                .map(|ctor| {
+                    let parts = vec![Space::Any; self.ctor_types(ty, ctor).len()];
+                    Space::Ctor(ctor.clone(), parts)
+                })
+                .collect(),
+            None => vec![Space::Any],
+        };
+        if unused.is_empty() {
+            return found;
+        }
+        let defaults: Vec<_> = rows
+            .iter()
+            .filter(|row| matches!(row[0], Space::Any))
+            .map(|row| row[1..].to_vec())
+            .collect();
+        let others = self.unmatched(&defaults, rest, rest_tys, limit - found.len());
+        for first in unused {
+            for other in &others {
+                found.push(
+                    iter::once(first.clone())
+                        .chain(other.iter().cloned())
+                        .collect(),
+                );
+                if found.len() >= limit {
+                    return found;
+                }
+            }
+        }
+        found
+    }
+
+    /// Like `unmatched`, for values made with `ctor` from `parts`, followed
+    /// by `rest`.
+    #[allow(clippy::too_many_arguments)]
+    fn unmatched_ctor(
+        &self,
+        rows: &[Vec<Space>],
+        ctor: &Ctor,
+        parts: Vec<Space>,
+        rest: &[Space],
+        ty: &Type,
+        rest_tys: &[Type],
+        limit: usize,
+    ) -> Vec<Vec<Space>> {
+        let part_tys = self.ctor_types(ty, ctor);
+        let arity = part_tys.len();
+        // The rows that match values made this way, with their parts.
+        let specialised: Vec<Vec<Space>> = rows
+            .iter()
+            .filter_map(|row| {
+                let parts = match &row[0] {
+                    Space::Ctor(found, parts) if found == ctor => parts.clone(),
+                    Space::Ctor(..) => return None,
+                    Space::Any => vec![Space::Any; arity],
+                };
+                Some(parts.into_iter().chain(row[1..].iter().cloned()).collect())
+            })
+            .collect();
+        let values: Vec<_> = parts.into_iter().chain(rest.iter().cloned()).collect();
+        let tys: Vec<_> = part_tys
+            .into_iter()
+            .chain(rest_tys.iter().cloned())
+            .collect();
+        self.unmatched(&specialised, &values, &tys, limit)
+            .into_iter()
+            .map(|mut found| {
+                let rest = found.split_off(arity);
+                iter::once(Space::Ctor(ctor.clone(), found))
+                    .chain(rest)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Every way of making a value of `ty` that patterns can tell apart, or
+    /// `None` if there are too many to list, such as for integers, or
+    /// patterns can't tell them apart, such as for groups.
+    fn ctors(&self, ty: &Type) -> Option<Vec<Ctor>> {
+        if *ty == self.std_type("Bool") {
+            Some(vec![Ctor::Bool(false), Ctor::Bool(true)])
+        } else if self.tuples.contains_key(&ty.id) {
+            Some(vec![Ctor::Tuple])
+        } else {
+            let options = self.choice_options.get(&ty.id)?;
+            Some((0..options.len()).map(Ctor::Option).collect())
+        }
+    }
+
+    /// The types of the parts of a value of `ty` made with `ctor`.
+    fn ctor_types(&self, ty: &Type, ctor: &Ctor) -> Vec<Type> {
+        match ctor {
+            Ctor::Int(_) | Ctor::Bool(_) => vec![],
+            Ctor::Tuple => self.tuples[&ty.id]
+                .iter()
+                .map(|element| element.ty.clone())
+                .collect(),
+            // An option whose type is unknown has already been reported.
+            Ctor::Option(index) => vec![
+                self.choice_options[&ty.id][*index]
+                    .ty
+                    .clone()
+                    .unwrap_or_else(|| self.std_type("Void")),
+            ],
+        }
+    }
+
+    /// How values of `ty` matching `space` are written as a pattern.
+    fn show_space(&self, space: &Space, ty: &Type) -> String {
+        let Space::Ctor(ctor, parts) = space else {
+            return "_".to_string();
+        };
+        let part_tys = self.ctor_types(ty, ctor);
+        match ctor {
+            Ctor::Int(value) => value.to_string(),
+            Ctor::Bool(value) => value.to_string(),
+            Ctor::Tuple => {
+                let elements: Vec<_> = self.tuples[&ty.id]
+                    .iter()
+                    .zip(parts.iter().zip(&part_tys))
+                    .map(|(element, (part, part_ty))| {
+                        let part = self.show_space(part, part_ty);
+                        match &element.label {
+                            Some(label) => format!("{label}: {part}"),
+                            None => part,
+                        }
+                    })
+                    .collect();
+                format!("({})", elements.join(", "))
+            }
+            Ctor::Option(index) => {
+                let option = self.choice_options[&ty.id][*index].name;
+                match &parts[0] {
+                    Space::Any => format!("{ty}.{option}"),
+                    value => format!("{ty}.{option}({})", self.show_space(value, &part_tys[0])),
+                }
+            }
+        }
     }
 
     /// Checks `expr`, where no particular type is expected.
@@ -2862,6 +3338,19 @@ impl<'a> Checker<'a> {
             Expr::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::Construct { ty, fields } => self.construct(ty, fields),
+            Expr::Paren(value) => match expected.and_then(|ty| self.tuples.get(&ty.id)) {
+                // A tuple with one unlabelled element is built from a value in
+                // brackets, as in `(1)`.
+                Some(elements) if matches!(&elements[..], [element] if element.label.is_none()) => {
+                    let arg = Arg {
+                        label: None,
+                        value: (**value).clone(),
+                    };
+                    self.tuple(&[arg], expected)
+                }
+                _ => self.expr_as(value, expected),
+            },
+            Expr::Tuple(values) => self.tuple(values, expected),
             Expr::MethodCall {
                 receiver,
                 method,
@@ -3153,6 +3642,64 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Checks a tuple built from `values`, labelled like the elements of its
+    /// type. If it has the labels of `expected`, its values take their types
+    /// from its elements, and it's that type if they're the same. Otherwise,
+    /// its elements are named after their labels, so `(x: 1)` is `(x: Int)`,
+    /// and the elements without labels can't be read.
+    fn tuple(&mut self, values: &[Arg], expected: Option<&Type>) -> Typed {
+        let expected_elements = expected
+            .and_then(|ty| self.tuples.get(&ty.id))
+            .filter(|elements| {
+                elements.len() == values.len()
+                    && elements
+                        .iter()
+                        .zip(values)
+                        .all(|(element, value)| element.label == value.label)
+            })
+            .cloned();
+        let typed: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let element = expected_elements
+                    .as_ref()
+                    .map(|elements| &elements[index].ty);
+                self.expr_as(&value.value, element)
+            })
+            .collect();
+        let (found, lowered) = split(typed);
+
+        // An element whose type is unknown has already been reported.
+        let is_expected = expected_elements.is_some_and(|elements| {
+            elements
+                .iter()
+                .zip(&found)
+                .all(|(element, found)| found.as_ref().is_none_or(|found| *found == element.ty))
+        });
+        let ty = if is_expected {
+            expected.cloned()
+        } else {
+            let elements = values.iter().zip(found).map(|(value, ty)| {
+                Some(TupleElementType {
+                    label: value.label.clone(),
+                    name: value.label.clone(),
+                    ty: ty?,
+                })
+            });
+            let elements = elements.collect::<Option<_>>();
+            elements.map(|elements| self.tuple_type(elements))
+        };
+        let expr = ty
+            .as_ref()
+            .zip(lowered)
+            .map(|(ty, fields)| ir::Expr::Construct {
+                group: ty.id,
+                fields,
+            });
+        Typed { ty, expr }
+    }
+
     /// Checks `lhs .< rhs` or `lhs .> rhs`, which shift the bits of an
     /// unsigned integer, producing another of the same type. The amount to
     /// shift by can be any integer type.
@@ -3273,8 +3820,16 @@ impl<'a> Checker<'a> {
         Some(Receiver::Value(ty?, expr))
     }
 
-    /// Finds the field or method of `ty` called `name`.
+    /// Finds the field or method of `ty` called `name`. A tuple's elements
+    /// are its fields, found by their names.
     fn member(&self, ty: &Type, name: &str) -> Option<Member> {
+        if let Some(elements) = self.tuples.get(&ty.id)
+            && let Some(index) = elements
+                .iter()
+                .position(|element| element.name.as_deref() == Some(name))
+        {
+            return Some(Member::Field(index, Some(elements[index].ty.clone())));
+        }
         if let Some(index) = self.group_fields[ty.id]
             .iter()
             .position(|field| field.name == name)
@@ -3542,7 +4097,7 @@ impl<'a> Checker<'a> {
         // Values are checked first, so their errors come before the group's,
         // but the group is found first, without reporting errors, so they
         // can take their types from its fields.
-        let fields = match self.find_type(type_name) {
+        let fields = match self.find_named_type(type_name) {
             Some(ty) => self.group_fields[ty.id].clone(),
             None => vec![],
         };
@@ -3555,7 +4110,7 @@ impl<'a> Checker<'a> {
         });
         let (found, lowered) = split(typed.collect());
 
-        let Some(ty) = self.resolve_type(type_name) else {
+        let Some(ty) = self.resolve_named_type(type_name) else {
             return Typed::UNKNOWN;
         };
         let with_error = |ty| Typed {
@@ -3757,6 +4312,13 @@ impl<'a> Checker<'a> {
                 let name = self.type_names[id].clone();
                 if let Some(&primitive) = self.primitives.get(&id) {
                     ir::TypeDef::Primitive(primitive)
+                } else if let Some(elements) = self.tuples.get(&id) {
+                    // A tuple is laid out like a group of its elements.
+                    let fields = elements.iter().map(|element| element.ty.id);
+                    ir::TypeDef::Group {
+                        name,
+                        fields: fields.collect(),
+                    }
                 } else if let Some(options) = self.choice_options.get(&id) {
                     let options = options.iter().map(|option| type_id(&option.ty));
                     ir::TypeDef::Choice {
@@ -3818,6 +4380,26 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// The names in the tuple type `ty` that are `Self` or one of `aliases`,
+/// which stand for a different type in each `impl` of a trait.
+fn trait_names<'b>(
+    ty: &'b TypeName,
+    aliases: &'b [String],
+) -> Box<dyn Iterator<Item = &'b str> + 'b> {
+    match ty {
+        TypeName::Named(name) if name.module.is_none() => {
+            let is_trait_name = name.name == "Self" || aliases.contains(&name.name);
+            Box::new(is_trait_name.then_some(name.name.as_str()).into_iter())
+        }
+        TypeName::Named(_) => Box::new(iter::empty()),
+        TypeName::Tuple(elements) => Box::new(
+            elements
+                .iter()
+                .flat_map(move |element| trait_names(&element.ty, aliases)),
+        ),
+    }
+}
+
 /// How `function` is written in its trait, such as `fn and(_ rhs: Self) ->
 /// Bool`, for messages.
 fn signature_text(function: &TraitFunction) -> String {
@@ -3831,7 +4413,7 @@ fn signature_text(function: &TraitFunction) -> String {
         })
         .collect();
     let static_ = if function.is_static { "static " } else { "" };
-    let returns = if function.ret == Name::new("Void") {
+    let returns = if function.ret == TypeName::new("Void") {
         String::new()
     } else {
         format!(" -> {}", function.ret)
@@ -3857,7 +4439,9 @@ fn int_range(bits: u32, signed: bool) -> (i128, i128) {
 fn has_own_type(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) => false,
-        Expr::Unary(UnOp::Neg | UnOp::BitNot, operand) => has_own_type(operand),
+        Expr::Unary(UnOp::Neg | UnOp::BitNot, operand) | Expr::Paren(operand) => {
+            has_own_type(operand)
+        }
         Expr::Binary(
             lhs,
             BinOp::Add
@@ -9031,10 +9615,258 @@ primitive Float"
     }
 
     #[test]
-    fn match_needs_a_choice() {
+    fn tuples_are_built_with_labels_and_read_by_names() {
+        let src = "
+            alias Point = (at x: Int, y: Int)
+
+            fn make() -> Point {
+                return (at: 1, y: 2)
+            }
+
+            fn f(point: Point, pair: (_ first: Bool, _: Int)) -> Int {
+                let unit: () = ()
+                let single: (_: Int) = (1)
+                let plain: Int = (1) + 2
+                let named = (count: 3)
+                let first: Bool = pair.first
+                return point.x + point.y + make().x + named.count + (x: 4).x
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn tuples_without_names_cannot_be_read() {
+        assert_eq!(
+            messages_top(
+                "
+                fn f(point: (at x: Int, _: Int)) -> Int {
+                    let a = (1, 2).x
+                    return point.at
+                }
+                "
+            ),
+            [
+                "`(_: Int, _: Int)` has no field or method `x`",
+                "`(at x: Int, _: Int)` has no field or method `at`",
+            ]
+        );
+    }
+
+    #[test]
+    fn tuples_are_the_same_type_only_if_everything_matches() {
+        // Labels, names, types and their order all count.
+        assert_eq!(
+            messages_top(
+                "
+                fn f(point: (x: Int, y: Int)) -> (at x: Int, y: Int) {
+                    let a: (y: Int, x: Int) = point
+                    let b: (x: Bool, y: Int) = (x: 1, y: 2)
+                    let c: (_: Int) = 1
+                    let d: (x: Int) = (x: 1, y: 2)
+                    return point
+                }
+                "
+            ),
+            [
+                "cannot assign `(x: Int, y: Int)` to `a`, which has type `(y: Int, x: Int)`",
+                "cannot assign `(x: Int, y: Int)` to `b`, which has type `(x: Bool, y: Int)`",
+                "cannot assign `Int` to `c`, which has type `(_: Int)`",
+                "cannot assign `(x: Int, y: Int)` to `d`, which has type `(x: Int)`",
+                "`f` must return `(at x: Int, y: Int)`, found `(x: Int, y: Int)`",
+            ]
+        );
+    }
+
+    #[test]
+    fn tuples_can_be_in_any_type() {
+        assert_eq!(
+            check_top(
+                "
+                group Line {
+                    let start: (x: Int, y: Int)
+                }
+                choice Path {
+                    line: (from: Line, to: Line)
+                    none
+                }
+                "
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            messages_top(
+                "
+                group Node {
+                    let next: (node: Node, _: Int)
+                }
+                trait Pair {
+                    fn pair() -> (first: Self, second: Int)
+                }
+                fn f(x: (y: Missing)) {}
+                "
+            ),
+            [
+                "`Self` can't be used in a tuple type in a trait's signatures, since it's a different type in each `impl`",
+                "`Node` contains itself",
+                "unknown type `Missing`",
+            ]
+        );
+    }
+
+    #[test]
+    fn matches_bind_and_compare_values() {
+        // Bindings can be used in their arm's block, and every value must be
+        // matched.
+        let src = format!(
+            "
+            {SHAPE}
+            fn f(point: (x: Int, y: Bool), shape: (_: Shape, _: Int)) -> Int {{
+                match point {{
+                    (x: 0, y: true) => {{
+                        return 0
+                    }}
+                    (x: let x, y: true) => {{
+                        return x
+                    }}
+                    (x: -1, y: _) => {{
+                        return 1
+                    }}
+                    _ => {{}}
+                }}
+                match shape {{
+                    (Shape.circle(0), _) => {{}}
+                    (Shape.circle(let radius), let scale) => {{
+                        return radius * scale
+                    }}
+                    (Shape.empty, _) => {{}}
+                    (Shape.nothing, 3) => {{}}
+                    (Shape.nothing, _) => {{}}
+                }}
+                match true {{
+                    true => {{}}
+                    false => {{}}
+                }}
+                return 2
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn matches_report_the_values_they_miss() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn f(pair: (a: Bool, b: Bool), shape: (_: Shape, _: Int), n: IntU8) {{
+                match pair {{
+                    (a: true, b: true) => {{}}
+                }}
+                match shape {{
+                    (Shape.circle(1), _) => {{}}
+                    (_, 0) => {{}}
+                }}
+                match n {{
+                    0 => {{}}
+                }}
+                match pair {{
+                    (a: true, b: _) => {{}}
+                }}
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "`match` is missing the patterns `(a: true, b: false)` and `(a: false, b: _)`",
+                "`match` is missing the patterns `(Shape.circle, _)`, `(Shape.empty, _)` and `(Shape.nothing, _)`",
+                "`match` is missing the pattern `_`",
+                "`match` is missing the pattern `(a: false, b: _)`",
+            ]
+        );
+    }
+
+    #[test]
+    fn matches_reject_unreachable_patterns() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn f(pair: (a: Bool, b: Int), shape: Shape) {{
+                match pair {{
+                    (a: true, b: _) => {{}}
+                    (a: let a, b: 0) => {{}}
+                    (a: true, b: 1) => {{}}
+                    _ => {{}}
+                    (a: false, b: 2) => {{}}
+                }}
+                match shape {{
+                    Shape.circle(_) => {{}}
+                    Shape.circle(1) => {{}}
+                    let other => {{}}
+                }}
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "pattern `(a: true, b: 1)` can't be reached, since the patterns before it match everything it does",
+                "pattern `(a: false, b: 2)` can't be reached, since the patterns before it match everything it does",
+                "pattern `Shape.circle(1)` can't be reached, since the patterns before it match everything it does",
+            ]
+        );
+    }
+
+    #[test]
+    fn patterns_must_match_their_types() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn f(pair: (a: Bool, b: IntU8), shape: Shape) {{
+                match pair {{
+                    (a: 1, b: _) => {{}}
+                    (b: _, a: _) => {{}}
+                    (a: true, b: 256) => {{}}
+                    (a: let x, b: let x) => {{}}
+                    (a: _, b: true) => {{}}
+                    Shape.empty => {{}}
+                }}
+                match shape {{
+                    Shape.circle(true) => {{}}
+                    Shape.circle((x: _)) => {{}}
+                    _ => {{
+                        let y = missing
+                    }}
+                }}
+            }}
+            "
+        );
+        assert_eq!(
+            messages_top(&src),
+            [
+                "pattern `1` can't match `Bool`",
+                "pattern `(b: _, a: _)` can't match `(a: Bool, b: IntU8)`",
+                "`256` doesn't fit in `IntU8`, which holds `0` to `255`",
+                "`x` is already declared",
+                "pattern `true` can't match `IntU8`",
+                "`match` is on `(a: Bool, b: IntU8)`, so it can't match an option of `Shape`",
+                "pattern `true` can't match `Int`",
+                "pattern `(x: _)` can't match `Int`",
+                "`missing` is not declared",
+            ]
+        );
+    }
+
+    #[test]
+    fn matches_must_cover_every_value() {
+        // There are too many integers to list, so they need a `_`.
         assert_eq!(
             check_body("match 1 {}"),
-            Err(vec![CheckError::MatchNotChoice(ty("Int"))])
+            Err(vec![CheckError::MissingPatterns {
+                patterns: vec!["_".to_string()],
+                more: false,
+            }])
         );
     }
 
@@ -9060,11 +9892,12 @@ primitive Float"
                 }}
                 "
             )),
+            // Once patterns have errors, which values the others match isn't
+            // checked, since the ones with errors could match anything.
             [
                 "`match` is on `Shape`, so it can't match an option of `Other`",
                 "`Shape` has no option `square`",
                 "unknown type `Missing`",
-                "`Shape.circle` is matched more than once",
             ]
         );
     }
@@ -9087,8 +9920,8 @@ primitive Float"
                 "
             )),
             [
-                "`match` is missing the options `Shape.circle` and `Shape.nothing`",
-                "`match` is missing the option `Shape.nothing`",
+                "`match` is missing the patterns `Shape.circle` and `Shape.nothing`",
+                "`match` is missing the pattern `Shape.nothing`",
             ]
         );
     }
@@ -9306,7 +10139,9 @@ primitive Float"
                 }}
                 "
             )),
-            ["`Shape.circle` is matched more than once"]
+            [
+                "pattern `Shape.circle` can't be reached, since the patterns before it match everything it does"
+            ]
         );
     }
 

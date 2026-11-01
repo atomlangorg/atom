@@ -105,6 +105,59 @@ impl fmt::Display for Name {
     }
 }
 
+/// A type as it's written, such as `Int`, `other::User`, or the tuple
+/// `(x: Int, y: Int)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeName {
+    Named(Name),
+    Tuple(Vec<TupleElement>),
+}
+
+impl TypeName {
+    /// The type called `name`, without a module.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self::Named(Name::new(name))
+    }
+}
+
+impl fmt::Display for TypeName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Named(name) => write!(f, "{name}"),
+            Self::Tuple(elements) => {
+                let elements: Vec<_> = elements.iter().map(ToString::to_string).collect();
+                write!(f, "({})", elements.join(", "))
+            }
+        }
+    }
+}
+
+/// An element of a tuple type, such as `at x: Int`, `x: Int` or `_: Int`.
+///
+/// Like a function parameter, its label is used to build the tuple, as in
+/// `(at: 1)`, and its name is used to read it, as in `point.x`. `x: Int` has
+/// `x` as both. Without a label, it's built without one, as in `(1)`, and
+/// without a name, it can't be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TupleElement {
+    pub label: Option<String>,
+    pub name: Option<String>,
+    pub ty: TypeName,
+}
+
+impl fmt::Display for TupleElement {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let ty = &self.ty;
+        match (&self.label, &self.name) {
+            (Some(label), Some(name)) if label == name => write!(f, "{name}: {ty}"),
+            (Some(label), Some(name)) => write!(f, "{label} {name}: {ty}"),
+            (None, Some(name)) => write!(f, "_ {name}: {ty}"),
+            (Some(label), None) => write!(f, "{label} _: {ty}"),
+            (None, None) => write!(f, "_: {ty}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -214,6 +267,13 @@ pub enum Expr {
     },
     /// `self`: the value a method was called on.
     SelfValue,
+    /// `(value)`: a value in brackets, which builds a tuple with one element
+    /// without a label when one is expected, and is the value itself
+    /// otherwise.
+    Paren(Box<Expr>),
+    /// `(label: value, ...)` or `()`: builds a tuple, labelling each element
+    /// that has a label in its type, like the arguments of a call.
+    Tuple(Vec<Arg>),
 }
 
 /// A field's value when constructing a group, such as `age: 42`.
@@ -249,8 +309,8 @@ pub enum Stmt {
     Decl {
         mutability: Mutability,
         name: String,
-        /// The name of the explicit type, if there is one.
-        ty: Option<Name>,
+        /// The explicit type, if there is one.
+        ty: Option<TypeName>,
         value: Expr,
     },
     /// `name = value`: reassigns an existing `var`.
@@ -296,7 +356,7 @@ pub enum Stmt {
     /// place of it anywhere.
     Alias {
         name: String,
-        ty: Name,
+        ty: TypeName,
     },
     /// `primitive Name`: a type that the compiler represents itself, such as
     /// `Int`. Only allowed at the top level of the standard library.
@@ -309,7 +369,7 @@ pub enum Stmt {
     PrimitiveFn {
         name: String,
         params: Vec<Param>,
-        ret: Name,
+        ret: TypeName,
     },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
     /// options, each holding a value of its own type.
@@ -317,12 +377,13 @@ pub enum Stmt {
         name: String,
         options: Vec<ChoiceOption>,
     },
-    /// `match value { Type.option(let name) => { ... } ... }`: runs the block
-    /// for the option of `value`, a choice. Every option of the choice must
-    /// be matched exactly once.
+    /// `match value { pattern => { ... } ... }`: runs the block of the first
+    /// pattern that `value` matches. Together, the patterns must match every
+    /// possible value, and each must match something the ones before it
+    /// don't.
     Match {
         value: Expr,
-        options: Vec<MatchOption>,
+        arms: Vec<MatchArm>,
     },
     /// `return` or `return value`
     Return(Option<Expr>),
@@ -335,9 +396,9 @@ pub enum Stmt {
 pub struct Function {
     pub name: String,
     pub params: Vec<Param>,
-    /// The name of the return type. `fn f()` is the same as `fn f() -> Void`,
+    /// The return type. `fn f()` is the same as `fn f() -> Void`,
     /// so this is `Void` when no type is written.
-    pub ret: Name,
+    pub ret: TypeName,
     pub body: Block,
 }
 
@@ -350,7 +411,7 @@ pub struct TraitFunction {
     pub name: String,
     pub params: Vec<Param>,
     /// `Void` when no type is written, like in a `fn`.
-    pub ret: Name,
+    pub ret: TypeName,
     /// Its default implementation, which an `impl` uses unless it implements
     /// the function itself, or `None` if every `impl` must implement it.
     pub body: Option<Block>,
@@ -360,7 +421,7 @@ pub struct TraitFunction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplAlias {
     pub name: String,
-    pub ty: Name,
+    pub ty: TypeName,
 }
 
 /// A function in an `impl`.
@@ -384,8 +445,8 @@ pub struct Param {
     /// and the parameter name.
     pub label: Option<String>,
     pub name: String,
-    /// The name of the parameter's type.
-    pub ty: Name,
+    /// The parameter's type.
+    pub ty: TypeName,
 }
 
 /// A group field, such as `let age: Int`. Fields can't have values.
@@ -393,30 +454,81 @@ pub struct Param {
 pub struct Field {
     pub mutability: Mutability,
     pub name: String,
-    /// The name of the field's type.
-    pub ty: Name,
+    /// The field's type.
+    pub ty: TypeName,
 }
 
 /// An option of a choice, such as `circle: Int` or `empty`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
     pub name: String,
-    /// The name of the type of the value it holds. `empty` is the same as
+    /// The type of the value it holds. `empty` is the same as
     /// `empty: Void`, so this is `Void` when no type is written.
-    pub ty: Name,
+    pub ty: TypeName,
 }
 
-/// An option matched by a `match`, such as
-/// `Shape.circle(let radius) => { ... }`.
+/// A pattern in a `match`, and the block run when it's the first to match.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MatchOption {
-    /// The name of the choice, which must be the type of the matched value.
-    pub ty: Name,
-    /// The name of the option.
-    pub name: String,
-    /// The name given to the option's value with `(let name)`, if any.
-    pub binding: Option<String>,
+pub struct MatchArm {
+    pub pattern: Pattern,
     pub body: Block,
+}
+
+/// What a value is matched against in a `match`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pattern {
+    /// `_`: matches anything.
+    Any,
+    /// `let name`: matches anything, giving it a name in the block.
+    Binding(String),
+    /// An integer, such as `0` or `-1`, which matches only itself.
+    Int { value: u64, negative: bool },
+    /// `true` or `false`.
+    Bool(bool),
+    /// `(label: pattern, ...)`: matches a tuple whose elements each match,
+    /// with the labels its type builds it with.
+    Tuple(Vec<TuplePattern>),
+    /// `Type.option` or `Type.option(pattern)`: matches the option of a
+    /// choice, and if given, its value against `pattern`.
+    Option {
+        ty: Name,
+        option: String,
+        value: Option<Box<Pattern>>,
+    },
+}
+
+impl fmt::Display for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Any => write!(f, "_"),
+            Self::Binding(name) => write!(f, "let {name}"),
+            Self::Int { value, negative } => {
+                write!(f, "{}{value}", if *negative { "-" } else { "" })
+            }
+            Self::Bool(value) => write!(f, "{value}"),
+            Self::Tuple(elements) => {
+                let elements: Vec<_> = elements
+                    .iter()
+                    .map(|element| match &element.label {
+                        Some(label) => format!("{label}: {}", element.pattern),
+                        None => element.pattern.to_string(),
+                    })
+                    .collect();
+                write!(f, "({})", elements.join(", "))
+            }
+            Self::Option { ty, option, value } => match value {
+                Some(value) => write!(f, "{ty}.{option}({value})"),
+                None => write!(f, "{ty}.{option}"),
+            },
+        }
+    }
+}
+
+/// An element of a tuple pattern, such as `x: let x` or `_`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuplePattern {
+    pub label: Option<String>,
+    pub pattern: Pattern,
 }
 
 /// A sequence of statements with its own scope, written `{ ... }`.

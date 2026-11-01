@@ -49,7 +49,7 @@ use inkwell::{
 };
 
 use crate::{
-    ir::{Body, Expr, MatchOption, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
+    ir::{Body, Expr, MatchArm, Pattern, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
     syntax::ast::{BinOp, UnOp},
 };
 
@@ -445,14 +445,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
                 self.builder.position_at_end(after);
             }
-            Stmt::Match {
-                value,
-                choice,
-                options,
-            } => {
+            Stmt::Match { value, ty, arms } => {
                 let value = self.expr(value)?;
-                let ty = self.types[*choice].into_struct_type();
-                self.match_(ty, value, options)?;
+                self.match_(*ty, value, arms)?;
             }
             Stmt::Return(value) => {
                 let value = self.expr(value)?;
@@ -615,58 +610,115 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.build_load(ty, slot, "")
     }
 
-    /// Runs the block of the option in `options` that `value`, a choice of
-    /// type `ty`, is, by switching on its tag. A choice's payload can only be read as
-    /// one of its options' values through memory, like it's written.
+    /// Runs the block of the first arm in `arms` whose pattern matches
+    /// `value`, of the type at `ty` in `program.types`, checking each arm in
+    /// turn. Some arm always matches, so the end of the last can't be reached.
     fn match_(
         &mut self,
-        ty: StructType<'ctx>,
+        ty: usize,
         value: BasicValueEnum<'ctx>,
-        options: &[MatchOption],
+        arms: &[MatchArm],
     ) -> Result<(), BuilderError> {
-        let slot = self.entry_alloca(ty)?;
+        let slot = self.entry_alloca(self.types[ty])?;
         self.builder.build_store(slot, value)?;
-        let tag_slot = self.builder.build_struct_gep(ty, slot, 0, "")?;
-        let tag = self
-            .builder
-            .build_load(self.tag_type(), tag_slot, "")?
-            .into_int_value();
-        let payload = self.builder.build_struct_gep(ty, slot, 1, "")?;
-
         let function = self.current_function();
-        let starts: Vec<_> = options
-            .iter()
-            .map(|option| {
-                let tag = self.tag_type().const_int(option.index as u64, false);
-                (tag, self.context.append_basic_block(function, "option"))
-            })
-            .collect();
-        // Every option is matched, so no other tag can be found.
-        let unmatched = self.context.append_basic_block(function, "unmatched");
         let after = self.context.append_basic_block(function, "after");
-        self.builder.build_switch(tag, unmatched, &starts)?;
-        self.builder.position_at_end(unmatched);
-        self.builder.build_unreachable()?;
-
-        for (option, &(_, start)) in options.iter().zip(&starts) {
-            self.builder.position_at_end(start);
-            if let Some(binding) = option.binding {
-                let (local, local_ty) = self.locals[binding];
-                let value = self.builder.build_load(local_ty, payload, "")?;
-                self.builder.build_store(local, value)?;
-            }
-            self.block(&option.body)?;
+        for arm in arms {
+            let unmatched = self.context.append_basic_block(function, "unmatched");
+            self.test(&arm.pattern, slot, ty, unmatched)?;
+            self.block(&arm.body)?;
             if !self.is_terminated() {
                 self.builder.build_unconditional_branch(after)?;
             }
+            self.builder.position_at_end(unmatched);
         }
+        self.builder.build_unreachable()?;
         self.builder.position_at_end(after);
+        Ok(())
+    }
+
+    /// Checks that the value at `ptr`, of the type at `ty` in
+    /// `program.types`, matches `pattern`, carrying on building if it does,
+    /// and branching to `unmatched` as soon as it doesn't. The values it
+    /// binds are stored as it goes. A choice's value is only read once its
+    /// tag shows which option it is, since it can only be read as that
+    /// option's value through memory, like it's written.
+    fn test(
+        &mut self,
+        pattern: &Pattern,
+        ptr: PointerValue<'ctx>,
+        ty: usize,
+        unmatched: BasicBlock<'ctx>,
+    ) -> Result<(), BuilderError> {
+        let program = self.program;
+        let (found, expected) = match pattern {
+            Pattern::Any => return Ok(()),
+            Pattern::Binding(local) => {
+                let (slot, local_ty) = self.locals[*local];
+                let value = self.builder.build_load(local_ty, ptr, "")?;
+                self.builder.build_store(slot, value)?;
+                return Ok(());
+            }
+            Pattern::Int(bits) => {
+                let int = self.types[ty].into_int_type();
+                let found = self.builder.build_load(int, ptr, "")?.into_int_value();
+                (found, int.const_int(*bits, false))
+            }
+            Pattern::Bool(value) => {
+                let bool = self.context.bool_type();
+                let found = self.builder.build_load(bool, ptr, "")?.into_int_value();
+                (found, bool.const_int(u64::from(*value), false))
+            }
+            Pattern::Tuple(elements) => {
+                let TypeDef::Group { fields, .. } = &program.types[ty] else {
+                    unreachable!("only tuples are matched with tuple patterns");
+                };
+                let tuple = self.types[ty].into_struct_type();
+                for (index, (element, &field)) in elements.iter().zip(fields).enumerate() {
+                    let ptr = self
+                        .builder
+                        .build_struct_gep(tuple, ptr, index as u32, "")?;
+                    self.test(element, ptr, field, unmatched)?;
+                }
+                return Ok(());
+            }
+            Pattern::Option { index, value } => {
+                let TypeDef::Choice { options, .. } = &program.types[ty] else {
+                    unreachable!("only choices are matched with option patterns");
+                };
+                let choice = self.types[ty].into_struct_type();
+                let tag_ptr = self.builder.build_struct_gep(choice, ptr, 0, "")?;
+                let tag = self.builder.build_load(self.tag_type(), tag_ptr, "")?;
+                let expected = self.tag_type().const_int(*index as u64, false);
+                self.check(tag.into_int_value(), expected, unmatched)?;
+                let payload = self.builder.build_struct_gep(choice, ptr, 1, "")?;
+                return self.test(value, payload, options[*index], unmatched);
+            }
+        };
+        self.check(found, expected, unmatched)
+    }
+
+    /// Carries on building if `found` is `expected`, and branches to
+    /// `unmatched` otherwise.
+    fn check(
+        &mut self,
+        found: IntValue<'ctx>,
+        expected: IntValue<'ctx>,
+        unmatched: BasicBlock<'ctx>,
+    ) -> Result<(), BuilderError> {
+        let is_expected = self.builder.build_int_compare(EQ, found, expected, "")?;
+        let matched = self
+            .context
+            .append_basic_block(self.current_function(), "matched");
+        self.builder
+            .build_conditional_branch(is_expected, matched, unmatched)?;
+        self.builder.position_at_end(matched);
         Ok(())
     }
 
     /// Allocates space for a `ty` at the start of the function being built,
     /// so it's only allocated once, however often the code using it runs.
-    fn entry_alloca(&self, ty: StructType<'ctx>) -> Result<PointerValue<'ctx>, BuilderError> {
+    fn entry_alloca(&self, ty: impl BasicType<'ctx>) -> Result<PointerValue<'ctx>, BuilderError> {
         let entry = self
             .current_function()
             .get_first_basic_block()
@@ -2105,6 +2157,121 @@ mod tests {
         for body in [equal, not_equal, bools] {
             assert!(!body.contains("call"), "{body}");
         }
+    }
+
+    #[test]
+    fn tuples_are_built_and_read() {
+        let src = "
+            group Line {
+                let start: (x: Int, y: Int)
+                let end: (x: Int, y: Int)
+            }
+
+            impl Line {
+                static fn from(_ start: (x: Int, y: Int), to end: (x: Int, y: Int)) -> Self {
+                    return Self { start: start, end: end }
+                }
+            }
+
+            fn swapped(_ point: (at x: Int, y: Int)) -> (at x: Int, y: Int) {
+                return (at: point.y, y: point.x)
+            }
+
+            fn main() -> Int {
+                let point = swapped((at: 3, y: 40))
+                let line = Line.from((x: 1, y: 2), to: (x: 10, y: 20))
+                let single: (_ only: Int) = (100)
+                let unit = ()
+                return point.x + point.y + line.end.y - line.start.x + single.only
+            }
+            ";
+        assert_eq!(run(src), 162);
+    }
+
+    #[test]
+    fn matches_run_the_first_matching_arm() {
+        // Each `describe` returns which arm matched, and the values it bound.
+        let src = "
+            choice Inner {
+                circle: Int
+                empty
+            }
+
+            choice Shape {
+                circle: Int
+                pair: (left: Inner, right: Int)
+                empty
+            }
+
+            fn describe(_ point: (x: Int, y: Bool)) -> Int {
+                match point {
+                    (x: 0, y: true) => {
+                        return 1
+                    }
+                    (x: let x, y: true) => {
+                        return x
+                    }
+                    (x: -1, y: _) => {
+                        return 3
+                    }
+                    _ => {
+                        return 4
+                    }
+                }
+            }
+
+            fn size(of shape: Shape) -> Int {
+                match shape {
+                    Shape.circle(0) => {
+                        return 100
+                    }
+                    Shape.circle(let radius) => {
+                        return radius
+                    }
+                    Shape.pair((left: Inner.circle(let r), right: let n)) => {
+                        return r * n
+                    }
+                    Shape.pair(_) => {
+                        return 7
+                    }
+                    Shape.empty => {
+                        return 0
+                    }
+                }
+            }
+
+            fn count(_ n: IntU8) -> Int {
+                match n {
+                    255 => {
+                        return 1
+                    }
+                    let other => {
+                        match other == 0 {
+                            true => {
+                                return 2
+                            }
+                            false => {
+                                return 3
+                            }
+                        }
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                // 1 + 20 + 3 + 4 = 28
+                let a = describe((x: 0, y: true)) + describe((x: 20, y: true))
+                let b = describe((x: -1, y: false)) + describe((x: 5, y: false))
+                // 100 + 9 + 30 + 7 + 0 = 146
+                let c = size(of: Shape.circle(0)) + size(of: Shape.circle(9))
+                let d = size(of: Shape.pair((left: Inner.circle(6), right: 5)))
+                let e = size(of: Shape.pair((left: Inner.empty, right: 5))) + size(of: Shape.empty)
+                // 1 + 2 + 3 = 6
+                let f = count(255) + count(0) + count(9)
+                return a + b + c + d + e + f
+            }
+            ";
+        assert_eq!(run(src), 180);
     }
 
     #[test]

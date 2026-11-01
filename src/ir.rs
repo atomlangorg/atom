@@ -123,24 +123,41 @@ pub enum Stmt {
         then_block: Vec<Stmt>,
         else_block: Vec<Stmt>,
     },
-    /// Runs the block for the option of `value`, a choice, as an index into
-    /// `Program::types`. Every option of the choice is matched exactly once.
+    /// Runs the block of the first arm whose pattern matches `value`, whose
+    /// type is at `ty` in `Program::types`. Some arm always matches.
     Match {
         value: Expr,
-        choice: usize,
-        options: Vec<MatchOption>,
+        ty: usize,
+        arms: Vec<MatchArm>,
     },
     Return(Expr),
     Expr(Expr),
 }
 
 #[derive(Debug)]
-pub struct MatchOption {
-    /// The option's index, in the order they're declared.
-    pub index: usize,
-    /// The local the option's value is stored in, if it's given a name.
-    pub binding: Option<usize>,
+pub struct MatchArm {
+    pub pattern: Pattern,
     pub body: Vec<Stmt>,
+}
+
+/// What a value is matched against, which gives the locals it binds their
+/// values when it matches.
+#[derive(Debug)]
+pub enum Pattern {
+    Any,
+    /// Matches anything, storing it in the local at this index.
+    Binding(usize),
+    /// An integer's bits, like `Expr::Int`.
+    Int(u64),
+    Bool(bool),
+    /// A tuple, matching each element in order.
+    Tuple(Vec<Pattern>),
+    /// The option of a choice at `index`, in the order they're declared, and
+    /// its value.
+    Option {
+        index: usize,
+        value: Box<Pattern>,
+    },
 }
 
 #[derive(Debug)]
