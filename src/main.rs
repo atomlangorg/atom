@@ -37,7 +37,7 @@ fn main() {
     let mut modules = vec![];
     let mut parsed = true;
     for (path, src) in &files {
-        let file = format!("/{}", path.join("/"));
+        let file = module_name(path);
         let (result, warnings) = syntax::parse_with_warnings(src);
         for warning in warnings {
             let report = report(
@@ -75,7 +75,13 @@ fn main() {
         Ok(program) => program,
         Err(errs) => {
             for err in errs {
-                eprintln!("error in {err}");
+                let report = report(
+                    ReportKind::Error,
+                    &err.module,
+                    err.span.start..err.span.end,
+                    &err.error.to_string(),
+                );
+                print_report(&report, &err.module, module_source(&files, &err.module));
             }
             return;
         }
@@ -103,6 +109,22 @@ fn main() {
         Ok(()) => println!("built {}", output.display()),
         Err(err) => eprintln!("error: {err}"),
     }
+}
+
+/// The name that the file at `path` is shown with, such as `/dir/other`.
+fn module_name(path: &[String]) -> String {
+    format!("/{}", path.join("/"))
+}
+
+/// The source of the module shown as `module`, which is one of `files` or part
+/// of the standard library.
+fn module_source<'a>(files: &'a [(Vec<String>, String)], module: &str) -> &'a str {
+    files
+        .iter()
+        .find(|(path, _)| module_name(path) == module)
+        .map(|(_, src)| src.as_str())
+        .or_else(|| syntax::stdlib_source(module))
+        .expect("errors are in modules that exist")
 }
 
 /// A report of a problem at `span`, a range of bytes in the source of `file`.
@@ -188,6 +210,44 @@ mod tests {
             .write(("/test", Source::from(src)), &mut output)
             .expect("can write to a buffer");
         String::from_utf8(output).expect("reports are UTF-8")
+    }
+
+    #[test]
+    fn reports_show_the_location_of_a_check_error() {
+        let src = "
+            fn main() -> Int {
+                return true
+            }
+        ";
+        let path = vec!["main".to_string()];
+        let (program, _) = syntax::parse_with_warnings(src);
+        let modules = [Module {
+            path: path.clone(),
+            program: program.expect("source should parse"),
+        }];
+        let errs = syntax::check(&modules).expect_err("`true` isn't an `Int`");
+
+        let files = [(path, src.to_string())];
+        let source = module_source(&files, &errs[0].module);
+        let span = errs[0].span.start..errs[0].span.end;
+        let report = report(ReportKind::Error, &errs[0].module, span, "wrong type");
+        let mut output = vec![];
+        report
+            .write((errs[0].module.as_str(), Source::from(source)), &mut output)
+            .expect("can write to a buffer");
+        let output = String::from_utf8(output).expect("reports are UTF-8");
+        assert!(output.contains("/main:3:24"));
+        assert!(output.contains("wrong type"));
+    }
+
+    #[test]
+    fn module_sources_are_found_in_files_and_the_standard_library() {
+        let files = [(
+            vec!["dir".to_string(), "other".to_string()],
+            "x".to_string(),
+        )];
+        assert_eq!(module_source(&files, "/dir/other"), "x");
+        assert!(module_source(&files, "stdlib/core").contains("primitive"));
     }
 
     #[test]

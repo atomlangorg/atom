@@ -24,14 +24,23 @@ use chumsky::{
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, Function, ImplAlias, ImplFunction,
-        Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, Program, Stmt,
-        TraitFunction, TupleElement, TuplePattern, TypeName, UnOp,
+        Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, ImplAlias,
+        ImplFunction, Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, PatternKind,
+        Program, Span, Stmt, StmtKind, TraitFunction, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
 };
 
 pub type ParseError<'src> = Rich<'src, Token<'src>>;
+
+impl From<SimpleSpan> for Span {
+    fn from(span: SimpleSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
 
 /// A problem that doesn't stop a program from compiling, such as a matter of
 /// style. Unlike errors, warnings never stop parsing.
@@ -84,6 +93,15 @@ pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, 
         .parse_with_state(stream, &mut warnings)
         .into_result();
     (result, warnings.0)
+}
+
+/// The type written `Void`, which is what's meant where no type is written, at
+/// `span`.
+fn void_type(span: Span) -> TypeName {
+    TypeName::Named(Name {
+        span,
+        ..Name::new("Void")
+    })
 }
 
 /// A comma-separated list of `item`s between `open` and `close`, as in a
@@ -185,13 +203,20 @@ where
     // decided by the checker. `Self` is a keyword, so it can't be qualified,
     // and the checker decides what it refers to.
     let name = just(Token::SelfType)
-        .to(Name::new("Self"))
+        .map_with(|_, e| Name {
+            span: Span::from(e.span()),
+            ..Name::new("Self")
+        })
         .or(module_path
             .clone()
             .then_ignore(just(Token::ColonColon))
             .or_not()
             .then(ident)
-            .map(|(module, name)| Name { module, name }))
+            .map_with(|(module, name), e| Name {
+                module,
+                name,
+                span: Span::from(e.span()),
+            }))
         .boxed();
 
     // Type names are resolved by the checker, not reserved by the lexer. A
@@ -219,7 +244,7 @@ where
         let self_param = just(Token::SelfType)
             .ignore_then(just(Token::Dot))
             .ignore_then(ident)
-            .map(TypeName::SelfParam);
+            .map_with(|param, e| TypeName::SelfParam(param, Span::from(e.span())));
         self_param
             .or(name
                 .clone()
@@ -256,15 +281,22 @@ where
             Token::DotBang => UnOp::BitNot,
         };
         let unary = unary_op
+            .map_with(|op, e| (op, Span::from(e.span())))
             .repeated()
-            .foldr(atom, |op, rhs| Expr::Unary(op, Box::new(rhs)));
+            .foldr(atom, |(op, span), rhs| Expr {
+                span: span.to(rhs.span),
+                kind: ExprKind::Unary(op, Box::new(rhs)),
+            });
 
         // Binary operators are left-associative: `a - b + c` is `(a - b) + c`.
         // Each level below binds less tightly than the one before it. Each
         // level holds two copies of the one before it, so some are boxed to
         // stop the parser's type doubling at every level, which makes it
         // very slow to compile and to run.
-        let fold_binary = |lhs, (op, rhs)| Expr::Binary(Box::new(lhs), op, Box::new(rhs));
+        let fold_binary = |lhs: Expr, (op, rhs): (BinOp, Expr)| Expr {
+            span: lhs.span.to(rhs.span),
+            kind: ExprKind::Binary(Box::new(lhs), op, Box::new(rhs)),
+        };
 
         let product_op = select! {
             Token::Star => BinOp::Mul,
@@ -350,8 +382,8 @@ where
     let mut expr = Recursive::declare();
 
     let literal = select! {
-        Token::Int(n) => Expr::Int(n),
-        Token::Bool(b) => Expr::Bool(b),
+        Token::Int(n) => ExprKind::Int(n),
+        Token::Bool(b) => ExprKind::Bool(b),
     };
 
     // `label: value` or just `value`.
@@ -359,7 +391,11 @@ where
         .then_ignore(just(Token::Colon))
         .or_not()
         .then(expr.clone())
-        .map(|(label, value)| Arg { label, value });
+        .map_with(|(label, value), e| Arg {
+            label,
+            value,
+            span: Span::from(e.span()),
+        });
     let args = comma_list(arg, Token::LParen, Token::RParen);
 
     // A name followed by arguments is a call, otherwise it's a variable.
@@ -367,27 +403,31 @@ where
         .clone()
         .then(args.clone().or_not())
         .map(|(name, args)| match args {
-            Some(args) => Expr::Call { callee: name, args },
-            None => Expr::Var(name),
+            Some(args) => ExprKind::Call { callee: name, args },
+            None => ExprKind::Var(name),
         });
 
     // `(value)` is a value in brackets, or a tuple with one unlabelled
     // element, which the checker decides. Anything else in brackets, such as
     // `()`, `(x: 1)` or `(1, 2)`, is a tuple.
     let parenthesised = args.clone().map(|mut values| match &values[..] {
-        [Arg { label: None, .. }] => Expr::Paren(Box::new(values.remove(0).value)),
-        _ => Expr::Tuple(values),
+        [Arg { label: None, .. }] => ExprKind::Paren(Box::new(values.remove(0).value)),
+        _ => ExprKind::Tuple(values),
     });
 
     // `Type { field: value, ... }`. Every field must be labelled.
     let field_value = ident
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
-        .map(|(name, value)| FieldValue { name, value });
+        .map_with(|(name, value), e| FieldValue {
+            name,
+            value,
+            span: Span::from(e.span()),
+        });
     let construct = named_type
         .clone()
         .then(comma_list(field_value, Token::LBrace, Token::RBrace))
-        .map(|(ty, fields)| Expr::Construct { ty, fields });
+        .map(|(ty, fields)| ExprKind::Construct { ty, fields });
 
     // `Optional<Int>` before a `.`, as in `Optional<Int>.none`. In `a < b`,
     // there's no `>` and `.`, so it's a comparison.
@@ -395,29 +435,37 @@ where
         .clone()
         .then(type_args.clone())
         .then_ignore(just(Token::Dot).rewind())
-        .map(|(name, args)| Expr::GenericType { name, args });
+        .map(|(name, args)| ExprKind::GenericType { name, args });
 
-    let self_value = just(Token::SelfValue).to(Expr::SelfValue);
+    let self_value = just(Token::SelfValue).to(ExprKind::SelfValue);
 
     // `.field` or `.method(args)` after any atom, which binds tighter than
     // any operator, so `-a.b` is `-(a.b)`. They can be chained, as in
     // `a.f().b`.
-    let member = just(Token::Dot).ignore_then(ident).then(args.or_not());
+    let member = just(Token::Dot)
+        .ignore_then(ident)
+        .then(args.or_not())
+        .map_with(|member, e| (member, Span::from(e.span())));
     let with_members = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
-        atom.foldl(member.clone().repeated(), |receiver, (name, args)| {
-            let receiver = Box::new(receiver);
-            match args {
-                Some(args) => Expr::MethodCall {
-                    receiver,
-                    method: name,
-                    args,
-                },
-                None => Expr::Field {
-                    receiver,
-                    field: name,
-                },
-            }
-        })
+        atom.foldl(
+            member.clone().repeated(),
+            |receiver, ((name, args), end)| {
+                let span = receiver.span.to(end);
+                let receiver = Box::new(receiver);
+                let kind = match args {
+                    Some(args) => ExprKind::MethodCall {
+                        receiver,
+                        method: name,
+                        args,
+                    },
+                    None => ExprKind::Field {
+                        receiver,
+                        field: name,
+                    },
+                };
+                Expr { kind, span }
+            },
+        )
         .boxed()
     };
 
@@ -428,6 +476,10 @@ where
             .or(generic_type.clone())
             .or(name_or_call.clone())
             .or(parenthesised.clone())
+            .map_with(|kind, e| Expr {
+                kind,
+                span: Span::from(e.span()),
+            })
             .labelled("expression")
             .boxed(),
     )));
@@ -441,6 +493,10 @@ where
             .or(generic_type)
             .or(name_or_call)
             .or(parenthesised)
+            .map_with(|kind, e| Expr {
+                kind,
+                span: Span::from(e.span()),
+            })
             .labelled("expression")
             .boxed(),
     ));
@@ -451,7 +507,7 @@ where
         let int = just(Token::Minus)
             .or_not()
             .then(select! { Token::Int(n) => n })
-            .map(|(minus, value)| Pattern::Int {
+            .map(|(minus, value)| PatternKind::Int {
                 value,
                 negative: minus.is_some(),
             });
@@ -469,19 +525,25 @@ where
                     .delimited_by(just(Token::LParen), just(Token::RParen))
                     .or_not(),
             )
-            .map(|((ty, option), value)| Pattern::Option {
+            .map(|((ty, option), value)| PatternKind::Option {
                 ty,
                 option,
                 value: value.map(Box::new),
             });
         choice((
-            just(Token::Underscore).to(Pattern::Any),
-            just(Token::Let).ignore_then(ident).map(Pattern::Binding),
-            select! { Token::Bool(b) => Pattern::Bool(b) },
+            just(Token::Underscore).to(PatternKind::Any),
+            just(Token::Let)
+                .ignore_then(ident)
+                .map(PatternKind::Binding),
+            select! { Token::Bool(b) => PatternKind::Bool(b) },
             int,
-            comma_list(element, Token::LParen, Token::RParen).map(Pattern::Tuple),
+            comma_list(element, Token::LParen, Token::RParen).map(PatternKind::Tuple),
             option,
         ))
+        .map_with(|kind, e| Pattern {
+            kind,
+            span: Span::from(e.span()),
+        })
         .labelled("pattern")
     })
     .boxed();
@@ -498,17 +560,23 @@ where
         .then(annotation.clone().or_not())
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
-        .map(|(((mutability, name), ty), value)| Stmt::Decl {
-            mutability,
-            name,
-            ty,
-            value,
+        .map_with(|(((mutability, name), ty), value), e| Stmt {
+            kind: StmtKind::Decl {
+                mutability,
+                name,
+                ty,
+                value,
+            },
+            span: Span::from(e.span()),
         });
 
     let assign = ident
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
-        .map(|(name, value)| Stmt::Assign { name, value });
+        .map_with(|(name, value), e| Stmt {
+            kind: StmtKind::Assign { name, value },
+            span: Span::from(e.span()),
+        });
 
     let newlines = just(Token::Newline).repeated();
 
@@ -526,6 +594,7 @@ where
                 mutability,
                 name,
                 ty,
+                span: Span::from(e.span()),
             }
         });
 
@@ -543,6 +612,7 @@ where
     let group_ = just(Token::Group)
         .ignore_then(ident)
         .then(generic_params.clone())
+        .map_with(|head, e| (head, Span::from(e.span())))
         .then(
             newlines
                 .clone()
@@ -554,10 +624,13 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|((name, params), fields)| Stmt::Group {
-            name,
-            params,
-            fields,
+        .map(|(((name, params), span), fields)| Stmt {
+            kind: StmtKind::Group {
+                name,
+                params,
+                fields,
+            },
+            span,
         });
 
     // `alias Name = Type`.
@@ -565,20 +638,25 @@ where
         .ignore_then(ident)
         .then_ignore(just(Token::Eq))
         .then(type_name.clone())
-        .map(|(name, ty)| Stmt::Alias { name, ty });
+        .map_with(|(name, ty), e| Stmt {
+            kind: StmtKind::Alias { name, ty },
+            span: Span::from(e.span()),
+        });
 
     // `name: Type`, or just `name` for an option holding `Void`.
     let option = ident
         .then(annotation.or_not())
-        .map(|(name, ty)| ChoiceOption {
+        .map_with(|(name, ty), e| ChoiceOption {
             name,
-            ty: ty.unwrap_or_else(|| TypeName::new("Void")),
+            ty: ty.unwrap_or_else(|| void_type(Span::from(e.span()))),
+            span: Span::from(e.span()),
         });
 
     // Laid out like a group, with one option per line.
     let choice_ = just(Token::Choice)
         .ignore_then(ident)
         .then(generic_params.clone())
+        .map_with(|head, e| (head, Span::from(e.span())))
         .then(
             newlines
                 .clone()
@@ -590,10 +668,13 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|((name, params), options)| Stmt::Choice {
-            name,
-            params,
-            options,
+        .map(|(((name, params), span), options)| Stmt {
+            kind: StmtKind::Choice {
+                name,
+                params,
+                options,
+            },
+            span,
         });
 
     // `label name: Type`, `_ name: Type`, or `name: Type`, where the name is
@@ -605,19 +686,24 @@ where
         .or(ident.map(|name| (Some(name.clone()), name)))
         .then_ignore(just(Token::Colon))
         .then(type_name.clone())
-        .map(|((label, name), ty)| Param { label, name, ty });
+        .map_with(|((label, name), ty), e| Param {
+            label,
+            name,
+            ty,
+            span: Span::from(e.span()),
+        });
     let params = comma_list(param, Token::LParen, Token::RParen);
 
     // `fn name(params) -> Type`, or `fn name(params)`, which returns `Void`.
     let signature = just(Token::Fn)
         .ignore_then(ident)
         .then(params)
-        .then(
-            just(Token::Arrow)
-                .ignore_then(type_name.clone())
-                .or_not()
-                .map(|ret| ret.unwrap_or_else(|| TypeName::new("Void"))),
-        )
+        .then(just(Token::Arrow).ignore_then(type_name.clone()).or_not())
+        .map_with(|((name, params), ret), e| {
+            let span = Span::from(e.span());
+            let ret = ret.unwrap_or_else(|| void_type(span));
+            (name, params, ret, span)
+        })
         .boxed();
 
     // One statement per line; blank lines are allowed anywhere.
@@ -641,12 +727,16 @@ where
 
             just(Token::If)
                 .ignore_then(condition.clone())
+                .map_with(|cond, e| (cond, Span::from(e.span())))
                 .then(block.clone())
                 .then(else_block.or_not())
-                .map(|((cond, then_block), else_block)| Stmt::If {
-                    cond,
-                    then_block,
-                    else_block,
+                .map(|(((cond, span), then_block), else_block)| Stmt {
+                    kind: StmtKind::If {
+                        cond,
+                        then_block,
+                        else_block,
+                    },
+                    span,
                 })
         });
 
@@ -661,6 +751,7 @@ where
         // `{` on the same line as `match`.
         let match_ = just(Token::Match)
             .ignore_then(condition.clone())
+            .map_with(|value, e| (value, Span::from(e.span())))
             .then(
                 newlines
                     .clone()
@@ -672,27 +763,37 @@ where
                     )
                     .delimited_by(just(Token::LBrace), just(Token::RBrace)),
             )
-            .map(|(value, arms)| Stmt::Match { value, arms });
+            .map(|((value, span), arms)| Stmt {
+                kind: StmtKind::Match { value, arms },
+                span,
+            });
 
         let function = signature
             .clone()
             .then(block.clone())
-            .map(|(((name, params), ret), body)| Function {
+            .map(|((name, params, ret, span), body)| Function {
                 name,
                 params,
                 ret,
                 body,
+                span,
             })
             .boxed();
 
         let return_ = just(Token::Return)
             .ignore_then(expr.clone().or_not())
-            .map(Stmt::Return);
+            .map_with(|value, e| Stmt {
+                kind: StmtKind::Return(value),
+                span: Span::from(e.span()),
+            });
 
         // Only calls are useful on their own, since any other expression's
         // value would be thrown away.
-        let call = expr.clone().try_map(|expr, span| match expr {
-            Expr::Call { .. } | Expr::MethodCall { .. } => Ok(Stmt::Expr(expr)),
+        let call = expr.clone().try_map(|expr, span| match expr.kind {
+            ExprKind::Call { .. } | ExprKind::MethodCall { .. } => Ok(Stmt {
+                span: expr.span,
+                kind: StmtKind::Expr(expr),
+            }),
             _ => Err(Rich::custom(
                 span,
                 "only function calls can be used as statements",
@@ -707,7 +808,10 @@ where
             .ignore_then(pattern.clone())
             .then_ignore(just(Token::Eq))
             .then(expr.clone())
-            .map(|(pattern, value)| Stmt::Destructure { pattern, value });
+            .map_with(|(pattern, value), e| Stmt {
+                kind: StmtKind::Destructure { pattern, value },
+                span: Span::from(e.span()),
+            });
 
         stmt.define(
             decl.clone()
@@ -715,7 +819,10 @@ where
                 .or(destructure)
                 .or(if_)
                 .or(match_)
-                .or(function.clone().map(Stmt::Fn))
+                .or(function.clone().map(|function| Stmt {
+                    span: function.span,
+                    kind: StmtKind::Fn(function),
+                }))
                 .or(group_)
                 .or(choice_)
                 .or(alias)
@@ -748,7 +855,10 @@ where
     .map(Import::Directory);
     let use_ = just(Token::Use)
         .ignore_then(directory.or(module_path.map(Import::Module)))
-        .map(Stmt::Use);
+        .map_with(|import, e| Stmt {
+            kind: StmtKind::Use(import),
+            span: Span::from(e.span()),
+        });
 
     // `impl Type { fn ... }`, with one function per line, like a block. Each
     // can be a method, or a `static fn`, and the standard library's can be a
@@ -758,7 +868,7 @@ where
         .then(
             just(Token::Primitive)
                 .ignore_then(signature.clone())
-                .map(|((name, params), ret)| {
+                .map(|(name, params, ret, span)| {
                     let body = vec![];
                     (
                         true,
@@ -767,6 +877,7 @@ where
                             params,
                             ret,
                             body,
+                            span,
                         },
                     )
                 })
@@ -781,7 +892,13 @@ where
         .ignore_then(ident)
         .then_ignore(just(Token::Eq))
         .then(type_name.clone())
-        .map(|(name, ty)| ImplItem::Alias(ImplAlias { name, ty }));
+        .map_with(|(name, ty), e| {
+            ImplItem::Alias(ImplAlias {
+                name,
+                ty,
+                span: Span::from(e.span()),
+            })
+        });
 
     // `with` is only special here, so it can still be a label. Only a named
     // type can have an `impl`, and only a trait can follow `with`.
@@ -792,6 +909,7 @@ where
                 .ignore_then(name.clone().labelled("trait"))
                 .or_not(),
         )
+        .map_with(|head, e| (head, Span::from(e.span())))
         .then(
             newlines
                 .clone()
@@ -804,7 +922,7 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|((ty, with), items)| {
+        .map(|(((ty, with), span), items)| {
             let mut aliases = vec![];
             let mut functions = vec![];
             for item in items {
@@ -813,11 +931,14 @@ where
                     ImplItem::Function(function) => functions.push(function),
                 }
             }
-            Stmt::Impl {
-                ty,
-                with,
-                aliases,
-                functions,
+            Stmt {
+                kind: StmtKind::Impl {
+                    ty,
+                    with,
+                    aliases,
+                    functions,
+                },
+                span,
             }
         });
 
@@ -827,17 +948,21 @@ where
         .or_not()
         .then(signature.clone())
         .then(block.or_not())
-        .map(|((is_static, ((name, params), ret)), body)| TraitFunction {
-            is_static: is_static.is_some(),
-            name,
-            params,
-            ret,
-            body,
-        });
+        .map(
+            |((is_static, (name, params, ret, span)), body)| TraitFunction {
+                is_static: is_static.is_some(),
+                name,
+                params,
+                ret,
+                body,
+                span,
+            },
+        );
     // `alias Name`, whose type each implementation gives.
     let trait_alias = just(Token::Alias).ignore_then(ident).map(TraitItem::Alias);
     let trait_ = just(Token::Trait)
         .ignore_then(ident)
+        .map_with(|name, e| (name, Span::from(e.span())))
         .then(
             newlines
                 .clone()
@@ -850,7 +975,7 @@ where
                 )
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(name, items)| {
+        .map(|((name, span), items)| {
             let mut aliases = vec![];
             let mut functions = vec![];
             for item in items {
@@ -859,23 +984,31 @@ where
                     TraitItem::Function(function) => functions.push(function),
                 }
             }
-            Stmt::Trait {
-                name,
-                aliases,
-                functions,
+            Stmt {
+                kind: StmtKind::Trait {
+                    name,
+                    aliases,
+                    functions,
+                },
+                span,
             }
         });
 
     // `primitive Name`, `primitive Name<T, U>`, or
     // `primitive fn name(params) -> Type`, which the checker only allows in
     // the standard library.
-    let primitive = just(Token::Primitive).ignore_then(
-        signature
-            .map(|((name, params), ret)| Stmt::PrimitiveFn { name, params, ret })
-            .or(ident
-                .then(generic_params)
-                .map(|(name, params)| Stmt::Primitive { name, params })),
-    );
+    let primitive = just(Token::Primitive)
+        .ignore_then(
+            signature
+                .map(|(name, params, ret, _)| StmtKind::PrimitiveFn { name, params, ret })
+                .or(ident
+                    .then(generic_params)
+                    .map(|(name, params)| StmtKind::Primitive { name, params })),
+        )
+        .map_with(|kind, e| Stmt {
+            kind,
+            span: Span::from(e.span()),
+        });
 
     // The top level can only declare things, so a module never runs code
     // just by being imported. Other statements are parsed only so that they
@@ -886,12 +1019,12 @@ where
             .or(primitive)
             .or(stmt.validate(|stmt, e, emitter| {
                 if !matches!(
-                    stmt,
-                    Stmt::Decl { .. }
-                        | Stmt::Fn(_)
-                        | Stmt::Group { .. }
-                        | Stmt::Choice { .. }
-                        | Stmt::Alias { .. }
+                    stmt.kind,
+                    StmtKind::Decl { .. }
+                        | StmtKind::Fn(_)
+                        | StmtKind::Group { .. }
+                        | StmtKind::Choice { .. }
+                        | StmtKind::Alias { .. }
                 ) {
                     emitter.emit(Rich::custom(
                         e.span(),
@@ -916,12 +1049,33 @@ where
 mod tests {
     use super::*;
 
+    fn expr_node(kind: ExprKind) -> Expr {
+        Expr {
+            kind,
+            span: Span::default(),
+        }
+    }
+
+    fn stmt_node(kind: StmtKind) -> Stmt {
+        Stmt {
+            kind,
+            span: Span::default(),
+        }
+    }
+
+    fn pattern_node(kind: PatternKind) -> Pattern {
+        Pattern {
+            kind,
+            span: Span::default(),
+        }
+    }
+
     /// Parses `src` as the body of a function, since statements other than
     /// declarations aren't allowed at the top level.
     fn parse_body(src: &str) -> Result<Vec<Stmt>, Vec<String>> {
         match parse(&format!("fn body() {{\n{src}\n}}")) {
-            Ok(mut program) => match program.remove(0) {
-                Stmt::Fn(Function { body, .. }) => Ok(body),
+            Ok(mut program) => match program.remove(0).kind {
+                StmtKind::Fn(Function { body, .. }) => Ok(body),
                 stmt => panic!("expected a function, got {stmt:?}"),
             },
             Err(errs) => Err(errs.iter().map(ToString::to_string).collect()),
@@ -929,18 +1083,18 @@ mod tests {
     }
 
     fn int(n: u64) -> Box<Expr> {
-        Box::new(Expr::Int(n))
+        Box::new(expr_node(ExprKind::Int(n)))
     }
 
     fn var(name: &str) -> Box<Expr> {
-        Box::new(Expr::Var(Name::new(name)))
+        Box::new(expr_node(ExprKind::Var(Name::new(name))))
     }
 
     fn assign(name: &str, value: Expr) -> Stmt {
-        Stmt::Assign {
+        stmt_node(StmtKind::Assign {
             name: name.to_string(),
             value,
-        }
+        })
     }
 
     #[test]
@@ -963,8 +1117,11 @@ mod tests {
         assert_eq!(
             parse_body("x = 1 + 2\ny = x - 3"),
             Ok(vec![
-                assign("x", Expr::Binary(int(1), BinOp::Add, int(2))),
-                assign("y", Expr::Binary(var("x"), BinOp::Sub, int(3))),
+                assign("x", expr_node(ExprKind::Binary(int(1), BinOp::Add, int(2)))),
+                assign(
+                    "y",
+                    expr_node(ExprKind::Binary(var("x"), BinOp::Sub, int(3)))
+                ),
             ])
         );
     }
@@ -973,7 +1130,10 @@ mod tests {
     fn allows_blank_lines() {
         assert_eq!(
             parse_body("\n\nx = 1\n\n\ny = 2\n\n"),
-            Ok(vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2)),])
+            Ok(vec![
+                assign("x", expr_node(ExprKind::Int(1))),
+                assign("y", expr_node(ExprKind::Int(2))),
+            ])
         );
     }
 
@@ -983,11 +1143,11 @@ mod tests {
             parse_body("x = 1 - 2 + 3"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(
-                    Box::new(Expr::Binary(int(1), BinOp::Sub, int(2))),
+                expr_node(ExprKind::Binary(
+                    Box::new(expr_node(ExprKind::Binary(int(1), BinOp::Sub, int(2)))),
                     BinOp::Add,
                     int(3),
-                ),
+                )),
             )])
         );
     }
@@ -995,12 +1155,12 @@ mod tests {
     /// `expr` in brackets, which the checker decides is either just `expr`,
     /// or a tuple holding it.
     fn paren(expr: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Paren(expr))
+        Box::new(expr_node(ExprKind::Paren(expr)))
     }
 
     fn decl_type(src: &str) -> TypeName {
-        match parse_body(src).unwrap().remove(0) {
-            Stmt::Decl { ty: Some(ty), .. } => ty,
+        match parse_body(src).unwrap().remove(0).kind {
+            StmtKind::Decl { ty: Some(ty), .. } => ty,
             stmt => panic!("expected a declaration with a type, got {stmt:?}"),
         }
     }
@@ -1046,25 +1206,27 @@ mod tests {
         assert_eq!(
             parse("choice Optional<T> {\nnone\nsome: T\n}\ngroup Pair<A, B> {}"),
             Ok(vec![
-                Stmt::Choice {
+                stmt_node(StmtKind::Choice {
                     name: "Optional".to_string(),
                     params: vec!["T".to_string()],
                     options: vec![
                         ChoiceOption {
                             name: "none".to_string(),
                             ty: TypeName::new("Void"),
+                            span: Span::default()
                         },
                         ChoiceOption {
                             name: "some".to_string(),
                             ty: TypeName::new("T"),
+                            span: Span::default()
                         },
                     ],
-                },
-                Stmt::Group {
+                }),
+                stmt_node(StmtKind::Group {
                     name: "Pair".to_string(),
                     params: vec!["A".to_string(), "B".to_string()],
                     fields: vec![],
-                },
+                }),
             ])
         );
         for src in [
@@ -1102,7 +1264,7 @@ mod tests {
         );
         assert_eq!(
             decl_type("let t: Self.T = t"),
-            TypeName::SelfParam("T".to_string())
+            TypeName::SelfParam("T".to_string(), Span::default())
         );
         for src in ["let t: Box<> = t", "let t: Box<Int = t", "let t: Self. = t"] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
@@ -1118,22 +1280,23 @@ mod tests {
         assert_eq!(
             parse_expr("Optional<Int>.none"),
             field_access(
-                Expr::GenericType {
+                expr_node(ExprKind::GenericType {
                     name: Name::new("Optional"),
                     args: vec![TypeName::new("Int")],
-                },
+                }),
                 "none"
             )
         );
         assert_eq!(
             parse_expr("Box<Int> { value: 1 }"),
-            Expr::Construct {
+            expr_node(ExprKind::Construct {
                 ty: int_box(),
                 fields: vec![FieldValue {
                     name: "value".to_string(),
-                    value: Expr::Int(1),
+                    value: expr_node(ExprKind::Int(1)),
+                    span: Span::default()
                 }],
-            }
+            })
         );
         // Without a `.` or `{` after the `>`, they're comparisons.
         assert_eq!(parse_expr("a < b"), *bin(var("a"), BinOp::Lt, var("b")));
@@ -1155,32 +1318,41 @@ mod tests {
 
     #[test]
     fn parses_tuple_values() {
-        assert_eq!(parse_expr("()"), Expr::Tuple(vec![]));
+        assert_eq!(parse_expr("()"), expr_node(ExprKind::Tuple(vec![])));
         assert_eq!(
             parse_expr("(x: 1)"),
-            Expr::Tuple(vec![arg(Some("x"), Expr::Int(1))])
+            expr_node(ExprKind::Tuple(vec![arg(
+                Some("x"),
+                expr_node(ExprKind::Int(1))
+            )]))
         );
         assert_eq!(
             parse_expr("(at: 1, y: true, 2)"),
-            Expr::Tuple(vec![
-                arg(Some("at"), Expr::Int(1)),
-                arg(Some("y"), Expr::Bool(true)),
-                arg(None, Expr::Int(2)),
-            ])
+            expr_node(ExprKind::Tuple(vec![
+                arg(Some("at"), expr_node(ExprKind::Int(1))),
+                arg(Some("y"), expr_node(ExprKind::Bool(true))),
+                arg(None, expr_node(ExprKind::Int(2))),
+            ]))
         );
         // A value in brackets might be a tuple, which the checker decides.
         assert_eq!(parse_expr("(1)"), *paren(int(1)));
         assert_eq!(
             parse_expr("(x: 1).x"),
-            field_access(Expr::Tuple(vec![arg(Some("x"), Expr::Int(1))]), "x")
+            field_access(
+                expr_node(ExprKind::Tuple(vec![arg(
+                    Some("x"),
+                    expr_node(ExprKind::Int(1))
+                )])),
+                "x"
+            )
         );
     }
 
     #[test]
     fn parses_patterns() {
         let pattern = |src: &str| match parse_body(&format!("match v {{\n{src} => {{}}\n}}")) {
-            Ok(mut stmts) => match stmts.remove(0) {
-                Stmt::Match { mut arms, .. } => arms.remove(0).pattern,
+            Ok(mut stmts) => match stmts.remove(0).kind {
+                StmtKind::Match { mut arms, .. } => arms.remove(0).pattern,
                 stmt => panic!("expected a match, got {stmt:?}"),
             },
             Err(errs) => panic!("{src:?} should parse: {errs:?}"),
@@ -1189,59 +1361,65 @@ mod tests {
             label: label.map(str::to_string),
             pattern,
         };
-        assert_eq!(pattern("_"), Pattern::Any);
-        assert_eq!(pattern("let x"), Pattern::Binding("x".to_string()));
-        assert_eq!(pattern("true"), Pattern::Bool(true));
+        assert_eq!(pattern("_"), pattern_node(PatternKind::Any));
+        assert_eq!(
+            pattern("let x"),
+            pattern_node(PatternKind::Binding("x".to_string()))
+        );
+        assert_eq!(pattern("true"), pattern_node(PatternKind::Bool(true)));
         assert_eq!(
             pattern("-12"),
-            Pattern::Int {
+            pattern_node(PatternKind::Int {
                 value: 12,
                 negative: true,
-            }
+            })
         );
-        assert_eq!(pattern("()"), Pattern::Tuple(vec![]));
+        assert_eq!(pattern("()"), pattern_node(PatternKind::Tuple(vec![])));
         assert_eq!(
             pattern("Optional<Int>.none"),
-            Pattern::Option {
+            pattern_node(PatternKind::Option {
                 ty: TypeName::Generic {
                     name: Name::new("Optional"),
                     args: vec![TypeName::new("Int")],
                 },
                 option: "none".to_string(),
                 value: None,
-            }
+            })
         );
         assert_eq!(
             pattern("(x: 0, y: let y, _)"),
-            Pattern::Tuple(vec![
+            pattern_node(PatternKind::Tuple(vec![
                 element(
                     Some("x"),
-                    Pattern::Int {
+                    pattern_node(PatternKind::Int {
                         value: 0,
                         negative: false,
-                    }
+                    })
                 ),
-                element(Some("y"), Pattern::Binding("y".to_string())),
-                element(None, Pattern::Any),
-            ])
+                element(
+                    Some("y"),
+                    pattern_node(PatternKind::Binding("y".to_string()))
+                ),
+                element(None, pattern_node(PatternKind::Any)),
+            ]))
         );
         assert_eq!(
             pattern("Shape.pair((left: Shape.empty, right: _))"),
-            Pattern::Option {
+            pattern_node(PatternKind::Option {
                 ty: TypeName::new("Shape"),
                 option: "pair".to_string(),
-                value: Some(Box::new(Pattern::Tuple(vec![
+                value: Some(Box::new(pattern_node(PatternKind::Tuple(vec![
                     element(
                         Some("left"),
-                        Pattern::Option {
+                        pattern_node(PatternKind::Option {
                             ty: TypeName::new("Shape"),
                             option: "empty".to_string(),
                             value: None,
-                        }
+                        })
                     ),
-                    element(Some("right"), Pattern::Any),
-                ]))),
-            }
+                    element(Some("right"), pattern_node(PatternKind::Any)),
+                ])))),
+            })
         );
         for src in [
             "match v { x => {} }",
@@ -1259,28 +1437,34 @@ mod tests {
     fn parses_destructuring() {
         assert_eq!(
             parse_body("(let a, _) = (y, x)"),
-            Ok(vec![Stmt::Destructure {
-                pattern: Pattern::Tuple(vec![
+            Ok(vec![stmt_node(StmtKind::Destructure {
+                pattern: pattern_node(PatternKind::Tuple(vec![
                     TuplePattern {
                         label: None,
-                        pattern: Pattern::Binding("a".to_string()),
+                        pattern: pattern_node(PatternKind::Binding("a".to_string())),
                     },
                     TuplePattern {
                         label: None,
-                        pattern: Pattern::Any,
+                        pattern: pattern_node(PatternKind::Any),
                     },
-                ]),
-                value: Expr::Tuple(vec![arg(None, *var("y")), arg(None, *var("x"))]),
-            }])
+                ])),
+                value: expr_node(ExprKind::Tuple(vec![
+                    arg(None, *var("y")),
+                    arg(None, *var("x"))
+                ])),
+            })])
         );
         // A call on a tuple still starts with `(`.
         assert_eq!(
             parse_body("(x: 1).f()"),
-            Ok(vec![Stmt::Expr(method_call(
-                Expr::Tuple(vec![arg(Some("x"), Expr::Int(1))]),
+            Ok(vec![stmt_node(StmtKind::Expr(method_call(
+                expr_node(ExprKind::Tuple(vec![arg(
+                    Some("x"),
+                    expr_node(ExprKind::Int(1))
+                )])),
                 "f",
                 vec![],
-            ))])
+            )))])
         );
         // Only a tuple pattern can be assigned to, and only in a function.
         for src in [
@@ -1300,13 +1484,17 @@ mod tests {
             parse_body("x = 1 - (2 + 3)"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(int(1), BinOp::Sub, paren(bin(int(2), BinOp::Add, int(3)))),
+                expr_node(ExprKind::Binary(
+                    int(1),
+                    BinOp::Sub,
+                    paren(bin(int(2), BinOp::Add, int(3)))
+                )),
             )])
         );
     }
 
     fn neg(expr: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Unary(UnOp::Neg, expr))
+        Box::new(expr_node(ExprKind::Unary(UnOp::Neg, expr)))
     }
 
     #[test]
@@ -1327,7 +1515,7 @@ mod tests {
             parse_body("x = 1 - -2"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(int(1), BinOp::Sub, neg(int(2)))
+                expr_node(ExprKind::Binary(int(1), BinOp::Sub, neg(int(2))))
             )])
         );
     }
@@ -1338,15 +1526,15 @@ mod tests {
             parse_body("x = 1 + 2 * 3 - 4 / 5"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(
-                    Box::new(Expr::Binary(
+                expr_node(ExprKind::Binary(
+                    Box::new(expr_node(ExprKind::Binary(
                         int(1),
                         BinOp::Add,
-                        Box::new(Expr::Binary(int(2), BinOp::Mul, int(3))),
-                    )),
+                        Box::new(expr_node(ExprKind::Binary(int(2), BinOp::Mul, int(3)))),
+                    ))),
                     BinOp::Sub,
-                    Box::new(Expr::Binary(int(4), BinOp::Div, int(5))),
-                ),
+                    Box::new(expr_node(ExprKind::Binary(int(4), BinOp::Div, int(5)))),
+                )),
             )])
         );
     }
@@ -1357,11 +1545,11 @@ mod tests {
             parse_body("x = 8 / 4 * 2"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(
-                    Box::new(Expr::Binary(int(8), BinOp::Div, int(4))),
+                expr_node(ExprKind::Binary(
+                    Box::new(expr_node(ExprKind::Binary(int(8), BinOp::Div, int(4)))),
                     BinOp::Mul,
                     int(2),
-                ),
+                )),
             )])
         );
     }
@@ -1372,7 +1560,7 @@ mod tests {
             parse_body("x = -2 * 3"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(neg(int(2)), BinOp::Mul, int(3))
+                expr_node(ExprKind::Binary(neg(int(2)), BinOp::Mul, int(3)))
             )])
         );
     }
@@ -1382,36 +1570,36 @@ mod tests {
         assert_eq!(
             parse_body("let x = 1 + 2\nvar y = x\ny = 3\nlet letter = y"),
             Ok(vec![
-                Stmt::Decl {
+                stmt_node(StmtKind::Decl {
                     mutability: Mutability::Let,
                     name: "x".to_string(),
                     ty: None,
-                    value: Expr::Binary(int(1), BinOp::Add, int(2)),
-                },
-                Stmt::Decl {
+                    value: expr_node(ExprKind::Binary(int(1), BinOp::Add, int(2))),
+                }),
+                stmt_node(StmtKind::Decl {
                     mutability: Mutability::Var,
                     name: "y".to_string(),
                     ty: None,
                     value: *var("x"),
-                },
-                assign("y", Expr::Int(3)),
-                Stmt::Decl {
+                }),
+                assign("y", expr_node(ExprKind::Int(3))),
+                stmt_node(StmtKind::Decl {
                     mutability: Mutability::Let,
                     name: "letter".to_string(),
                     ty: None,
                     value: *var("y"),
-                },
+                }),
             ])
         );
     }
 
     fn decl(mutability: Mutability, name: &str, ty: Option<&str>, value: Expr) -> Stmt {
-        Stmt::Decl {
+        stmt_node(StmtKind::Decl {
             mutability,
             name: name.to_string(),
             ty: ty.map(TypeName::new),
             value,
-        }
+        })
     }
 
     #[test]
@@ -1426,9 +1614,19 @@ mod tests {
                 "
             ),
             Ok(vec![
-                decl(Mutability::Let, "x", Some("Int"), Expr::Int(3)),
-                decl(Mutability::Var, "y", Some("Bool"), Expr::Bool(true)),
-                decl(Mutability::Let, "z", None, Expr::Int(1)),
+                decl(
+                    Mutability::Let,
+                    "x",
+                    Some("Int"),
+                    expr_node(ExprKind::Int(3))
+                ),
+                decl(
+                    Mutability::Var,
+                    "y",
+                    Some("Bool"),
+                    expr_node(ExprKind::Bool(true))
+                ),
+                decl(Mutability::Let, "z", None, expr_node(ExprKind::Int(1))),
                 decl(Mutability::Let, "w", Some("Int"), *neg(var("x"))),
             ])
         );
@@ -1439,7 +1637,12 @@ mod tests {
         // Whether a type exists is decided by the checker.
         assert_eq!(
             parse_body("let x: Foo = 1"),
-            Ok(vec![decl(Mutability::Let, "x", Some("Foo"), Expr::Int(1))])
+            Ok(vec![decl(
+                Mutability::Let,
+                "x",
+                Some("Foo"),
+                expr_node(ExprKind::Int(1))
+            )])
         );
     }
 
@@ -1480,8 +1683,8 @@ mod tests {
         assert_eq!(
             parse_body("x = true\ny = false"),
             Ok(vec![
-                assign("x", Expr::Bool(true)),
-                assign("y", Expr::Bool(false)),
+                assign("x", expr_node(ExprKind::Bool(true))),
+                assign("y", expr_node(ExprKind::Bool(false))),
             ])
         );
     }
@@ -1493,7 +1696,11 @@ mod tests {
             parse_body("x = -true + 1"),
             Ok(vec![assign(
                 "x",
-                Expr::Binary(neg(Box::new(Expr::Bool(true))), BinOp::Add, int(1)),
+                expr_node(ExprKind::Binary(
+                    neg(Box::new(expr_node(ExprKind::Bool(true)))),
+                    BinOp::Add,
+                    int(1)
+                )),
             )])
         );
     }
@@ -1505,16 +1712,16 @@ mod tests {
     }
 
     fn bin(lhs: Box<Expr>, op: BinOp, rhs: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Binary(lhs, op, rhs))
+        Box::new(expr_node(ExprKind::Binary(lhs, op, rhs)))
     }
 
     fn not(expr: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Unary(UnOp::Not, expr))
+        Box::new(expr_node(ExprKind::Unary(UnOp::Not, expr)))
     }
 
     fn parse_expr(src: &str) -> Expr {
-        match parse_body(&format!("x = {src}")).unwrap().remove(0) {
-            Stmt::Assign { value, .. } => value,
+        match parse_body(&format!("x = {src}")).unwrap().remove(0).kind {
+            StmtKind::Assign { value, .. } => value,
             stmt => panic!("expected assignment, got {stmt:?}"),
         }
     }
@@ -1576,7 +1783,7 @@ mod tests {
 
     #[test]
     fn parses_bitwise_operators() {
-        let bit_not = |expr| Box::new(Expr::Unary(UnOp::BitNot, expr));
+        let bit_not = |expr| Box::new(expr_node(ExprKind::Unary(UnOp::BitNot, expr)));
         assert_eq!(
             parse_expr("a .& b"),
             *bin(var("a"), BinOp::BitAnd, var("b"))
@@ -1728,11 +1935,11 @@ mod tests {
     }
 
     fn if_(cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>) -> Stmt {
-        Stmt::If {
+        stmt_node(StmtKind::If {
             cond,
             then_block,
             else_block,
-        }
+        })
     }
 
     #[test]
@@ -1748,7 +1955,10 @@ mod tests {
             ),
             Ok(vec![if_(
                 *var("c"),
-                vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2))],
+                vec![
+                    assign("x", expr_node(ExprKind::Int(1))),
+                    assign("y", expr_node(ExprKind::Int(2)))
+                ],
                 None,
             )])
         );
@@ -1768,8 +1978,8 @@ mod tests {
             ),
             Ok(vec![if_(
                 *var("c"),
-                vec![assign("x", Expr::Int(1))],
-                Some(vec![assign("x", Expr::Int(2))]),
+                vec![assign("x", expr_node(ExprKind::Int(1)))],
+                Some(vec![assign("x", expr_node(ExprKind::Int(2)))]),
             )])
         );
     }
@@ -1792,14 +2002,14 @@ mod tests {
             ),
             Ok(vec![if_(
                 *var("a"),
-                vec![assign("x", Expr::Int(1))],
+                vec![assign("x", expr_node(ExprKind::Int(1)))],
                 Some(vec![if_(
                     *var("b"),
-                    vec![assign("x", Expr::Int(2))],
+                    vec![assign("x", expr_node(ExprKind::Int(2)))],
                     Some(vec![if_(
                         *var("c"),
-                        vec![assign("x", Expr::Int(3))],
-                        Some(vec![assign("x", Expr::Int(4))]),
+                        vec![assign("x", expr_node(ExprKind::Int(3)))],
+                        Some(vec![assign("x", expr_node(ExprKind::Int(4)))]),
                     )]),
                 )]),
             )])
@@ -1824,7 +2034,7 @@ mod tests {
             parse_body("if c { x = 1 } else {}"),
             Ok(vec![if_(
                 *var("c"),
-                vec![assign("x", Expr::Int(1))],
+                vec![assign("x", expr_node(ExprKind::Int(1)))],
                 Some(vec![]),
             )])
         );
@@ -1850,27 +2060,27 @@ mod tests {
                 "
             ),
             Ok(vec![
-                Stmt::Decl {
+                stmt_node(StmtKind::Decl {
                     mutability: Mutability::Let,
                     name: "a".to_string(),
                     ty: None,
-                    value: Expr::Bool(true),
-                },
+                    value: expr_node(ExprKind::Bool(true)),
+                }),
                 if_(
                     *var("a"),
                     vec![if_(
                         *var("a"),
-                        vec![Stmt::Decl {
+                        vec![stmt_node(StmtKind::Decl {
                             mutability: Mutability::Let,
                             name: "b".to_string(),
                             ty: None,
-                            value: Expr::Int(1),
-                        }],
+                            value: expr_node(ExprKind::Int(1)),
+                        })],
                         None,
                     )],
                     None,
                 ),
-                assign("x", Expr::Int(2)),
+                assign("x", expr_node(ExprKind::Int(2))),
             ])
         );
     }
@@ -1893,16 +2103,16 @@ mod tests {
                 // At the end, without a trailing newline."
             ),
             Ok(vec![
-                Stmt::Decl {
+                stmt_node(StmtKind::Decl {
                     mutability: Mutability::Let,
                     name: "a".to_string(),
                     ty: None,
-                    value: Expr::Bool(true),
-                },
+                    value: expr_node(ExprKind::Bool(true)),
+                }),
                 if_(
                     *var("a"),
-                    vec![assign("x", Expr::Int(1))],
-                    Some(vec![assign("x", Expr::Int(2))]),
+                    vec![assign("x", expr_node(ExprKind::Int(1)))],
+                    Some(vec![assign("x", expr_node(ExprKind::Int(2)))]),
                 ),
             ])
         );
@@ -1941,8 +2151,8 @@ mod tests {
                 "
             ),
             Ok(vec![
-                assign("x", Expr::Binary(int(1), BinOp::Add, int(2))),
-                assign("y", Expr::Int(3)),
+                assign("x", expr_node(ExprKind::Binary(int(1), BinOp::Add, int(2)))),
+                assign("y", expr_node(ExprKind::Int(3))),
             ])
         );
     }
@@ -1951,7 +2161,10 @@ mod tests {
     fn block_comments_spanning_lines_end_statements() {
         assert_eq!(
             parse_body("x = 1 /*\n*/ y = 2"),
-            Ok(vec![assign("x", Expr::Int(1)), assign("y", Expr::Int(2))])
+            Ok(vec![
+                assign("x", expr_node(ExprKind::Int(1))),
+                assign("y", expr_node(ExprKind::Int(2)))
+            ])
         );
         for src in [
             // On one line, a comment doesn't separate statements.
@@ -1976,7 +2189,7 @@ mod tests {
         // Everything after `//` is ignored, including what would be an error.
         assert_eq!(
             parse_body("x = 1 // y = 2 $ {"),
-            Ok(vec![assign("x", Expr::Int(1))])
+            Ok(vec![assign("x", expr_node(ExprKind::Int(1)))])
         );
         // A comment swallows the `{`, so the block is never opened.
         assert!(parse_body("if c // {\n}").is_err());
@@ -2031,6 +2244,7 @@ mod tests {
             label: label.map(str::to_string),
             name: name.to_string(),
             ty: TypeName::new(ty),
+            span: Span::default(),
         }
     }
 
@@ -2038,14 +2252,15 @@ mod tests {
         Arg {
             label: label.map(str::to_string),
             value,
+            span: Span::default(),
         }
     }
 
     fn call(callee: &str, args: Vec<Arg>) -> Box<Expr> {
-        Box::new(Expr::Call {
+        Box::new(expr_node(ExprKind::Call {
             callee: Name::new(callee),
             args,
-        })
+        }))
     }
 
     #[test]
@@ -2058,16 +2273,15 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn(Function {
+            Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "addFive".to_string(),
                 params: vec![param(Some("to"), "value", "Int")],
                 ret: TypeName::new("Int"),
-                body: vec![Stmt::Return(Some(Expr::Binary(
-                    var("value"),
-                    BinOp::Add,
-                    int(5),
-                )))],
-            })])
+                body: vec![stmt_node(StmtKind::Return(Some(expr_node(
+                    ExprKind::Binary(var("value"), BinOp::Add, int(5),)
+                ))))],
+                span: Span::default()
+            }))])
         );
     }
 
@@ -2075,7 +2289,7 @@ mod tests {
     fn parses_parameter_label_forms() {
         assert_eq!(
             parse_body("fn f(a: Int, to b: Bool, _ c: Int) {}"),
-            Ok(vec![Stmt::Fn(Function {
+            Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "f".to_string(),
                 params: vec![
                     // A single name is both the label and the parameter name.
@@ -2086,7 +2300,8 @@ mod tests {
                 ],
                 ret: TypeName::new("Void"),
                 body: vec![],
-            })])
+                span: Span::default()
+            }))])
         );
     }
 
@@ -2101,12 +2316,16 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn(Function {
+            Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "reset".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![assign("count", Expr::Int(0)), Stmt::Return(None)],
-            })])
+                body: vec![
+                    assign("count", expr_node(ExprKind::Int(0))),
+                    stmt_node(StmtKind::Return(None))
+                ],
+                span: Span::default()
+            }))])
         );
     }
 
@@ -2151,10 +2370,10 @@ mod tests {
     fn parses_call_statement() {
         assert_eq!(
             parse_body("log(message: 1)"),
-            Ok(vec![Stmt::Expr(*call(
+            Ok(vec![stmt_node(StmtKind::Expr(*call(
                 "log",
                 vec![arg(Some("message"), *int(1))]
-            ))])
+            )))])
         );
     }
 
@@ -2172,10 +2391,17 @@ mod tests {
 
     #[test]
     fn parses_return_forms() {
-        assert_eq!(parse_body("return"), Ok(vec![Stmt::Return(None)]));
+        assert_eq!(
+            parse_body("return"),
+            Ok(vec![stmt_node(StmtKind::Return(None))])
+        );
         assert_eq!(
             parse_body("return 1 + 2"),
-            Ok(vec![Stmt::Return(Some(*bin(int(1), BinOp::Add, int(2))))])
+            Ok(vec![stmt_node(StmtKind::Return(Some(*bin(
+                int(1),
+                BinOp::Add,
+                int(2)
+            ))))])
         );
     }
 
@@ -2215,15 +2441,16 @@ mod tests {
             mutability,
             name: name.to_string(),
             ty: TypeName::new(ty),
+            span: Span::default(),
         }
     }
 
     fn group_(name: &str, fields: Vec<Field>) -> Stmt {
-        Stmt::Group {
+        stmt_node(StmtKind::Group {
             name: name.to_string(),
             params: vec![],
             fields,
-        }
+        })
     }
 
     #[test]
@@ -2292,12 +2519,13 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn(Function {
+            Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "f".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
                 body: vec![group_("Inner", vec![])],
-            })])
+                span: Span::default()
+            }))])
         );
     }
 
@@ -2354,17 +2582,18 @@ mod tests {
     }
 
     fn choice_(name: &str, options: Vec<ChoiceOption>) -> Stmt {
-        Stmt::Choice {
+        stmt_node(StmtKind::Choice {
             name: name.to_string(),
             params: vec![],
             options,
-        }
+        })
     }
 
     fn option(name: &str, ty: &str) -> ChoiceOption {
         ChoiceOption {
             name: name.to_string(),
             ty: TypeName::new(ty),
+            span: Span::default(),
         }
     }
 
@@ -2423,6 +2652,7 @@ mod tests {
                             ModulePath::Named("other".to_string()),
                             "Error"
                         )),
+                        span: Span::default()
                     },
                 ],
             )])
@@ -2439,12 +2669,13 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Fn(Function {
+            Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "f".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
                 body: vec![choice_("Inner", vec![])],
-            })])
+                span: Span::default()
+            }))])
         );
     }
 
@@ -2487,11 +2718,13 @@ mod tests {
     /// `binding` if given.
     fn match_option(ty: &str, name: &str, binding: Option<&str>, body: Vec<Stmt>) -> MatchArm {
         MatchArm {
-            pattern: Pattern::Option {
+            pattern: pattern_node(PatternKind::Option {
                 ty: TypeName::new(ty),
                 option: name.to_string(),
-                value: binding.map(|binding| Box::new(Pattern::Binding(binding.to_string()))),
-            },
+                value: binding.map(|binding| {
+                    Box::new(pattern_node(PatternKind::Binding(binding.to_string())))
+                }),
+            }),
             body,
         }
     }
@@ -2509,18 +2742,21 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Match {
+            Ok(vec![stmt_node(StmtKind::Match {
                 value: *var("shape"),
                 arms: vec![
                     match_option(
                         "Shape",
                         "circle",
                         Some("radius"),
-                        vec![Stmt::Expr(*call("draw", vec![arg(None, *var("radius"))]))],
+                        vec![stmt_node(StmtKind::Expr(*call(
+                            "draw",
+                            vec![arg(None, *var("radius"))]
+                        )))],
                     ),
                     match_option("Shape", "empty", None, vec![]),
                 ],
-            }])
+            })])
         );
     }
 
@@ -2528,17 +2764,17 @@ mod tests {
     fn parses_match_layouts() {
         assert_eq!(
             parse_body("match s {}"),
-            Ok(vec![Stmt::Match {
+            Ok(vec![stmt_node(StmtKind::Match {
                 value: *var("s"),
                 arms: vec![],
-            }])
+            })])
         );
         assert_eq!(
             parse_body("match s { A.a => {} }"),
-            Ok(vec![Stmt::Match {
+            Ok(vec![stmt_node(StmtKind::Match {
                 value: *var("s"),
                 arms: vec![match_option("A", "a", None, vec![])],
-            }])
+            })])
         );
         assert_eq!(
             parse_body(
@@ -2553,23 +2789,25 @@ mod tests {
                 }
                 "
             ),
-            Ok(vec![Stmt::Match {
+            Ok(vec![stmt_node(StmtKind::Match {
                 value: method_call(*var("s"), "shape", vec![]),
                 arms: vec![
                     MatchArm {
-                        pattern: Pattern::Option {
+                        pattern: pattern_node(PatternKind::Option {
                             ty: TypeName::Named(qualified(
                                 ModulePath::Named("other".to_string()),
                                 "Shape",
                             )),
                             option: "circle".to_string(),
-                            value: Some(Box::new(Pattern::Binding("r".to_string()))),
-                        },
-                        body: vec![Stmt::Return(Some(*var("r")))],
+                            value: Some(Box::new(pattern_node(PatternKind::Binding(
+                                "r".to_string()
+                            )))),
+                        }),
+                        body: vec![stmt_node(StmtKind::Return(Some(*var("r"))))],
                     },
                     match_option("Shape", "empty", None, vec![]),
                 ],
-            }])
+            })])
         );
     }
 
@@ -2578,17 +2816,17 @@ mod tests {
         // The `{` starts the options, not a constructor.
         assert_eq!(
             parse_body("match s {}"),
-            Ok(vec![Stmt::Match {
+            Ok(vec![stmt_node(StmtKind::Match {
                 value: *var("s"),
                 arms: vec![],
-            }])
+            })])
         );
         assert_eq!(
             parse_body("match (S {}) {}"),
-            Ok(vec![Stmt::Match {
-                value: Expr::Paren(Box::new(construct(Name::new("S"), vec![]))),
+            Ok(vec![stmt_node(StmtKind::Match {
+                value: expr_node(ExprKind::Paren(Box::new(construct(Name::new("S"), vec![])))),
                 arms: vec![],
-            }])
+            })])
         );
     }
 
@@ -2672,23 +2910,31 @@ mod tests {
                 "
             ),
             Ok(vec![
-                Stmt::Use(Import::Module(ModulePath::Absolute(vec![
+                stmt_node(StmtKind::Use(Import::Module(ModulePath::Absolute(vec![
                     "dir".to_string(),
                     "other".to_string()
-                ]))),
-                Stmt::Use(Import::Module(ModulePath::Relative(vec![
+                ])))),
+                stmt_node(StmtKind::Use(Import::Module(ModulePath::Relative(vec![
                     "dir".to_string(),
                     "other".to_string()
-                ]))),
-                Stmt::Use(Import::Module(ModulePath::Named("stdlib".to_string()))),
-                decl(Mutability::Let, "x", None, Expr::Int(1)),
-                decl(Mutability::Var, "y", Some("Int"), Expr::Int(2)),
-                Stmt::Fn(Function {
+                ])))),
+                stmt_node(StmtKind::Use(Import::Module(ModulePath::Named(
+                    "stdlib".to_string()
+                )))),
+                decl(Mutability::Let, "x", None, expr_node(ExprKind::Int(1))),
+                decl(
+                    Mutability::Var,
+                    "y",
+                    Some("Int"),
+                    expr_node(ExprKind::Int(2))
+                ),
+                stmt_node(StmtKind::Fn(Function {
                     name: "f".to_string(),
                     params: vec![],
                     ret: TypeName::new("Void"),
                     body: vec![],
-                }),
+                    span: Span::default()
+                })),
                 group_("S", vec![]),
                 choice_("C", vec![]),
                 alias("A", TypeName::new("S")),
@@ -2697,10 +2943,10 @@ mod tests {
     }
 
     fn alias(name: &str, ty: TypeName) -> Stmt {
-        Stmt::Alias {
+        stmt_node(StmtKind::Alias {
             name: name.to_string(),
             ty,
-        }
+        })
     }
 
     #[test]
@@ -2745,22 +2991,22 @@ mod tests {
         assert_eq!(
             parse("primitive Int\nprimitive Bool"),
             Ok(vec![
-                Stmt::Primitive {
+                stmt_node(StmtKind::Primitive {
                     name: "Int".to_string(),
                     params: vec![],
-                },
-                Stmt::Primitive {
+                }),
+                stmt_node(StmtKind::Primitive {
                     name: "Bool".to_string(),
                     params: vec![],
-                },
+                }),
             ])
         );
         assert_eq!(
             parse("primitive Fn<Input, Output>"),
-            Ok(vec![Stmt::Primitive {
+            Ok(vec![stmt_node(StmtKind::Primitive {
                 name: "Fn".to_string(),
                 params: vec!["Input".to_string(), "Output".to_string()],
-            }])
+            })])
         );
         for src in [
             "primitive",
@@ -2780,20 +3026,21 @@ mod tests {
         assert_eq!(
             parse("primitive fn exit() -> Never\nprimitive fn wait(for seconds: Int)"),
             Ok(vec![
-                Stmt::PrimitiveFn {
+                stmt_node(StmtKind::PrimitiveFn {
                     name: "exit".to_string(),
                     params: vec![],
                     ret: TypeName::new("Never"),
-                },
-                Stmt::PrimitiveFn {
+                }),
+                stmt_node(StmtKind::PrimitiveFn {
                     name: "wait".to_string(),
                     params: vec![Param {
                         label: Some("for".to_string()),
                         name: "seconds".to_string(),
                         ty: TypeName::new("Int"),
+                        span: Span::default()
                     }],
                     ret: TypeName::new("Void"),
-                },
+                }),
             ])
         );
         for src in [
@@ -2830,6 +3077,7 @@ mod tests {
         Name {
             module: Some(module),
             name: name.to_string(),
+            span: Span::default(),
         }
     }
 
@@ -2837,32 +3085,35 @@ mod tests {
     fn parses_qualified_names() {
         let other = || ModulePath::Named("other".to_string());
         let path = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
-        assert_eq!(parse_expr("other::x"), Expr::Var(qualified(other(), "x")));
+        assert_eq!(
+            parse_expr("other::x"),
+            expr_node(ExprKind::Var(qualified(other(), "x")))
+        );
         assert_eq!(
             parse_expr("/dir/other::f() / ./other::y"),
-            Expr::Binary(
-                Box::new(Expr::Call {
+            expr_node(ExprKind::Binary(
+                Box::new(expr_node(ExprKind::Call {
                     callee: qualified(ModulePath::Absolute(path(&["dir", "other"])), "f"),
                     args: vec![],
-                }),
+                })),
                 BinOp::Div,
-                Box::new(Expr::Var(qualified(
+                Box::new(expr_node(ExprKind::Var(qualified(
                     ModulePath::Relative(path(&["other"])),
                     "y"
-                ))),
-            )
+                )))),
+            ))
         );
         assert_eq!(
             parse_body("let x: stdlib::Int = 1"),
-            Ok(vec![Stmt::Decl {
+            Ok(vec![stmt_node(StmtKind::Decl {
                 mutability: Mutability::Let,
                 name: "x".to_string(),
                 ty: Some(TypeName::Named(qualified(
                     ModulePath::Named("stdlib".to_string()),
                     "Int"
                 ))),
-                value: Expr::Int(1),
-            }])
+                value: expr_node(ExprKind::Int(1)),
+            })])
         );
         // Division still works without spaces.
         assert_eq!(parse_expr("a/b"), *bin(var("a"), BinOp::Div, var("b")));
@@ -2905,14 +3156,15 @@ mod tests {
         FieldValue {
             name: name.to_string(),
             value,
+            span: Span::default(),
         }
     }
 
     fn construct(ty: Name, fields: Vec<FieldValue>) -> Expr {
-        Expr::Construct {
+        expr_node(ExprKind::Construct {
             ty: TypeName::Named(ty),
             fields,
-        }
+        })
     }
 
     #[test]
@@ -2922,8 +3174,8 @@ mod tests {
             construct(
                 Name::new("User"),
                 vec![
-                    field_value("age", Expr::Int(42)),
-                    field_value("isAdmin", Expr::Bool(true)),
+                    field_value("age", expr_node(ExprKind::Int(42))),
+                    field_value("isAdmin", expr_node(ExprKind::Bool(true))),
                 ],
             )
         );
@@ -2952,7 +3204,10 @@ mod tests {
                     Name::new("Team"),
                     vec![field_value(
                         "lead",
-                        construct(Name::new("User"), vec![field_value("age", Expr::Int(1))]),
+                        construct(
+                            Name::new("User"),
+                            vec![field_value("age", expr_node(ExprKind::Int(1)))]
+                        ),
                     )],
                 ))),
                 BinOp::Mul,
@@ -3030,8 +3285,8 @@ mod tests {
             construct(
                 Name::new("User"),
                 vec![
-                    field_value("age", Expr::Int(42)),
-                    field_value("isAdmin", Expr::Bool(true)),
+                    field_value("age", expr_node(ExprKind::Int(42))),
+                    field_value("isAdmin", expr_node(ExprKind::Bool(true))),
                 ],
             )
         };
@@ -3089,7 +3344,10 @@ mod tests {
                     vec![
                         field_value(
                             "lead",
-                            construct(Name::new("User"), vec![field_value("age", Expr::Int(30))]),
+                            construct(
+                                Name::new("User"),
+                                vec![field_value("age", expr_node(ExprKind::Int(30)))]
+                            ),
                         ),
                         field_value(
                             "size",
@@ -3099,7 +3357,7 @@ mod tests {
                                     Some("x"),
                                     construct(
                                         Name::new("Point"),
-                                        vec![field_value("x", Expr::Int(1))]
+                                        vec![field_value("x", expr_node(ExprKind::Int(1)))]
                                     ),
                                 )],
                             ),
@@ -3153,8 +3411,8 @@ mod tests {
                 "bump",
                 vec![
                     arg(None, *var("y")),
-                    arg(Some("by"), Expr::Int(2)),
-                    arg(Some("twice"), Expr::Bool(true)),
+                    arg(Some("by"), expr_node(ExprKind::Int(2))),
+                    arg(Some("twice"), expr_node(ExprKind::Bool(true))),
                 ],
             )
         };
@@ -3180,7 +3438,11 @@ mod tests {
             )
             ",
         ] {
-            assert_eq!(parse_body(src), Ok(vec![Stmt::Expr(expected())]), "{src:?}");
+            assert_eq!(
+                parse_body(src),
+                Ok(vec![stmt_node(StmtKind::Expr(expected()))]),
+                "{src:?}"
+            );
         }
         assert_eq!(parse_expr("f(\n\n)"), *call("f", vec![]));
     }
@@ -3210,14 +3472,20 @@ mod tests {
                     call(
                         "f",
                         vec![
-                            arg(Some("a"), *call("g", vec![arg(None, Expr::Int(1))])),
+                            arg(
+                                Some("a"),
+                                *call("g", vec![arg(None, expr_node(ExprKind::Int(1)))])
+                            ),
                             arg(
                                 Some("b"),
                                 construct(
                                     Name::new("User"),
                                     vec![field_value(
                                         "age",
-                                        *call("h", vec![arg(Some("c"), Expr::Int(2))]),
+                                        *call(
+                                            "h",
+                                            vec![arg(Some("c"), expr_node(ExprKind::Int(2)))]
+                                        ),
                                     )],
                                 ),
                             ),
@@ -3521,11 +3789,11 @@ mod tests {
     }
 
     fn method_call(receiver: Expr, method: &str, args: Vec<Arg>) -> Expr {
-        Expr::MethodCall {
+        expr_node(ExprKind::MethodCall {
             receiver: Box::new(receiver),
             method: method.to_string(),
             args,
-        }
+        })
     }
 
     #[test]
@@ -3549,7 +3817,7 @@ mod tests {
                 "
             ),
             Ok(vec![
-                Stmt::Impl {
+                stmt_node(StmtKind::Impl {
                     ty: Name::new("User"),
                     with: None,
                     aliases: vec![],
@@ -3561,11 +3829,12 @@ mod tests {
                                 name: "score".to_string(),
                                 params: vec![],
                                 ret: TypeName::new("Int"),
-                                body: vec![Stmt::Return(Some(method_call(
-                                    Expr::SelfValue,
+                                body: vec![stmt_node(StmtKind::Return(Some(method_call(
+                                    expr_node(ExprKind::SelfValue),
                                     "base",
                                     vec![],
-                                )))],
+                                ))))],
+                                span: Span::default()
                             },
                         },
                         ImplFunction {
@@ -3576,6 +3845,7 @@ mod tests {
                                 params: vec![param(Some("to"), "name", "Int")],
                                 ret: TypeName::new("Void"),
                                 body: vec![],
+                                span: Span::default()
                             },
                         },
                         ImplFunction {
@@ -3585,21 +3855,22 @@ mod tests {
                                 name: "make".to_string(),
                                 params: vec![],
                                 ret: TypeName::new("User"),
-                                body: vec![Stmt::Return(Some(method_call(
+                                body: vec![stmt_node(StmtKind::Return(Some(method_call(
                                     *var("User"),
                                     "make",
                                     vec![],
-                                )))],
+                                ))))],
+                                span: Span::default()
                             },
                         },
                     ],
-                },
-                Stmt::Impl {
+                }),
+                stmt_node(StmtKind::Impl {
                     ty: qualified(ModulePath::Named("user".to_string()), "User"),
                     with: None,
                     aliases: vec![],
                     functions: vec![],
-                },
+                }),
             ])
         );
     }
@@ -3609,7 +3880,11 @@ mod tests {
         assert_eq!(
             parse_expr("a.f(x: 1).g()"),
             method_call(
-                method_call(*var("a"), "f", vec![arg(Some("x"), Expr::Int(1))]),
+                method_call(
+                    *var("a"),
+                    "f",
+                    vec![arg(Some("x"), expr_node(ExprKind::Int(1)))]
+                ),
                 "g",
                 vec![],
             )
@@ -3627,7 +3902,7 @@ mod tests {
                     )),
                 ),
                 BinOp::Add,
-                Box::new(method_call(Expr::Int(3), "i", vec![])),
+                Box::new(method_call(expr_node(ExprKind::Int(3)), "i", vec![])),
             )
         );
         assert_eq!(
@@ -3641,9 +3916,12 @@ mod tests {
                 )"
             ),
             method_call(
-                Expr::Var(qualified(ModulePath::Named("other".to_string()), "x")),
+                expr_node(ExprKind::Var(qualified(
+                    ModulePath::Named("other".to_string()),
+                    "x"
+                ))),
                 "f",
-                vec![arg(Some("a"), Expr::Int(1))],
+                vec![arg(Some("a"), expr_node(ExprKind::Int(1)))],
             )
         );
     }
@@ -3665,7 +3943,7 @@ mod tests {
         assert_eq!(
             parse_body("user.promote()\nif user.isAdmin() {}"),
             Ok(vec![
-                Stmt::Expr(method_call(*var("user"), "promote", vec![])),
+                stmt_node(StmtKind::Expr(method_call(*var("user"), "promote", vec![]))),
                 if_(method_call(*var("user"), "isAdmin", vec![]), vec![], None),
             ])
         );
@@ -3709,7 +3987,7 @@ mod tests {
 
     #[test]
     fn self_is_a_keyword() {
-        assert_eq!(parse_expr("self"), Expr::SelfValue);
+        assert_eq!(parse_expr("self"), expr_node(ExprKind::SelfValue));
         for src in [
             "let self = 1",
             "self = 1",
@@ -3730,6 +4008,7 @@ mod tests {
             label: label.map(str::to_string),
             name: name.to_string(),
             ty: TypeName::new(ty),
+            span: Span::default(),
         };
         assert_eq!(
             parse(
@@ -3744,7 +4023,7 @@ mod tests {
                 "
             ),
             Ok(vec![
-                Stmt::Trait {
+                stmt_node(StmtKind::Trait {
                     name: "And".to_string(),
                     aliases: vec![],
                     functions: vec![
@@ -3754,6 +4033,7 @@ mod tests {
                             params: vec![param(None, "rhs", "Self")],
                             ret: TypeName::new("Bool"),
                             body: None,
+                            span: Span::default()
                         },
                         TraitFunction {
                             is_static: true,
@@ -3761,6 +4041,7 @@ mod tests {
                             params: vec![],
                             ret: TypeName::new("Self"),
                             body: None,
+                            span: Span::default()
                         },
                         TraitFunction {
                             is_static: false,
@@ -3768,14 +4049,15 @@ mod tests {
                             params: vec![param(Some("to"), "value", "Int")],
                             ret: TypeName::new("Void"),
                             body: None,
+                            span: Span::default()
                         },
                     ],
-                },
-                Stmt::Trait {
+                }),
+                stmt_node(StmtKind::Trait {
                     name: "Marker".to_string(),
                     aliases: vec![],
                     functions: vec![],
-                },
+                }),
             ])
         );
     }
@@ -3785,18 +4067,18 @@ mod tests {
         assert_eq!(
             parse("impl Custom with And {}\nimpl Int with logic::And {}"),
             Ok(vec![
-                Stmt::Impl {
+                stmt_node(StmtKind::Impl {
                     ty: Name::new("Custom"),
                     with: Some(Name::new("And")),
                     aliases: vec![],
                     functions: vec![],
-                },
-                Stmt::Impl {
+                }),
+                stmt_node(StmtKind::Impl {
                     ty: Name::new("Int"),
                     with: Some(qualified(ModulePath::Named("logic".to_string()), "And")),
                     aliases: vec![],
                     functions: vec![],
-                },
+                }),
             ])
         );
         // `with` is only special in an `impl`, so it can still be a label.
@@ -3807,7 +4089,7 @@ mod tests {
     fn parses_primitive_functions_in_impls() {
         assert_eq!(
             parse("impl Bool with And {\nprimitive fn and(_ rhs: Self) -> Bool\n}"),
-            Ok(vec![Stmt::Impl {
+            Ok(vec![stmt_node(StmtKind::Impl {
                 ty: Name::new("Bool"),
                 with: Some(Name::new("And")),
                 aliases: vec![],
@@ -3820,12 +4102,14 @@ mod tests {
                             label: None,
                             name: "rhs".to_string(),
                             ty: TypeName::new("Self"),
+                            span: Span::default()
                         }],
                         ret: TypeName::new("Bool"),
                         body: vec![],
+                        span: Span::default()
                     },
                 }],
-            }])
+            })])
         );
         for src in [
             "impl Bool {\nprimitive fn and(_ rhs: Self) -> Bool {}\n}",
@@ -3855,8 +4139,14 @@ mod tests {
             panic!("should parse");
         };
         let [
-            Stmt::Trait { aliases, .. },
-            Stmt::Impl { aliases: given, .. },
+            Stmt {
+                kind: StmtKind::Trait { aliases, .. },
+                ..
+            },
+            Stmt {
+                kind: StmtKind::Impl { aliases: given, .. },
+                ..
+            },
         ] = &program[..]
         else {
             panic!("expected a trait and an impl, got {program:?}");
@@ -3868,10 +4158,12 @@ mod tests {
                 ImplAlias {
                     name: "Rhs".to_string(),
                     ty: TypeName::new("Self"),
+                    span: Span::default()
                 },
                 ImplAlias {
                     name: "Output".to_string(),
                     ty: TypeName::Named(qualified(ModulePath::Named("core".to_string()), "Bool")),
+                    span: Span::default()
                 },
             ]
         );
@@ -3899,21 +4191,30 @@ mod tests {
         let Ok(program) = parse(src) else {
             panic!("should parse");
         };
-        let [Stmt::Trait { functions, .. }] = &program[..] else {
+        let [
+            Stmt {
+                kind: StmtKind::Trait { functions, .. },
+                ..
+            },
+        ] = &program[..]
+        else {
             panic!("expected a trait, got {program:?}");
         };
         assert_eq!(functions[0].body, None);
         let call = method_call(
-            Expr::SelfValue,
+            expr_node(ExprKind::SelfValue),
             "isEqual",
             vec![Arg {
                 label: Some("to".to_string()),
                 value: *var("rhs"),
+                span: Span::default(),
             }],
         );
         assert_eq!(
             functions[1].body,
-            Some(vec![Stmt::Return(Some(*not(Box::new(call))))])
+            Some(vec![stmt_node(StmtKind::Return(Some(*not(Box::new(
+                call
+            )))))])
         );
         assert!(parse("trait Equal {\nfn isEqual(to rhs: Self) -> Bool {\n}").is_err());
     }
@@ -3941,7 +4242,7 @@ mod tests {
     fn self_type_is_a_keyword() {
         assert_eq!(
             parse_body("let p: Self = Self { x: 1 }"),
-            Ok(vec![Stmt::Decl {
+            Ok(vec![stmt_node(StmtKind::Decl {
                 mutability: Mutability::Let,
                 name: "p".to_string(),
                 ty: Some(TypeName::new("Self")),
@@ -3950,9 +4251,10 @@ mod tests {
                     vec![FieldValue {
                         name: "x".to_string(),
                         value: *int(1),
+                        span: Span::default()
                     }],
                 ),
-            }])
+            })])
         );
         assert_eq!(
             parse_expr("Self.new()"),
@@ -3974,10 +4276,10 @@ mod tests {
     }
 
     fn field_access(receiver: Expr, field: &str) -> Expr {
-        Expr::Field {
+        expr_node(ExprKind::Field {
             receiver: Box::new(receiver),
             field: field.to_string(),
-        }
+        })
     }
 
     #[test]
@@ -3987,18 +4289,27 @@ mod tests {
             parse_expr("team.lead.age"),
             field_access(field_access(*var("team"), "lead"), "age")
         );
-        assert_eq!(parse_expr("self.age"), field_access(Expr::SelfValue, "age"));
+        assert_eq!(
+            parse_expr("self.age"),
+            field_access(expr_node(ExprKind::SelfValue), "age")
+        );
         assert_eq!(
             parse_expr("User { age: 1 }.age"),
             field_access(
-                construct(Name::new("User"), vec![field_value("age", Expr::Int(1))]),
+                construct(
+                    Name::new("User"),
+                    vec![field_value("age", expr_node(ExprKind::Int(1)))]
+                ),
                 "age"
             )
         );
         assert_eq!(
             parse_expr("other::user.age"),
             field_access(
-                Expr::Var(qualified(ModulePath::Named("other".to_string()), "user")),
+                expr_node(ExprKind::Var(qualified(
+                    ModulePath::Named("other".to_string()),
+                    "user"
+                ))),
                 "age"
             )
         );
@@ -4072,13 +4383,17 @@ mod tests {
         assert_eq!(
             parse("use stdlib/core\nlet x: stdlib/core::Int = stdlib/core::Int.zero()"),
             Ok(vec![
-                Stmt::Use(Import::Module(package())),
-                Stmt::Decl {
+                stmt_node(StmtKind::Use(Import::Module(package()))),
+                stmt_node(StmtKind::Decl {
                     mutability: Mutability::Let,
                     name: "x".to_string(),
                     ty: Some(TypeName::Named(qualified(package(), "Int"))),
-                    value: method_call(Expr::Var(qualified(package(), "Int")), "zero", vec![]),
-                },
+                    value: method_call(
+                        expr_node(ExprKind::Var(qualified(package(), "Int"))),
+                        "zero",
+                        vec![]
+                    ),
+                }),
             ])
         );
         // Without `::`, `/` is still division.
@@ -4087,7 +4402,7 @@ mod tests {
 
     #[test]
     fn parses_directory_imports() {
-        let directory = |path| Stmt::Use(Import::Directory(path));
+        let directory = |path| stmt_node(StmtKind::Use(Import::Directory(path)));
         let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
         assert_eq!(
             parse("use ./users/*\nuse /users/admins/*\nuse ./*\nuse /*\nuse stdlib/*"),
@@ -4105,7 +4420,7 @@ mod tests {
     fn displays_directory_imports_as_written() {
         for src in ["./users/*", "/users/admins/*", "./*", "/*", "stdlib/*"] {
             let program = parse(&format!("use {src}")).unwrap();
-            let Stmt::Use(import) = &program[0] else {
+            let StmtKind::Use(import) = &program[0].kind else {
                 panic!("expected a `use`");
             };
             assert_eq!(import.to_string(), src);

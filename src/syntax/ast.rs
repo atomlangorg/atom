@@ -16,6 +16,34 @@
 
 use std::fmt;
 
+/// Where something is written in its file, as a range of bytes.
+///
+/// Spans are always equal, since code means the same thing wherever it's
+/// written, so nodes of the AST are compared by what they say.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    /// The span from the start of this one to the end of `other`.
+    pub fn to(self, other: Self) -> Self {
+        Self {
+            start: self.start,
+            end: other.end,
+        }
+    }
+}
+
+impl PartialEq for Span {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Span {}
+
 /// The path to a module, as in `use /dir/other`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModulePath {
@@ -84,6 +112,7 @@ impl fmt::Display for Import {
 pub struct Name {
     pub module: Option<ModulePath>,
     pub name: String,
+    pub span: Span,
 }
 
 impl Name {
@@ -92,6 +121,7 @@ impl Name {
         Self {
             module: None,
             name: name.into(),
+            span: Span::default(),
         }
     }
 }
@@ -118,7 +148,7 @@ pub enum TypeName {
     },
     /// `Self.T`: what the generic parameter `T` of the `impl`'s type stands
     /// for.
-    SelfParam(String),
+    SelfParam(String, Span),
 }
 
 impl TypeName {
@@ -140,7 +170,7 @@ impl fmt::Display for TypeName {
                 let args: Vec<_> = args.iter().map(ToString::to_string).collect();
                 write!(f, "{name}<{}>", args.join(", "))
             }
-            Self::SelfParam(param) => write!(f, "Self.{param}"),
+            Self::SelfParam(param, _) => write!(f, "Self.{param}"),
         }
     }
 }
@@ -247,8 +277,15 @@ impl UnOp {
     }
 }
 
+/// An expression, along with where it's written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprKind {
     /// An integer literal, whose type comes from where it's used.
     Int(u64),
     Bool(bool),
@@ -302,6 +339,7 @@ pub enum Expr {
 pub struct FieldValue {
     pub name: String,
     pub value: Expr,
+    pub span: Span,
 }
 
 /// An argument in a function call, such as `to: 3` or `3`.
@@ -309,6 +347,7 @@ pub struct FieldValue {
 pub struct Arg {
     pub label: Option<String>,
     pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,8 +358,18 @@ pub enum Mutability {
     Var,
 }
 
+/// A statement, along with where it's written. For one holding a block or a
+/// list of declarations, its span stops before them, at the part that says
+/// what it is, such as `fn f()`, `if x` or `group Point`, so that's what errors
+/// point at.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Stmt {
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StmtKind {
     /// `use /dir/other` or `use /dir/*`: makes the names declared at the top
     /// level of other modules visible. Only allowed at the top level.
     Use(Import),
@@ -438,6 +487,8 @@ pub struct Function {
     /// so this is `Void` when no type is written.
     pub ret: TypeName,
     pub body: Block,
+    /// Its signature, without its body.
+    pub span: Span,
 }
 
 /// A function declared by a `trait`, such as `fn and(_ rhs: Self) -> Bool`,
@@ -453,6 +504,8 @@ pub struct TraitFunction {
     /// Its default implementation, which an `impl` uses unless it implements
     /// the function itself, or `None` if every `impl` must implement it.
     pub body: Option<Block>,
+    /// Its signature, without its body.
+    pub span: Span,
 }
 
 /// `alias Name = Type` in an `impl`, giving the type of its trait's alias.
@@ -460,6 +513,7 @@ pub struct TraitFunction {
 pub struct ImplAlias {
     pub name: String,
     pub ty: TypeName,
+    pub span: Span,
 }
 
 /// A function in an `impl`.
@@ -485,6 +539,7 @@ pub struct Param {
     pub name: String,
     /// The parameter's type.
     pub ty: TypeName,
+    pub span: Span,
 }
 
 /// A group field, such as `let age: Int`. Fields can't have values.
@@ -494,6 +549,7 @@ pub struct Field {
     pub name: String,
     /// The field's type.
     pub ty: TypeName,
+    pub span: Span,
 }
 
 /// An option of a choice, such as `circle: Int` or `empty`.
@@ -503,6 +559,7 @@ pub struct ChoiceOption {
     /// The type of the value it holds. `empty` is the same as
     /// `empty: Void`, so this is `Void` when no type is written.
     pub ty: TypeName,
+    pub span: Span,
 }
 
 /// A pattern in a `match`, and the block run when it's the first to match.
@@ -512,9 +569,15 @@ pub struct MatchArm {
     pub body: Block,
 }
 
-/// What a value is matched against in a `match`.
+/// What a value is matched against in a `match`, along with where it's written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pattern {
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternKind {
     /// `_`: matches anything.
     Any,
     /// `let name`: matches anything, giving it a name in the block.
@@ -538,14 +601,14 @@ pub enum Pattern {
 
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Any => write!(f, "_"),
-            Self::Binding(name) => write!(f, "let {name}"),
-            Self::Int { value, negative } => {
+        match &self.kind {
+            PatternKind::Any => write!(f, "_"),
+            PatternKind::Binding(name) => write!(f, "let {name}"),
+            PatternKind::Int { value, negative } => {
                 write!(f, "{}{value}", if *negative { "-" } else { "" })
             }
-            Self::Bool(value) => write!(f, "{value}"),
-            Self::Tuple(elements) => {
+            PatternKind::Bool(value) => write!(f, "{value}"),
+            PatternKind::Tuple(elements) => {
                 let elements: Vec<_> = elements
                     .iter()
                     .map(|element| match &element.label {
@@ -555,7 +618,7 @@ impl fmt::Display for Pattern {
                     .collect();
                 write!(f, "({})", elements.join(", "))
             }
-            Self::Option { ty, option, value } => match value {
+            PatternKind::Option { ty, option, value } => match value {
                 Some(value) => write!(f, "{ty}.{option}({value})"),
                 None => write!(f, "{ty}.{option}"),
             },

@@ -49,9 +49,9 @@ use std::{
 
 use super::{
     ast::{
-        self as ast, Arg, BinOp, ChoiceOption, Expr, Field, FieldValue, ImplAlias, ImplFunction,
-        Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, Program, Stmt,
-        TraitFunction, TypeName, UnOp,
+        self as ast, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, ImplAlias,
+        ImplFunction, Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, PatternKind,
+        Program, Span, Stmt, StmtKind, TraitFunction, TypeName, UnOp,
     },
     parser::parse,
 };
@@ -60,9 +60,20 @@ use crate::ir;
 /// The package holding the standard library.
 const STDLIB_PACKAGE: &str = "stdlib";
 
+/// The source of each file of the standard library, by its path within it.
+const STDLIB_FILES: [(&str, &str); 1] = [("core", include_str!("../stdlib/core.atom"))];
+
+/// The source of the standard library's module shown as `module`, such as
+/// `stdlib/core`, for showing where its errors are.
+pub fn stdlib_source(module: &str) -> Option<&'static str> {
+    let path = module.strip_prefix(STDLIB_PACKAGE)?.strip_prefix('/')?;
+    let (_, src) = STDLIB_FILES.iter().find(|(name, _)| *name == path)?;
+    Some(src)
+}
+
 /// The files of the standard library, by their paths within it.
 static STDLIB: LazyLock<Vec<Module>> = LazyLock::new(|| {
-    [("core", include_str!("../stdlib/core.atom"))]
+    STDLIB_FILES
         .into_iter()
         .map(|(name, src)| Module {
             path: vec![name.to_string()],
@@ -110,6 +121,8 @@ impl fmt::Display for Type {
 pub struct ModuleError {
     /// The module's path, such as `/dir/other`, or `stdlib`.
     pub module: String,
+    /// Where it is in the module's source.
+    pub span: Span,
     pub error: CheckError,
 }
 
@@ -855,6 +868,7 @@ struct Signature<'a> {
 struct ParamSignature<'a> {
     label: Option<&'a str>,
     name: &'a str,
+    span: Span,
     /// `None` if the parameter's type is unknown.
     ty: Option<Type>,
 }
@@ -939,6 +953,7 @@ struct Template<'a> {
 /// A trait, whose functions an `impl` with it must implement exactly.
 struct TraitInfo<'a> {
     name: &'a str,
+    span: Span,
     module: usize,
     /// The names of its aliases, such as `Rhs`, whose types each
     /// implementation gives.
@@ -970,17 +985,20 @@ enum Ctor {
 }
 
 /// The names of the values that `pattern` binds, in order.
-fn bindings(pattern: &Pattern) -> Vec<&str> {
-    match pattern {
-        Pattern::Binding(name) => vec![name],
-        Pattern::Tuple(elements) => elements
+fn bindings(pattern: &Pattern) -> Vec<(&str, Span)> {
+    match &pattern.kind {
+        PatternKind::Binding(name) => vec![(name, pattern.span)],
+        PatternKind::Tuple(elements) => elements
             .iter()
             .flat_map(|element| bindings(&element.pattern))
             .collect(),
-        Pattern::Option {
+        PatternKind::Option {
             value: Some(value), ..
         } => bindings(value),
-        Pattern::Any | Pattern::Int { .. } | Pattern::Bool(_) | Pattern::Option { .. } => vec![],
+        PatternKind::Any
+        | PatternKind::Int { .. }
+        | PatternKind::Bool(_)
+        | PatternKind::Option { .. } => vec![],
     }
 }
 
@@ -1024,6 +1042,7 @@ enum TraitType {
 struct Global<'a> {
     module: usize,
     name: &'a str,
+    span: Span,
     ty: Option<&'a TypeName>,
     value: &'a Expr,
     state: LazyType,
@@ -1046,6 +1065,7 @@ enum LazyType {
 struct Alias<'a> {
     module: usize,
     name: &'a str,
+    span: Span,
     /// The type it's an alias of.
     target: &'a TypeName,
     state: LazyType,
@@ -1179,6 +1199,8 @@ enum Pending<'a> {
     Fn {
         index: usize,
         name: &'a str,
+        /// Its signature.
+        span: Span,
         body: &'a [Stmt],
         kind: FnKind,
         /// The `impl` aliases its body can use, as an index into
@@ -1188,6 +1210,8 @@ enum Pending<'a> {
         /// types made from a generic type, whose `impl` is checked once on
         /// its own.
         quiet: bool,
+        /// The module of the trait, if it's a default implementation.
+        written_in: Option<usize>,
     },
 }
 
@@ -1296,6 +1320,10 @@ struct Checker<'a> {
     /// `id`s. Tuples are the same type only if all of those are the same.
     tuple_ids: HashMap<Vec<TupleKey>, usize>,
     errors: Vec<ModuleError>,
+    /// The module holding the code being checked, if that's not `module`, as
+    /// a trait's default implementation is checked as if it's in an `impl`.
+    /// Errors are reported where the code is written.
+    written_in: Option<usize>,
 }
 
 impl<'a> Checker<'a> {
@@ -1329,13 +1357,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn error(&mut self, error: CheckError) {
-        self.error_in(self.module, error);
+    fn error(&mut self, span: Span, error: CheckError) {
+        self.error_in(self.written_in.unwrap_or(self.module), span, error);
     }
 
-    fn error_in(&mut self, module: usize, error: CheckError) {
+    fn error_in(&mut self, module: usize, span: Span, error: CheckError) {
         let module = self.modules[module].display.clone();
-        self.errors.push(ModuleError { module, error });
+        self.errors.push(ModuleError {
+            module,
+            span,
+            error,
+        });
     }
 
     /// Checks every module. Each kind of top-level declaration is declared in
@@ -1354,25 +1386,27 @@ impl<'a> Checker<'a> {
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
-                match stmt {
-                    Stmt::Group { name, params, .. }
-                    | Stmt::Choice { name, params, .. }
-                    | Stmt::Primitive { name, params }
+                match &stmt.kind {
+                    StmtKind::Group { name, params, .. }
+                    | StmtKind::Choice { name, params, .. }
+                    | StmtKind::Primitive { name, params }
                         if !params.is_empty() =>
                     {
                         self.declare_template(name, params, stmt);
                     }
-                    Stmt::Group { name, .. }
-                    | Stmt::Choice { name, .. }
-                    | Stmt::Primitive { name, .. } => {
-                        types.push((module, self.declare_type(name), stmt));
+                    StmtKind::Group { name, .. }
+                    | StmtKind::Choice { name, .. }
+                    | StmtKind::Primitive { name, .. } => {
+                        types.push((module, self.declare_type(name, stmt.span), stmt));
                     }
-                    Stmt::Alias { name, ty } => self.declare_alias(name, ty, LazyType::Unchecked),
-                    Stmt::Trait {
+                    StmtKind::Alias { name, ty } => {
+                        self.declare_alias(name, stmt.span, ty, LazyType::Unchecked);
+                    }
+                    StmtKind::Trait {
                         name,
                         aliases,
                         functions,
-                    } => self.declare_trait(name, aliases, functions),
+                    } => self.declare_trait(name, stmt.span, aliases, functions),
                     _ => {}
                 }
             }
@@ -1396,13 +1430,13 @@ impl<'a> Checker<'a> {
         }
         for &(module, id, stmt) in &types {
             self.module = module;
-            if let Stmt::Group { name, .. } | Stmt::Choice { name, .. } = stmt {
-                self.check_not_recursive(id, name);
+            if let StmtKind::Group { name, .. } | StmtKind::Choice { name, .. } = &stmt.kind {
+                self.check_not_recursive(id, name, stmt.span);
             }
         }
-        for (module, ty) in checked {
+        for (module, ty, span) in checked {
             self.module = module;
-            self.check_not_recursive(ty.id, &ty.name);
+            self.check_not_recursive(ty.id, &ty.name, span);
         }
 
         // Functions, methods and values come after groups, since their types
@@ -1410,27 +1444,33 @@ impl<'a> Checker<'a> {
         for module in 0..self.modules.len() {
             self.module = module;
             for stmt in self.modules[module].program {
-                match stmt {
-                    Stmt::Fn(function) => {
-                        let index =
-                            self.declare_fn(&function.name, &function.params, &function.ret);
+                match &stmt.kind {
+                    StmtKind::Fn(function) => {
+                        let index = self.declare_fn(
+                            &function.name,
+                            function.span,
+                            &function.params,
+                            &function.ret,
+                        );
                         self.pending.push((
                             module,
                             Pending::Fn {
                                 index,
                                 name: &function.name,
+                                span: function.span,
                                 body: &function.body,
                                 kind: FnKind::Function,
                                 aliases: None,
                                 quiet: false,
+                                written_in: None,
                             },
                         ));
                     }
-                    Stmt::PrimitiveFn { name, params, ret } => {
-                        let index = self.declare_fn(name, params, ret);
-                        self.define_primitive_fn(index, name, FnKind::Function);
+                    StmtKind::PrimitiveFn { name, params, ret } => {
+                        let index = self.declare_fn(name, stmt.span, params, ret);
+                        self.define_primitive_fn(index, name, stmt.span, FnKind::Function);
                     }
-                    Stmt::Impl {
+                    StmtKind::Impl {
                         ty,
                         with,
                         aliases,
@@ -1454,27 +1494,28 @@ impl<'a> Checker<'a> {
                         self.pending
                             .extend(declared.into_iter().map(|pending| (module, pending)));
                     }
-                    Stmt::Decl {
+                    StmtKind::Decl {
                         name, ty, value, ..
                     } => {
                         self.globals.push(Global {
                             module,
                             name,
+                            span: stmt.span,
                             ty: ty.as_ref(),
                             value,
                             state: LazyType::Unchecked,
                             lowered: None,
                         });
                         let index = self.globals.len() - 1;
-                        self.declare(name, Binding::Global(index));
+                        self.declare(name, stmt.span, Binding::Global(index));
                         self.pending.push((module, Pending::Global(index)));
                     }
-                    Stmt::Use(_)
-                    | Stmt::Group { .. }
-                    | Stmt::Choice { .. }
-                    | Stmt::Primitive { .. }
-                    | Stmt::Alias { .. }
-                    | Stmt::Trait { .. } => {}
+                    StmtKind::Use(_)
+                    | StmtKind::Group { .. }
+                    | StmtKind::Choice { .. }
+                    | StmtKind::Primitive { .. }
+                    | StmtKind::Alias { .. }
+                    | StmtKind::Trait { .. } => {}
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
@@ -1503,13 +1544,17 @@ impl<'a> Checker<'a> {
                     Pending::Fn {
                         index,
                         name,
+                        span,
                         body,
                         kind,
                         aliases,
                         quiet,
+                        written_in,
                     } => {
                         let errors = self.errors.len();
-                        self.fn_body(index, name, body, kind, aliases);
+                        self.written_in = written_in;
+                        self.fn_body(index, name, span, body, kind, aliases);
+                        self.written_in = None;
                         if quiet {
                             self.quieten(errors);
                         }
@@ -1544,7 +1589,7 @@ impl<'a> Checker<'a> {
         if with.is_none() {
             for alias in aliases {
                 let name = alias.name.clone();
-                self.error(CheckError::ImplAliasWithoutTrait(name));
+                self.error(alias.span, CheckError::ImplAliasWithoutTrait(name));
             }
         }
         // Signatures can use `Self` and the `impl`'s aliases,
@@ -1563,6 +1608,7 @@ impl<'a> Checker<'a> {
             let index = self.declare_method(
                 self_ty.as_ref(),
                 (&function.name, &function.params, &function.ret),
+                function.span,
                 *is_static,
                 full_name,
             );
@@ -1573,16 +1619,18 @@ impl<'a> Checker<'a> {
                 FnKind::Method(self_ty.clone())
             };
             if *is_primitive {
-                self.define_primitive_fn(index, &name, kind);
+                self.define_primitive_fn(index, &name, function.span, kind);
                 continue;
             }
             pending.push(Pending::Fn {
                 index,
                 name: &function.name,
+                span: function.span,
                 body: &function.body,
                 kind,
                 aliases: impl_aliases,
                 quiet,
+                written_in: None,
             });
         }
         self.impl_type = outer_impl_type;
@@ -1632,13 +1680,15 @@ impl<'a> Checker<'a> {
         }
 
         for stmt in self.modules[self.module].program {
-            let Stmt::Use(import) = stmt else { continue };
+            let StmtKind::Use(import) = &stmt.kind else {
+                continue;
+            };
             let path = match import {
                 Import::Module(path) => path,
                 Import::Directory(dir) => {
                     let found = self.resolve_directory(dir);
                     if found.is_empty() {
-                        self.error(CheckError::EmptyDirectory(import.to_string()));
+                        self.error(stmt.span, CheckError::EmptyDirectory(import.to_string()));
                     }
                     for module in found {
                         if !imports.contains(&module) {
@@ -1652,7 +1702,7 @@ impl<'a> Checker<'a> {
                 // Importing a module twice, or importing itself, is harmless.
                 Some(module) if module == self.module || imports.contains(&module) => {}
                 Some(module) => imports.push(module),
-                None => self.error(self.unknown_module(path)),
+                None => self.error(stmt.span, self.unknown_module(path)),
             }
         }
 
@@ -1911,10 +1961,10 @@ impl<'a> Checker<'a> {
             LookupError::SelfTypeOutsideImpl => CheckError::SelfTypeOutsideImpl,
             LookupError::InferredAlias => CheckError::InferredAliasUsed(name_string),
         };
-        self.error(error);
+        self.error(name.span, error);
     }
 
-    fn declare(&mut self, name: &'a str, binding: Binding) {
+    fn declare(&mut self, name: &'a str, span: Span, binding: Binding) {
         // Names can't be redeclared within a function, even to shadow an
         // outer block. A function's own scope can reuse names from outside it.
         // At the top level, names only need to be unique within their module.
@@ -1924,13 +1974,13 @@ impl<'a> Checker<'a> {
                     .iter()
                     .any(|scope| scope.contains_key(name))
                 {
-                    self.error(CheckError::Redeclared(name.to_string()));
+                    self.error(span, CheckError::Redeclared(name.to_string()));
                 }
                 self.scopes.last_mut().expect("checked above")
             }
             None => {
                 if self.modules[self.module].scope.contains_key(name) {
-                    self.error(CheckError::Redeclared(name.to_string()));
+                    self.error(span, CheckError::Redeclared(name.to_string()));
                 }
                 &mut self.modules[self.module].scope
             }
@@ -1943,7 +1993,7 @@ impl<'a> Checker<'a> {
         match ty {
             TypeName::Named(name) => self.find_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args, false),
-            TypeName::SelfParam(param) => self.self_param(param, false),
+            TypeName::SelfParam(param, span) => self.self_param(param, *span, false),
             TypeName::Tuple(elements) => {
                 let elements = elements
                     .iter()
@@ -1974,7 +2024,7 @@ impl<'a> Checker<'a> {
         match ty {
             TypeName::Named(name) => self.resolve_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args, true),
-            TypeName::SelfParam(param) => self.self_param(param, true),
+            TypeName::SelfParam(param, span) => self.self_param(param, *span, true),
             TypeName::Tuple(elements) => {
                 // Every element is resolved, so each one's errors are found.
                 let elements: Vec<_> = elements
@@ -2023,7 +2073,7 @@ impl<'a> Checker<'a> {
         let template = match self.lookup(name) {
             Ok(Binding::Generic(template)) => template,
             Ok(Binding::Type(_)) if report => {
-                self.error(CheckError::NotGeneric(name.to_string()));
+                self.error(name.span, CheckError::NotGeneric(name.to_string()));
                 return None;
             }
             _ if !report => return None,
@@ -2035,11 +2085,14 @@ impl<'a> Checker<'a> {
         let expected = self.templates[template].params.len();
         if args.len() != expected {
             if report {
-                self.error(CheckError::WrongGenericCount {
-                    ty: name.to_string(),
-                    expected,
-                    found: args.len(),
-                });
+                self.error(
+                    name.span,
+                    CheckError::WrongGenericCount {
+                        ty: name.to_string(),
+                        expected,
+                        found: args.len(),
+                    },
+                );
             }
             return None;
         }
@@ -2055,26 +2108,26 @@ impl<'a> Checker<'a> {
             })
             .collect();
         let args = args.into_iter().collect::<Option<_>>()?;
-        self.instance(template, args, true)
+        self.instance(template, args, name.span, true)
     }
 
     /// What `Self.param` stands for in the `impl` of a type made from a
     /// generic type, reporting errors if `report` is set.
-    fn self_param(&mut self, param: &str, report: bool) -> Option<Type> {
+    fn self_param(&mut self, param: &str, span: Span, report: bool) -> Option<Type> {
         let impl_type = match &self.impl_type {
             Some(Some(ty)) => ty.clone(),
             // The `impl`'s type is unknown, which has been reported.
             Some(None) => return None,
             None => {
                 if report {
-                    self.error(CheckError::SelfParamOutsideGeneric(param.to_string()));
+                    self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
                 }
                 return None;
             }
         };
         let Some((template, args)) = self.instances.get(&impl_type.id) else {
             if report {
-                self.error(CheckError::SelfParamOutsideGeneric(param.to_string()));
+                self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
             }
             return None;
         };
@@ -2086,10 +2139,13 @@ impl<'a> Checker<'a> {
             Some(index) => Some(args[index].clone()),
             None => {
                 if report {
-                    self.error(CheckError::UnknownSelfParam {
-                        ty: impl_type,
-                        param: param.to_string(),
-                    });
+                    self.error(
+                        span,
+                        CheckError::UnknownSelfParam {
+                            ty: impl_type,
+                            param: param.to_string(),
+                        },
+                    );
                 }
                 None
             }
@@ -2115,7 +2171,7 @@ impl<'a> Checker<'a> {
                     .is_some_and(|(found, _)| *found == template)
             });
             if found.is_none() && report {
-                self.error(CheckError::CannotInferGeneric(name.to_string()));
+                self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
             }
             return found.map(|&ty| ty.clone());
         }
@@ -2132,7 +2188,7 @@ impl<'a> Checker<'a> {
         let mut seen = HashSet::new();
         for param in params {
             if !seen.insert(param) {
-                self.error(CheckError::Redeclared(param.clone()));
+                self.error(stmt.span, CheckError::Redeclared(param.clone()));
             }
         }
         self.templates.push(Template {
@@ -2142,14 +2198,20 @@ impl<'a> Checker<'a> {
             stmt,
             impls: vec![],
         });
-        self.declare(name, Binding::Generic(self.templates.len() - 1));
+        self.declare(name, stmt.span, Binding::Generic(self.templates.len() - 1));
     }
 
     /// Checks the generic type at `template` in `templates` once, by making
     /// a type from it with a stand-in for each parameter, which can't be
-    /// used as anything else. Returns that type, with the module it's in.
-    fn check_template(&mut self, template: usize) -> Option<(usize, Type)> {
-        let Template { module, params, .. } = self.templates[template];
+    /// used as anything else. Returns that type, with the module it's in and
+    /// where it's declared.
+    fn check_template(&mut self, template: usize) -> Option<(usize, Type, Span)> {
+        let Template {
+            module,
+            params,
+            stmt,
+            ..
+        } = self.templates[template];
         let stand_ins = params
             .iter()
             .map(|param| {
@@ -2163,16 +2225,22 @@ impl<'a> Checker<'a> {
                 }
             })
             .collect();
-        let ty = self.instance(template, stand_ins, false)?;
+        let ty = self.instance(template, stand_ins, stmt.span, false)?;
         self.checked_instances.insert(ty.id);
-        Some((module, ty))
+        Some((module, ty, stmt.span))
     }
 
     /// The type made from the generic type at `template` in `templates` with
-    /// `args`, which is made the first time it's needed. Its errors aren't
-    /// reported if it's `quiet`, since each generic type is checked once on
-    /// its own.
-    fn instance(&mut self, template: usize, args: Vec<Type>, quiet: bool) -> Option<Type> {
+    /// `args`, which is made the first time it's needed, for the code at
+    /// `span`. Its errors aren't reported if it's `quiet`, since each generic
+    /// type is checked once on its own.
+    fn instance(
+        &mut self,
+        template: usize,
+        args: Vec<Type>,
+        span: Span,
+        quiet: bool,
+    ) -> Option<Type> {
         // Arguments nested deeper than this almost certainly mean a type uses
         // itself with ever larger arguments, which would never end.
         const MAX_DEPTH: usize = 32;
@@ -2189,7 +2257,7 @@ impl<'a> Checker<'a> {
             .max()
             .unwrap_or(0);
         if depth > MAX_DEPTH {
-            self.error(CheckError::GenericTooDeep(name));
+            self.error(span, CheckError::GenericTooDeep(name));
             return None;
         }
 
@@ -2205,10 +2273,10 @@ impl<'a> Checker<'a> {
         // Defined like the generic type, in its module, with its parameters
         // standing for `args`.
         let errors = self.errors.len();
-        self.at_top_level(module, Some((template, args)), |checker| match stmt {
-            Stmt::Group { fields, .. } => checker.define_group(id, &name, fields),
-            Stmt::Choice { options, .. } => checker.define_choice(id, &name, options),
-            Stmt::Primitive { name, .. } => checker.define_primitive(id, name),
+        self.at_top_level(module, Some((template, args)), |checker| match &stmt.kind {
+            StmtKind::Group { fields, .. } => checker.define_group(id, &name, fields),
+            StmtKind::Choice { options, .. } => checker.define_choice(id, &name, options),
+            StmtKind::Primitive { name, .. } => checker.define_primitive(id, name, stmt.span),
             _ => unreachable!("only groups, choices and primitives are generic"),
         });
         if quiet {
@@ -2249,12 +2317,12 @@ impl<'a> Checker<'a> {
         };
         let quiet = !self.checked_instances.contains(&id);
         for (module, stmt) in self.templates[template].impls.clone() {
-            let Stmt::Impl {
+            let StmtKind::Impl {
                 ty: type_name,
                 with,
                 aliases,
                 functions,
-            } = stmt
+            } = &stmt.kind
             else {
                 unreachable!("only `impl`s are recorded");
             };
@@ -2290,7 +2358,9 @@ impl<'a> Checker<'a> {
         let impl_type = self.impl_type.take();
         let impl_aliases = self.current_impl_aliases.take();
         let type_params = std::mem::replace(&mut self.type_params, type_params);
+        let written_in = self.written_in.take();
         let checked = check(self);
+        self.written_in = written_in;
         self.module = module;
         self.scopes = scopes;
         self.fn_scope_start = fn_scope_start;
@@ -2324,16 +2394,16 @@ impl<'a> Checker<'a> {
         match self.lookup(name) {
             Ok(Binding::Type(ty)) => Some(ty),
             Ok(Binding::Generic(_)) => {
-                self.error(CheckError::GenericArgsNeeded(name.to_string()));
+                self.error(name.span, CheckError::GenericArgsNeeded(name.to_string()));
                 None
             }
             // A value from outside the function is still not a type.
             Ok(_) | Err(LookupError::Captured) => {
-                self.error(CheckError::NotAType(name.to_string()));
+                self.error(name.span, CheckError::NotAType(name.to_string()));
                 None
             }
             Err(LookupError::Undeclared) => {
-                self.error(CheckError::UnknownType(name.to_string()));
+                self.error(name.span, CheckError::UnknownType(name.to_string()));
                 None
             }
             Err(error) => {
@@ -2351,7 +2421,7 @@ impl<'a> Checker<'a> {
             LazyType::Checked(ty) => return ty.clone(),
             LazyType::Checking => {
                 let error = CheckError::CyclicAlias(alias.name.to_string());
-                self.error_in(alias.module, error);
+                self.error_in(alias.module, alias.span, error);
                 return None;
             }
             LazyType::Unchecked => {}
@@ -2379,7 +2449,7 @@ impl<'a> Checker<'a> {
             LazyType::Checked(ty) => return ty.clone(),
             LazyType::Checking => {
                 let error = CheckError::CyclicValue(global.name.to_string());
-                self.error_in(global.module, error);
+                self.error_in(global.module, global.span, error);
                 return None;
             }
             LazyType::Unchecked => {}
@@ -2415,7 +2485,7 @@ impl<'a> Checker<'a> {
         let ty = match type_name {
             Some(type_name) => {
                 let expected = self.resolve_type(type_name);
-                self.check_assignable(name, expected.clone(), found);
+                self.check_assignable(name, value.span, expected.clone(), found);
                 expected
             }
             None => found,
@@ -2435,9 +2505,15 @@ impl<'a> Checker<'a> {
     }
 
     /// Declares a function, returning its index into `functions`.
-    fn declare_fn(&mut self, name: &'a str, params: &'a [Param], ret: &TypeName) -> usize {
+    fn declare_fn(
+        &mut self,
+        name: &'a str,
+        span: Span,
+        params: &'a [Param],
+        ret: &TypeName,
+    ) -> usize {
         let index = self.signature(params, ret, self.full_name(name));
-        self.declare(name, Binding::Function(index));
+        self.declare(name, span, Binding::Function(index));
         index
     }
 
@@ -2447,6 +2523,7 @@ impl<'a> Checker<'a> {
         &mut self,
         self_ty: Option<&Type>,
         method: (&'a String, &'a [Param], &TypeName),
+        span: Span,
         is_static: bool,
         full_name: String,
     ) -> usize {
@@ -2473,11 +2550,14 @@ impl<'a> Checker<'a> {
                 }
             };
             if let Some(existing) = existing {
-                self.error(CheckError::MemberRedeclared {
-                    ty: self_ty.clone(),
-                    member: name.clone(),
-                    existing,
-                });
+                self.error(
+                    span,
+                    CheckError::MemberRedeclared {
+                        ty: self_ty.clone(),
+                        member: name.clone(),
+                        existing,
+                    },
+                );
             } else {
                 let found = Method {
                     module: self.module,
@@ -2502,6 +2582,7 @@ impl<'a> Checker<'a> {
             .map(|param| ParamSignature {
                 label: param.label.as_deref(),
                 name: &param.name,
+                span: param.span,
                 ty: self.resolve_type(&param.ty),
             })
             .collect();
@@ -2524,6 +2605,7 @@ impl<'a> Checker<'a> {
         &mut self,
         index: usize,
         name: &'a str,
+        span: Span,
         body: &'a [Stmt],
         kind: FnKind,
         aliases: Option<usize>,
@@ -2559,10 +2641,10 @@ impl<'a> Checker<'a> {
         // `self` is a keyword, so it can't clash with a parameter. Like any
         // other value, functions nested in the method can't use it.
         if let FnKind::Method(ty) = kind {
-            self.declare_local("self", Mutability::Let, ty);
+            self.declare_local("self", span, Mutability::Let, ty);
         }
         for param in params {
-            self.declare_local(param.name, Mutability::Let, param.ty);
+            self.declare_local(param.name, param.span, Mutability::Let, param.ty);
         }
         let param_count = self.current_fn.as_ref().expect("set above").locals.len();
         let mut lowered: Vec<_> = body.iter().filter_map(|stmt| self.stmt(stmt)).collect();
@@ -2579,10 +2661,13 @@ impl<'a> Checker<'a> {
         if !self.always_returns(body) {
             match &returns {
                 Some(expected) if *expected != self.std_type("Void") => {
-                    self.error(CheckError::MissingReturn {
-                        function: name.to_string(),
-                        expected: expected.clone(),
-                    });
+                    self.error(
+                        span,
+                        CheckError::MissingReturn {
+                            function: name.to_string(),
+                            expected: expected.clone(),
+                        },
+                    );
                 }
                 _ => lowered.push(ir::Stmt::Return(self.void())),
             }
@@ -2610,12 +2695,12 @@ impl<'a> Checker<'a> {
     fn always_returns(&self, stmts: &[Stmt]) -> bool {
         stmts.iter().any(|stmt| {
             self.never_returns.contains(&(stmt as *const Stmt))
-                || match stmt {
-                    Stmt::Return(_) => true,
-                    Stmt::Match { arms, .. } => {
+                || match &stmt.kind {
+                    StmtKind::Return(_) => true,
+                    StmtKind::Match { arms, .. } => {
                         arms.iter().all(|arm| self.always_returns(&arm.body))
                     }
-                    Stmt::If {
+                    StmtKind::If {
                         then_block,
                         else_block: Some(else_block),
                         ..
@@ -2630,17 +2715,19 @@ impl<'a> Checker<'a> {
     fn declare_trait(
         &mut self,
         name: &'a str,
+        span: Span,
         aliases: &'a [String],
         functions: &'a [TraitFunction],
     ) {
         self.traits.push(TraitInfo {
             name,
+            span,
             module: self.module,
             aliases,
             functions,
             signatures: vec![],
         });
-        self.declare(name, Binding::Trait(self.traits.len() - 1));
+        self.declare(name, span, Binding::Trait(self.traits.len() - 1));
     }
 
     /// Works out the types in the signatures of the trait at `index` in
@@ -2649,6 +2736,7 @@ impl<'a> Checker<'a> {
     fn define_trait(&mut self, index: usize) {
         let TraitInfo {
             name,
+            span,
             module,
             aliases,
             functions,
@@ -2661,20 +2749,24 @@ impl<'a> Checker<'a> {
         let redeclared = aliases
             .iter()
             .filter(|alias| !alias_names.insert(*alias))
+            .map(|alias| (span, alias))
             .chain(
                 functions
                     .iter()
-                    .map(|function| &function.name)
-                    .filter(|name| !function_names.insert(*name)),
+                    .filter(|function| !function_names.insert(&function.name))
+                    .map(|function| (function.span, &function.name)),
             );
         let errors: Vec<_> = redeclared
-            .map(|member| CheckError::TraitMemberRedeclared {
-                trait_name: name.to_string(),
-                member: member.clone(),
+            .map(|(span, member)| {
+                let error = CheckError::TraitMemberRedeclared {
+                    trait_name: name.to_string(),
+                    member: member.clone(),
+                };
+                (span, error)
             })
             .collect();
-        for error in errors {
-            self.error(error);
+        for (span, error) in errors {
+            self.error(span, error);
         }
 
         let mut signatures = vec![];
@@ -2695,7 +2787,7 @@ impl<'a> Checker<'a> {
             // `Self` and the aliases are a different type in each `impl`, so
             // they can't be in a tuple, whose type is always the same.
             if let Some(name) = trait_names(ty, aliases).next() {
-                self.error(CheckError::TraitTypeInTuple(name.to_string()));
+                self.error(name.span, CheckError::TraitTypeInTuple(name.name.clone()));
                 return None;
             }
             return self.resolve_type(ty).map(TraitType::Type);
@@ -2739,7 +2831,7 @@ impl<'a> Checker<'a> {
         for alias in aliases {
             let ty = ImplAliasType::Known(self.resolve_type(&alias.ty));
             if self.impl_aliases[index].insert(&alias.name, ty).is_some() {
-                self.error(CheckError::Redeclared(alias.name.clone()));
+                self.error(alias.span, CheckError::Redeclared(alias.name.clone()));
             }
         }
         Some(index)
@@ -2804,19 +2896,22 @@ impl<'a> Checker<'a> {
                 },
             );
             if found.is_none() && !missing_use {
-                errors.push(CheckError::UninferableAlias {
-                    ty: ty.to_string(),
-                    trait_name: trait_name.to_string(),
-                    alias: name.clone(),
-                });
+                errors.push((
+                    trait_name.span,
+                    CheckError::UninferableAlias {
+                        ty: ty.to_string(),
+                        trait_name: trait_name.to_string(),
+                        alias: name.clone(),
+                    },
+                ));
             }
             inferred.push((name, found.flatten()));
         }
         for (name, ty) in inferred {
             self.impl_aliases[aliases].insert(name, ImplAliasType::Known(ty));
         }
-        for error in errors {
-            self.error(error);
+        for (span, error) in errors {
+            self.error(span, error);
         }
     }
 
@@ -2849,6 +2944,8 @@ impl<'a> Checker<'a> {
 
         let outer_impl_type = self.impl_type.replace(self_ty.cloned());
         self.current_impl_aliases = aliases;
+        let written_in = self.traits[trait_index].module;
+        let outer_written_in = self.written_in.replace(written_in);
         let mut pending = vec![];
         for declared in declared.iter().filter(|declared| !is_implemented(declared)) {
             let Some(body) = &declared.body else {
@@ -2858,6 +2955,7 @@ impl<'a> Checker<'a> {
             let index = self.declare_method(
                 self_ty,
                 (&declared.name, &declared.params, &declared.ret),
+                declared.span,
                 declared.is_static,
                 self.full_name(&name),
             );
@@ -2870,13 +2968,16 @@ impl<'a> Checker<'a> {
                 pending.push(Pending::Fn {
                     index,
                     name: &declared.name,
+                    span: declared.span,
                     body,
                     kind,
                     aliases,
                     quiet,
+                    written_in: Some(written_in),
                 });
             }
         }
+        self.written_in = outer_written_in;
         self.impl_type = outer_impl_type;
         self.current_impl_aliases = None;
         pending
@@ -2887,11 +2988,11 @@ impl<'a> Checker<'a> {
         match self.lookup(name) {
             Ok(Binding::Trait(index)) => Some(index),
             Ok(_) | Err(LookupError::Captured) => {
-                self.error(CheckError::NotATrait(name.to_string()));
+                self.error(name.span, CheckError::NotATrait(name.to_string()));
                 None
             }
             Err(LookupError::Undeclared) => {
-                self.error(CheckError::UnknownTrait(name.to_string()));
+                self.error(name.span, CheckError::UnknownTrait(name.to_string()));
                 None
             }
             Err(error) => {
@@ -2940,10 +3041,13 @@ impl<'a> Checker<'a> {
         let mut errors = vec![];
         for alias in aliases {
             if !trait_.aliases.contains(&alias.name) {
-                errors.push(CheckError::NotInTrait {
-                    trait_name: trait_name.to_string(),
-                    member: alias.name.clone(),
-                });
+                errors.push((
+                    alias.span,
+                    CheckError::NotInTrait {
+                        trait_name: trait_name.to_string(),
+                        member: alias.name.clone(),
+                    },
+                ));
             }
         }
         for &(
@@ -2960,10 +3064,13 @@ impl<'a> Checker<'a> {
                 .iter()
                 .position(|declared| declared.name == function.name)
             else {
-                errors.push(CheckError::NotInTrait {
-                    trait_name: trait_name.to_string(),
-                    member: function.name.clone(),
-                });
+                errors.push((
+                    function.span,
+                    CheckError::NotInTrait {
+                        trait_name: trait_name.to_string(),
+                        member: function.name.clone(),
+                    },
+                ));
                 continue;
             };
             let declared = &trait_.functions[position];
@@ -2981,10 +3088,13 @@ impl<'a> Checker<'a> {
                     })
                 && matches(&signature.returns, returns);
             if !same {
-                errors.push(CheckError::TraitFnMismatch {
-                    trait_name: trait_name.to_string(),
-                    expected: signature_text(declared),
-                });
+                errors.push((
+                    function.span,
+                    CheckError::TraitFnMismatch {
+                        trait_name: trait_name.to_string(),
+                        expected: signature_text(declared),
+                    },
+                ));
             }
         }
         // Functions with a default implementation don't need implementing.
@@ -2997,24 +3107,27 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|(implemented, _)| implemented.function.name == declared.name)
             {
-                errors.push(CheckError::MissingTraitMember {
-                    ty: ty.to_string(),
-                    trait_name: trait_name.to_string(),
-                    expected: signature_text(declared),
-                });
+                errors.push((
+                    trait_name.span,
+                    CheckError::MissingTraitMember {
+                        ty: ty.to_string(),
+                        trait_name: trait_name.to_string(),
+                        expected: signature_text(declared),
+                    },
+                ));
             }
         }
-        for error in errors {
-            self.error(error);
+        for (span, error) in errors {
+            self.error(span, error);
         }
     }
 
     /// Records the primitive function called `name`, such as `exit` or
     /// `Bool.and`, at `index` in `functions`, which must be declared in the
     /// standard library.
-    fn define_primitive_fn(&mut self, index: usize, name: &str, kind: FnKind) {
+    fn define_primitive_fn(&mut self, index: usize, name: &str, span: Span, kind: FnKind) {
         if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
-            self.error(CheckError::PrimitiveOutsideStdlib(name.to_string()));
+            self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
         let primitive = match name {
@@ -3060,7 +3173,13 @@ impl<'a> Checker<'a> {
 
     /// Declares a value in the current function, returning its index among
     /// the function's locals.
-    fn declare_local(&mut self, name: &'a str, mutability: Mutability, ty: Option<Type>) -> usize {
+    fn declare_local(
+        &mut self,
+        name: &'a str,
+        span: Span,
+        mutability: Mutability,
+        ty: Option<Type>,
+    ) -> usize {
         let locals = &mut self
             .current_fn
             .as_mut()
@@ -3070,6 +3189,7 @@ impl<'a> Checker<'a> {
         let local = locals.len() - 1;
         self.declare(
             name,
+            span,
             Binding::Value {
                 mutability,
                 ty,
@@ -3089,18 +3209,19 @@ impl<'a> Checker<'a> {
 
     /// Declares an alias called `name` of the type called `target`, whose
     /// type has been worked out if `state` says so.
-    fn declare_alias(&mut self, name: &'a str, target: &'a TypeName, state: LazyType) {
+    fn declare_alias(&mut self, name: &'a str, span: Span, target: &'a TypeName, state: LazyType) {
         self.aliases.push(Alias {
             module: self.module,
             name,
+            span,
             target,
             state,
         });
-        self.declare(name, Binding::Alias(self.aliases.len() - 1));
+        self.declare(name, span, Binding::Alias(self.aliases.len() - 1));
     }
 
     /// Declares a type without its fields or options, returning its `id`.
-    fn declare_type(&mut self, name: &'a str) -> usize {
+    fn declare_type(&mut self, name: &'a str, span: Span) -> usize {
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
         self.group_modules.push(self.module);
@@ -3109,26 +3230,26 @@ impl<'a> Checker<'a> {
             id,
             name: name.to_string(),
         };
-        self.declare(name, Binding::Type(ty));
+        self.declare(name, span, Binding::Type(ty));
         id
     }
 
     /// Resolves the fields or options of `stmt`, which declares the type with
     /// `id`.
     fn define_type(&mut self, id: usize, stmt: &'a Stmt) {
-        match stmt {
-            Stmt::Group { name, fields, .. } => self.define_group(id, name, fields),
-            Stmt::Choice { name, options, .. } => self.define_choice(id, name, options),
-            Stmt::Primitive { name, .. } => self.define_primitive(id, name),
+        match &stmt.kind {
+            StmtKind::Group { name, fields, .. } => self.define_group(id, name, fields),
+            StmtKind::Choice { name, options, .. } => self.define_choice(id, name, options),
+            StmtKind::Primitive { name, .. } => self.define_primitive(id, name, stmt.span),
             _ => unreachable!("only groups, choices and primitives declare types"),
         }
     }
 
     /// Records the primitive type called `name` with `id`, which must be
     /// declared in the standard library.
-    fn define_primitive(&mut self, id: usize, name: &str) {
+    fn define_primitive(&mut self, id: usize, name: &str, span: Span) {
         if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
-            self.error(CheckError::PrimitiveOutsideStdlib(name.to_string()));
+            self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
         let int = |bits, signed| ir::Primitive::Int { bits, signed };
@@ -3155,14 +3276,17 @@ impl<'a> Checker<'a> {
         let mut signatures = vec![];
         for option in options {
             if !option_names.insert(&option.name) {
-                self.error(CheckError::MemberRedeclared {
-                    ty: Type {
-                        id,
-                        name: name.to_string(),
+                self.error(
+                    option.span,
+                    CheckError::MemberRedeclared {
+                        ty: Type {
+                            id,
+                            name: name.to_string(),
+                        },
+                        member: option.name.clone(),
+                        existing: MemberKind::Option,
                     },
-                    member: option.name.clone(),
-                    existing: MemberKind::Option,
-                });
+                );
             }
             signatures.push(OptionSignature {
                 name: &option.name,
@@ -3178,14 +3302,17 @@ impl<'a> Checker<'a> {
         let mut field_names = HashSet::new();
         for field in fields {
             if !field_names.insert(&field.name) {
-                self.error(CheckError::MemberRedeclared {
-                    ty: Type {
-                        id,
-                        name: name.to_string(),
+                self.error(
+                    field.span,
+                    CheckError::MemberRedeclared {
+                        ty: Type {
+                            id,
+                            name: name.to_string(),
+                        },
+                        member: field.name.clone(),
+                        existing: MemberKind::Field,
                     },
-                    member: field.name.clone(),
-                    existing: MemberKind::Field,
-                });
+                );
             }
             let ty = self.resolve_type(&field.ty);
             self.group_fields[id].push(FieldSignature {
@@ -3210,12 +3337,12 @@ impl<'a> Checker<'a> {
 
     /// Reports an error if the group or choice with `id` contains itself,
     /// which would make it infinitely large.
-    fn check_not_recursive(&mut self, id: usize, name: &str) {
+    fn check_not_recursive(&mut self, id: usize, name: &str, span: Span) {
         let mut seen = HashSet::new();
         let mut unvisited: Vec<_> = self.contained_types(id).collect();
         while let Some(next) = unvisited.pop() {
             if next == id {
-                self.error(CheckError::RecursiveType(name.to_string()));
+                self.error(span, CheckError::RecursiveType(name.to_string()));
                 return;
             }
             if seen.insert(next) {
@@ -3237,17 +3364,17 @@ impl<'a> Checker<'a> {
     /// or `None` if it declares a function or group, which compile
     /// separately, or if it has an error.
     fn stmt(&mut self, stmt: &'a Stmt) -> Option<ir::Stmt> {
-        match stmt {
-            Stmt::Use(_)
-            | Stmt::Impl { .. }
-            | Stmt::Trait { .. }
-            | Stmt::Primitive { .. }
-            | Stmt::PrimitiveFn { .. } => {
+        match &stmt.kind {
+            StmtKind::Use(_)
+            | StmtKind::Impl { .. }
+            | StmtKind::Trait { .. }
+            | StmtKind::Primitive { .. }
+            | StmtKind::PrimitiveFn { .. } => {
                 unreachable!(
                     "the parser only allows `use`, `impl`, `trait` and `primitive` at the top level"
                 )
             }
-            Stmt::Decl {
+            StmtKind::Decl {
                 mutability,
                 name,
                 ty: type_name,
@@ -3256,16 +3383,19 @@ impl<'a> Checker<'a> {
                 let Typed { ty, expr } = self.evaluating(stmt, |checker| {
                     checker.decl_type(name, type_name.as_ref(), value)
                 });
-                let local = self.declare_local(name, *mutability, ty);
+                let local = self.declare_local(name, stmt.span, *mutability, ty);
                 Some(ir::Stmt::Assign {
                     local,
                     value: expr?,
                 })
             }
-            Stmt::Assign { name, value } => {
+            StmtKind::Assign { name, value } => {
                 // The target is found first so the value can take its type
                 // from it, but its errors are reported after the value's.
-                let target = Name::new(name);
+                let target = Name {
+                    span: stmt.span,
+                    ..Name::new(name)
+                };
                 let binding = self.lookup(&target);
                 let expected = match &binding {
                     Ok(Binding::Value { ty, .. }) => ty.clone(),
@@ -3279,7 +3409,7 @@ impl<'a> Checker<'a> {
                         ty: expected,
                         local,
                     }) => {
-                        self.check_assignable(name, expected, found.ty);
+                        self.check_assignable(name, value.span, expected, found.ty);
                         return Some(ir::Stmt::Assign {
                             local,
                             value: found.expr?,
@@ -3289,16 +3419,16 @@ impl<'a> Checker<'a> {
                         mutability: Mutability::Let,
                         ..
                     }) => {
-                        self.error(CheckError::AssignToConstant(name.clone()));
+                        self.error(stmt.span, CheckError::AssignToConstant(name.clone()));
                     }
                     Ok(Binding::Function(_)) => {
-                        self.error(CheckError::AssignToFunction(name.clone()));
+                        self.error(stmt.span, CheckError::AssignToFunction(name.clone()));
                     }
                     Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
-                        self.error(CheckError::TypeAsValue(name.clone()));
+                        self.error(stmt.span, CheckError::TypeAsValue(name.clone()));
                     }
                     Ok(Binding::Trait(_)) => {
-                        self.error(CheckError::TraitAsValue(name.clone()));
+                        self.error(stmt.span, CheckError::TraitAsValue(name.clone()));
                     }
                     // `lookup` never finds top-level values from inside a
                     // function, which is the only place assignments can be.
@@ -3307,16 +3437,17 @@ impl<'a> Checker<'a> {
                 }
                 None
             }
-            Stmt::If {
+            StmtKind::If {
                 cond,
                 then_block,
                 else_block,
             } => {
+                let cond_span = cond.span;
                 let cond = self.evaluating(stmt, |checker| checker.expr(cond));
                 if let Some(found) = &cond.ty
                     && *found != self.std_type("Bool")
                 {
-                    self.error(CheckError::ConditionNotBool(found.clone()));
+                    self.error(cond_span, CheckError::ConditionNotBool(found.clone()));
                 }
 
                 let then_block = self.block(then_block);
@@ -3332,40 +3463,46 @@ impl<'a> Checker<'a> {
             }
             // Inside functions, functions and groups are only visible after
             // they're declared.
-            Stmt::Fn(function) => {
+            StmtKind::Fn(function) => {
                 // Declared before the body is checked, so it can call itself.
-                let index = self.declare_fn(&function.name, &function.params, &function.ret);
+                let index = self.declare_fn(
+                    &function.name,
+                    function.span,
+                    &function.params,
+                    &function.ret,
+                );
                 self.fn_body(
                     index,
                     &function.name,
+                    function.span,
                     &function.body,
                     FnKind::Function,
                     None,
                 );
                 None
             }
-            Stmt::Group { name, params, .. } | Stmt::Choice { name, params, .. }
+            StmtKind::Group { name, params, .. } | StmtKind::Choice { name, params, .. }
                 if !params.is_empty() =>
             {
-                self.error(CheckError::GenericInFunction(name.clone()));
+                self.error(stmt.span, CheckError::GenericInFunction(name.clone()));
                 None
             }
-            Stmt::Group { name, .. } | Stmt::Choice { name, .. } => {
-                let id = self.declare_type(name);
+            StmtKind::Group { name, .. } | StmtKind::Choice { name, .. } => {
+                let id = self.declare_type(name, stmt.span);
                 self.define_type(id, stmt);
-                self.check_not_recursive(id, name);
+                self.check_not_recursive(id, name, stmt.span);
                 None
             }
             // Like other names inside functions, an alias is only visible
             // after it's declared, so it's worked out straight away.
-            Stmt::Alias { name, ty } => {
+            StmtKind::Alias { name, ty } => {
                 let target = self.resolve_type(ty);
-                self.declare_alias(name, ty, LazyType::Checked(target));
+                self.declare_alias(name, stmt.span, ty, LazyType::Checked(target));
                 None
             }
-            Stmt::Match { value, arms } => self.match_(stmt, value, arms),
-            Stmt::Destructure { pattern, value } => self.destructure(stmt, pattern, value),
-            Stmt::Return(value) => {
+            StmtKind::Match { value, arms } => self.match_(stmt, value, arms),
+            StmtKind::Destructure { pattern, value } => self.destructure(stmt, pattern, value),
+            StmtKind::Return(value) => {
                 let FnContext { name, returns, .. } = self
                     .current_fn
                     .clone()
@@ -3378,14 +3515,20 @@ impl<'a> Checker<'a> {
                 let function = name.to_string();
                 match (returns, found.as_ref().map(|found| &found.ty)) {
                     (Some(expected), None) if expected != self.std_type("Void") => {
-                        self.error(CheckError::MissingReturnValue { function, expected });
+                        self.error(
+                            stmt.span,
+                            CheckError::MissingReturnValue { function, expected },
+                        );
                     }
                     (Some(expected), Some(Some(found))) if expected != *found => {
-                        self.error(CheckError::ReturnTypeMismatch {
-                            function,
-                            expected,
-                            found: found.clone(),
-                        });
+                        self.error(
+                            value.as_ref().map_or(stmt.span, |value| value.span),
+                            CheckError::ReturnTypeMismatch {
+                                function,
+                                expected,
+                                found: found.clone(),
+                            },
+                        );
                     }
                     _ => {}
                 }
@@ -3394,7 +3537,7 @@ impl<'a> Checker<'a> {
                     None => Some(ir::Stmt::Return(self.void())),
                 }
             }
-            Stmt::Expr(expr) => {
+            StmtKind::Expr(expr) => {
                 // A call's return value can be ignored.
                 let found = self.evaluating(stmt, |checker| checker.expr(expr));
                 found.expr.map(ir::Stmt::Expr)
@@ -3440,7 +3583,7 @@ impl<'a> Checker<'a> {
         if lowered.len() < arms.len() {
             return None;
         }
-        self.check_exhaustive(&ty, arms, spaces);
+        self.check_exhaustive(&ty, stmt.span, arms, spaces);
         Some(ir::Stmt::Match {
             value: expr?,
             ty: ty.id,
@@ -3466,10 +3609,13 @@ impl<'a> Checker<'a> {
             .unmatched(&[vec![space]], &[Space::Any], tys, 1)
             .first()
         {
-            self.error(CheckError::RefutablePattern {
-                pattern: pattern.to_string(),
-                missing: self.show_space(&values[0], &ty),
-            });
+            self.error(
+                pattern.span,
+                CheckError::RefutablePattern {
+                    pattern: pattern.to_string(),
+                    missing: self.show_space(&values[0], &ty),
+                },
+            );
             return None;
         }
         Some(ir::Stmt::Match {
@@ -3489,28 +3635,32 @@ impl<'a> Checker<'a> {
         let Some(ty) = ty else {
             // The values it binds are still declared, so their uses aren't
             // reported as undeclared.
-            for binding in bindings(pattern) {
-                self.declare_local(binding, Mutability::Let, None);
+            for (binding, span) in bindings(pattern) {
+                self.declare_local(binding, span, Mutability::Let, None);
             }
             return (None, Space::Any);
         };
         let mismatch = |checker: &mut Self| {
-            checker.error(CheckError::PatternMismatch {
-                pattern: pattern.to_string(),
-                ty: ty.clone(),
-            });
-            for binding in bindings(pattern) {
-                checker.declare_local(binding, Mutability::Let, None);
+            checker.error(
+                pattern.span,
+                CheckError::PatternMismatch {
+                    pattern: pattern.to_string(),
+                    ty: ty.clone(),
+                },
+            );
+            for (binding, span) in bindings(pattern) {
+                checker.declare_local(binding, span, Mutability::Let, None);
             }
             (None, Space::Any)
         };
-        match pattern {
-            Pattern::Any => (Some(ir::Pattern::Any), Space::Any),
-            Pattern::Binding(name) => {
-                let local = self.declare_local(name, Mutability::Let, Some(ty.clone()));
+        match &pattern.kind {
+            PatternKind::Any => (Some(ir::Pattern::Any), Space::Any),
+            PatternKind::Binding(name) => {
+                let local =
+                    self.declare_local(name, pattern.span, Mutability::Let, Some(ty.clone()));
                 (Some(ir::Pattern::Binding(local)), Space::Any)
             }
-            Pattern::Int { value, negative } => {
+            PatternKind::Int { value, negative } => {
                 let Some((bits, signed)) = self.int_type(ty) else {
                     return mismatch(self);
                 };
@@ -3521,12 +3671,15 @@ impl<'a> Checker<'a> {
                 };
                 let (min, max) = int_range(bits, signed);
                 if !(min..=max).contains(&value) {
-                    self.error(CheckError::IntOutOfRange {
-                        value,
-                        ty: ty.clone(),
-                        min,
-                        max,
-                    });
+                    self.error(
+                        pattern.span,
+                        CheckError::IntOutOfRange {
+                            value,
+                            ty: ty.clone(),
+                            min,
+                            max,
+                        },
+                    );
                     return (None, Space::Any);
                 }
                 // Stored as its bits, like an integer literal.
@@ -3536,12 +3689,12 @@ impl<'a> Checker<'a> {
                     Space::Ctor(Ctor::Int(value), vec![]),
                 )
             }
-            Pattern::Bool(value) if *ty == self.std_type("Bool") => (
+            PatternKind::Bool(value) if *ty == self.std_type("Bool") => (
                 Some(ir::Pattern::Bool(*value)),
                 Space::Ctor(Ctor::Bool(*value), vec![]),
             ),
-            Pattern::Bool(_) => mismatch(self),
-            Pattern::Tuple(elements) => {
+            PatternKind::Bool(_) => mismatch(self),
+            PatternKind::Tuple(elements) => {
                 // The labels must be the ones the tuple is built with.
                 let types = self.tuples.get(&ty.id).cloned().filter(|types| {
                     types.len() == elements.len()
@@ -3566,12 +3719,12 @@ impl<'a> Checker<'a> {
                     Space::Ctor(Ctor::Tuple, spaces),
                 )
             }
-            Pattern::Option {
+            PatternKind::Option {
                 ty: type_name,
                 option,
                 value,
             } => {
-                let found = self.option_pattern(ty, type_name, option);
+                let found = self.option_pattern(ty, type_name, option, pattern.span);
                 let value_ty = found.as_ref().and_then(|(_, value_ty)| value_ty.as_ref());
                 let (value, space) = match value {
                     Some(value) => self.pattern(value, value_ty),
@@ -3599,20 +3752,24 @@ impl<'a> Checker<'a> {
         ty: &Type,
         type_name: &TypeName,
         option: &str,
+        span: Span,
     ) -> Option<(usize, Option<Type>)> {
         // A generic type's arguments can be left out, since they're the
         // matched value's.
         let found = self.type_in_context(type_name, &[Some(ty)], true)?;
         if found != *ty {
-            self.error(CheckError::WrongPatternType {
-                expected: ty.clone(),
-                found,
-            });
+            self.error(
+                span,
+                CheckError::WrongPatternType {
+                    expected: ty.clone(),
+                    found,
+                },
+            );
             return None;
         }
         let Some(option) = self.option(&found, option) else {
             let option = option.to_string();
-            self.error(CheckError::UnknownOption { ty: found, option });
+            self.error(span, CheckError::UnknownOption { ty: found, option });
             return None;
         };
         Some(option)
@@ -3620,8 +3777,8 @@ impl<'a> Checker<'a> {
 
     /// Reports the patterns of `arms`, which match `spaces`, that can't be
     /// reached, since the ones before them match everything they do, and the
-    /// values of type `ty` that none of them match.
-    fn check_exhaustive(&mut self, ty: &Type, arms: &[MatchArm], spaces: Vec<Space>) {
+    /// values of type `ty` that none of them match, for the `match` at `span`.
+    fn check_exhaustive(&mut self, ty: &Type, span: Span, arms: &[MatchArm], spaces: Vec<Space>) {
         // A few missing values are shown, and one more shows there are more.
         const SHOWN: usize = 3;
 
@@ -3633,22 +3790,28 @@ impl<'a> Checker<'a> {
                 .unmatched(&rows, std::slice::from_ref(&space), tys, 1)
                 .is_empty()
             {
-                errors.push(CheckError::UnreachablePattern(arm.pattern.to_string()));
+                errors.push((
+                    arm.pattern.span,
+                    CheckError::UnreachablePattern(arm.pattern.to_string()),
+                ));
             }
             rows.push(vec![space]);
         }
         let missing = self.unmatched(&rows, &[Space::Any], tys, SHOWN + 1);
         if !missing.is_empty() {
             let shown = missing.iter().take(SHOWN);
-            errors.push(CheckError::MissingPatterns {
-                patterns: shown
-                    .map(|values| self.show_space(&values[0], ty))
-                    .collect(),
-                more: missing.len() > SHOWN,
-            });
+            errors.push((
+                span,
+                CheckError::MissingPatterns {
+                    patterns: shown
+                        .map(|values| self.show_space(&values[0], ty))
+                        .collect(),
+                    more: missing.len() > SHOWN,
+                },
+            ));
         }
-        for error in errors {
-            self.error(error);
+        for (span, error) in errors {
+            self.error(span, error);
         }
     }
 
@@ -3878,18 +4041,19 @@ impl<'a> Checker<'a> {
 
     /// Checks `expr` like `expr_as`, by what kind of expression it is.
     fn expr_kind_as(&mut self, expr: &Expr, expected: Option<&Type>) -> Typed {
-        match expr {
-            Expr::Int(value) => self.int_literal(i128::from(*value), expected),
+        let span = expr.span;
+        match &expr.kind {
+            ExprKind::Int(value) => self.int_literal(i128::from(*value), span, expected),
             // A negated literal is checked as one value, so the smallest
             // signed integers can be written.
-            Expr::Unary(UnOp::Neg, operand) if let Expr::Int(value) = &**operand => {
-                self.int_literal(-i128::from(*value), expected)
+            ExprKind::Unary(UnOp::Neg, operand) if let ExprKind::Int(value) = &operand.kind => {
+                self.int_literal(-i128::from(*value), span, expected)
             }
-            Expr::Bool(value) => Typed {
+            ExprKind::Bool(value) => Typed {
                 ty: Some(self.std_type("Bool")),
                 expr: Some(ir::Expr::Bool(*value)),
             },
-            Expr::Var(name) => match self.lookup(name) {
+            ExprKind::Var(name) => match self.lookup(name) {
                 Ok(Binding::Value { ty, local, .. }) => Typed {
                     ty,
                     expr: Some(ir::Expr::Local(local)),
@@ -3898,13 +4062,13 @@ impl<'a> Checker<'a> {
                     ty: self.global_type(index),
                     expr: Some(ir::Expr::Global(index)),
                 },
-                Ok(Binding::Function(index)) => self.function_value(index),
+                Ok(Binding::Function(index)) => self.function_value(index, span),
                 Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
-                    self.error(CheckError::TypeAsValue(name.to_string()));
+                    self.error(span, CheckError::TypeAsValue(name.to_string()));
                     Typed::UNKNOWN
                 }
                 Ok(Binding::Trait(_)) => {
-                    self.error(CheckError::TraitAsValue(name.to_string()));
+                    self.error(span, CheckError::TraitAsValue(name.to_string()));
                     Typed::UNKNOWN
                 }
                 Err(error) => {
@@ -3914,47 +4078,51 @@ impl<'a> Checker<'a> {
             },
             // Operators always produce their result type, even if an operand
             // is invalid, so one bad operand doesn't cause further errors.
-            Expr::Unary(op @ (UnOp::Neg | UnOp::BitNot), operand) => {
+            ExprKind::Unary(op @ (UnOp::Neg | UnOp::BitNot), operand) => {
                 self.integer_unary(op, operand, expected)
             }
-            Expr::Unary(UnOp::Not, operand) => self.not(operand),
-            Expr::Binary(lhs, op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), rhs) => {
+            ExprKind::Unary(UnOp::Not, operand) => self.not(operand),
+            ExprKind::Binary(lhs, op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), rhs) => {
                 self.comparison(lhs, op, rhs)
             }
-            Expr::Binary(lhs, op @ (BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne), rhs) => {
+            ExprKind::Binary(lhs, op @ (BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne), rhs) => {
                 self.trait_operator(lhs, op, rhs)
             }
-            Expr::Binary(lhs, op @ (BinOp::ShiftLeft | BinOp::ShiftRight), rhs) => {
+            ExprKind::Binary(lhs, op @ (BinOp::ShiftLeft | BinOp::ShiftRight), rhs) => {
                 self.shift(lhs, op, rhs, expected)
             }
-            Expr::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
-            Expr::Call { callee, args } => self.call(callee, args),
-            Expr::Construct { ty, fields } => self.construct(ty, fields, expected),
-            Expr::Paren(value) => match expected.and_then(|ty| self.tuples.get(&ty.id)) {
+            ExprKind::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
+            ExprKind::Call { callee, args } => self.call(callee, args, span),
+            ExprKind::Construct { ty, fields } => self.construct(ty, span, fields, expected),
+            ExprKind::Paren(value) => match expected.and_then(|ty| self.tuples.get(&ty.id)) {
                 // A tuple with one unlabelled element is built from a value in
                 // brackets, as in `(1)`.
                 Some(elements) if matches!(&elements[..], [element] if element.label.is_none()) => {
                     let arg = Arg {
                         label: None,
                         value: (**value).clone(),
+                        span,
                     };
                     self.tuple(&[arg], expected)
                 }
                 _ => self.expr_as(value, expected),
             },
-            Expr::Tuple(values) => self.tuple(values, expected),
-            Expr::MethodCall {
+            ExprKind::Tuple(values) => self.tuple(values, expected),
+            ExprKind::MethodCall {
                 receiver,
                 method,
                 args,
-            } => self.method_call(receiver, method, args, expected),
-            Expr::Field { receiver, field } => self.field(receiver, field, expected),
-            Expr::GenericType { name, .. } => {
-                self.error(CheckError::TypeAsValue(name.to_string()));
+            } => self.method_call(receiver, method, args, span, expected),
+            ExprKind::Field { receiver, field } => self.field(receiver, field, span, expected),
+            ExprKind::GenericType { name, .. } => {
+                self.error(span, CheckError::TypeAsValue(name.to_string()));
                 Typed::UNKNOWN
             }
-            Expr::SelfValue => {
-                let name = Name::new("self");
+            ExprKind::SelfValue => {
+                let name = Name {
+                    span,
+                    ..Name::new("self")
+                };
                 match self.lookup(&name) {
                     Ok(Binding::Value { ty, local, .. }) => Typed {
                         ty,
@@ -3963,11 +4131,14 @@ impl<'a> Checker<'a> {
                     Ok(_) => unreachable!("only methods declare `self`, as a value"),
                     Err(LookupError::Undeclared) => {
                         let in_static = self.current_fn.as_ref().is_some_and(|f| f.is_static);
-                        self.error(if in_static {
-                            CheckError::SelfInStatic
-                        } else {
-                            CheckError::SelfOutsideImpl
-                        });
+                        self.error(
+                            span,
+                            if in_static {
+                                CheckError::SelfInStatic
+                            } else {
+                                CheckError::SelfOutsideImpl
+                            },
+                        );
                         Typed::UNKNOWN
                     }
                     Err(error) => {
@@ -3998,17 +4169,20 @@ impl<'a> Checker<'a> {
 
     /// Checks an integer literal of `value`, which may be negated, used as
     /// `expected`. It must fit in its type.
-    fn int_literal(&mut self, value: i128, expected: Option<&Type>) -> Typed {
+    fn int_literal(&mut self, value: i128, span: Span, expected: Option<&Type>) -> Typed {
         let ty = self.int_type_for(expected);
         let (bits, signed) = self.int_type(&ty).expect("literals have integer types");
         let (min, max) = int_range(bits, signed);
         if !(min..=max).contains(&value) {
-            self.error(CheckError::IntOutOfRange {
-                value,
-                ty: ty.clone(),
-                min,
-                max,
-            });
+            self.error(
+                span,
+                CheckError::IntOutOfRange {
+                    value,
+                    ty: ty.clone(),
+                    min,
+                    max,
+                },
+            );
             return Typed {
                 ty: Some(ty),
                 expr: None,
@@ -4046,6 +4220,7 @@ impl<'a> Checker<'a> {
     /// which flips the bits of any integer. Both produce another integer of
     /// the same type.
     fn integer_unary(&mut self, op: &UnOp, operand: &Expr, expected: Option<&Type>) -> Typed {
+        let span = operand.span;
         let Typed { ty, expr } = self.expr_as(operand, expected);
         let needs_signed = *op == UnOp::Neg;
         match ty {
@@ -4062,11 +4237,14 @@ impl<'a> Checker<'a> {
             found => {
                 if let Some(found) = found {
                     let op = op.symbol();
-                    self.error(if needs_signed {
-                        CheckError::NotSignedInteger { op, found }
-                    } else {
-                        CheckError::NotInteger { op, found }
-                    });
+                    self.error(
+                        span,
+                        if needs_signed {
+                            CheckError::NotSignedInteger { op, found }
+                        } else {
+                            CheckError::NotInteger { op, found }
+                        },
+                    );
                 }
                 Typed {
                     ty: Some(self.int_type_for(expected)),
@@ -4080,6 +4258,7 @@ impl<'a> Checker<'a> {
     /// `.^`, whose operands are integers of the same type, which it produces. The first operand
     /// that's an integer decides the type.
     fn arithmetic(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
+        let spans = [lhs.span, rhs.span];
         let (lhs, rhs) = self.operands(lhs, rhs, expected);
         let ty = [&lhs.ty, &rhs.ty]
             .into_iter()
@@ -4088,19 +4267,28 @@ impl<'a> Checker<'a> {
             .cloned()
             .unwrap_or_else(|| self.int_type_for(expected));
         let op_symbol = op.symbol();
-        for found in [&lhs.ty, &rhs.ty].into_iter().flatten() {
+        for (found, span) in [&lhs.ty, &rhs.ty].into_iter().zip(spans) {
+            let Some(found) = found else {
+                continue;
+            };
             if self.int_type(found).is_none() {
                 let found = found.clone();
-                self.error(CheckError::NotInteger {
-                    op: op_symbol,
-                    found,
-                });
+                self.error(
+                    span,
+                    CheckError::NotInteger {
+                        op: op_symbol,
+                        found,
+                    },
+                );
             } else if *found != ty {
-                self.error(CheckError::InvalidOperand {
-                    op: op_symbol,
-                    expected: ty.clone(),
-                    found: found.clone(),
-                });
+                self.error(
+                    span,
+                    CheckError::InvalidOperand {
+                        op: op_symbol,
+                        expected: ty.clone(),
+                        found: found.clone(),
+                    },
+                );
             }
         }
 
@@ -4118,10 +4306,11 @@ impl<'a> Checker<'a> {
     /// library's `Not` trait, which the operand's type must implement. The
     /// result is its implementation's `Output`.
     fn not(&mut self, operand: &Expr) -> Typed {
+        let span = operand.span;
         let Typed { ty, expr } = self.expr(operand);
         let function = ty
             .as_ref()
-            .and_then(|ty| self.operator_method("!", "Not", "not", ty));
+            .and_then(|ty| self.operator_method("!", "Not", "not", ty, span));
         let expr = function
             .zip(expr)
             .map(|(function, operand)| ir::Expr::Call {
@@ -4136,32 +4325,34 @@ impl<'a> Checker<'a> {
     }
 
     /// Finds `method` of `ty`, which the operator `op` calls, as an index
-    /// into `functions`, as `trait_method` does.
+    /// into `functions`, as `trait_method` does, for the code at `span`.
     fn operator_method(
         &mut self,
         op: &'static str,
         trait_name: &'static str,
         method: &str,
         ty: &Type,
+        span: Span,
     ) -> Option<usize> {
         let not_implemented = CheckError::NotImplemented {
             op,
             trait_name,
             found: ty.clone(),
         };
-        self.trait_method(trait_name, method, ty, not_implemented)
+        self.trait_method(trait_name, method, ty, span, not_implemented)
     }
 
     /// Finds `method` of `ty`, as an index into `functions`, which the
     /// compiler calls for some syntax, such as an operator. `ty` must
     /// implement the standard library's trait called `trait_name`, or
-    /// `not_implemented` is reported. Like calling the method directly, the
-    /// module implementing it must be imported.
+    /// `not_implemented` is reported at `span`. Like calling the method
+    /// directly, the module implementing it must be imported.
     fn trait_method(
         &mut self,
         trait_name: &str,
         method: &str,
         ty: &Type,
+        span: Span,
         not_implemented: CheckError,
     ) -> Option<usize> {
         let trait_index = match self.modules[self.core].scope.get(trait_name) {
@@ -4173,11 +4364,11 @@ impl<'a> Checker<'a> {
                 found
             }
             _ => {
-                self.error(not_implemented);
+                self.error(span, not_implemented);
                 return None;
             }
         };
-        self.check_imported(ty, method, &found)
+        self.check_imported(ty, method, &found, span)
             .then_some(found.function)
     }
 
@@ -4195,6 +4386,7 @@ impl<'a> Checker<'a> {
             _ => unreachable!("only `&`, `|`, `==` and `!=` call trait functions"),
         };
         let op = op.symbol();
+        let (lhs_span, rhs_span) = (lhs.span, rhs.span);
         // An operand made only of integer literals has no type of its own, so
         // in `0 == byte`, the `0` takes its type from `byte`.
         let (lhs, rhs_first) = if !has_own_type(lhs) && has_own_type(rhs) {
@@ -4206,7 +4398,7 @@ impl<'a> Checker<'a> {
         let signature = lhs
             .ty
             .as_ref()
-            .and_then(|ty| self.operator_method(op, trait_name, method, ty))
+            .and_then(|ty| self.operator_method(op, trait_name, method, ty, lhs_span))
             .map(|function| (function, self.functions[function].clone()));
 
         // The right operand is the method's argument, so it's used as its
@@ -4225,11 +4417,14 @@ impl<'a> Checker<'a> {
             // Named as the left operand is when it's the same type, such as
             // `Int` rather than the `IntS64` its `impl` is for.
             let expected = lhs.ty.clone().filter(|ty| *ty == param).unwrap_or(param);
-            self.error(CheckError::InvalidOperand {
-                op,
-                expected,
-                found,
-            });
+            self.error(
+                rhs_span,
+                CheckError::InvalidOperand {
+                    op,
+                    expected,
+                    found,
+                },
+            );
             function = None;
         }
 
@@ -4308,15 +4503,19 @@ impl<'a> Checker<'a> {
     /// shift by can be any integer type.
     fn shift(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
         let op_symbol = op.symbol();
+        let (lhs_span, rhs_span) = (lhs.span, rhs.span);
         let lhs = self.expr_as(lhs, expected);
         let rhs = self.expr(rhs);
         let ty = match lhs.ty {
             Some(ty) if self.int_type(&ty).is_some_and(|(_, signed)| !signed) => Some(ty),
             Some(found) => {
-                self.error(CheckError::NotUnsignedInteger {
-                    op: op_symbol,
-                    found,
-                });
+                self.error(
+                    lhs_span,
+                    CheckError::NotUnsignedInteger {
+                        op: op_symbol,
+                        found,
+                    },
+                );
                 None
             }
             None => None,
@@ -4324,10 +4523,13 @@ impl<'a> Checker<'a> {
         let rhs_expr = match rhs.ty {
             Some(ty) if self.int_type(&ty).is_some() => rhs.expr,
             Some(found) => {
-                self.error(CheckError::NotInteger {
-                    op: op_symbol,
-                    found,
-                });
+                self.error(
+                    rhs_span,
+                    CheckError::NotInteger {
+                        op: op_symbol,
+                        found,
+                    },
+                );
                 None
             }
             None => None,
@@ -4352,28 +4554,39 @@ impl<'a> Checker<'a> {
     /// type, producing a `Bool`. The first operand whose type is known
     /// decides what's compared.
     fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
+        let spans = [lhs.span, rhs.span];
         let (lhs, rhs) = self.operands(lhs, rhs, None);
         let bool_ty = self.std_type("Bool");
         let op_symbol = op.symbol();
         let compared = match lhs.ty.clone().or(rhs.ty.clone()) {
             Some(ty) if self.int_type(&ty).is_some() => Some(ty),
             Some(found) => {
-                self.error(CheckError::NotInteger {
-                    op: op_symbol,
-                    found,
-                });
+                // The first operand whose type is known decided what's compared.
+                let span = if lhs.ty.is_some() { spans[0] } else { spans[1] };
+                self.error(
+                    span,
+                    CheckError::NotInteger {
+                        op: op_symbol,
+                        found,
+                    },
+                );
                 None
             }
             None => None,
         };
         if let Some(compared) = &compared {
-            for found in [&lhs.ty, &rhs.ty].into_iter().flatten() {
-                if found != compared {
-                    self.error(CheckError::InvalidOperand {
-                        op: op_symbol,
-                        expected: compared.clone(),
-                        found: found.clone(),
-                    });
+            for (found, span) in [&lhs.ty, &rhs.ty].into_iter().zip(spans) {
+                if let Some(found) = found
+                    && found != compared
+                {
+                    self.error(
+                        span,
+                        CheckError::InvalidOperand {
+                            op: op_symbol,
+                            expected: compared.clone(),
+                            found: found.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -4409,11 +4622,11 @@ impl<'a> Checker<'a> {
         member: &str,
         expected: Option<&Type>,
     ) -> Option<Receiver> {
-        if let Expr::GenericType { name, args } = receiver {
+        if let ExprKind::GenericType { name, args } = &receiver.kind {
             let ty = self.generic_type(name, args, true)?;
             return Some(Receiver::Type(ty));
         }
-        if let Expr::Var(name) = receiver {
+        if let ExprKind::Var(name) = &receiver.kind {
             match self.lookup(name) {
                 Ok(Binding::Type(ty)) => return Some(Receiver::Type(ty)),
                 Ok(Binding::Generic(_)) => {
@@ -4427,10 +4640,13 @@ impl<'a> Checker<'a> {
                             .visible_modules()
                             .any(|module| self.modules[module].name == name.name) =>
                 {
-                    self.error(CheckError::ModuleNotValue {
-                        module: name.name.clone(),
-                        member: member.to_string(),
-                    });
+                    self.error(
+                        receiver.span,
+                        CheckError::ModuleNotValue {
+                            module: name.name.clone(),
+                            member: member.to_string(),
+                        },
+                    );
                     return None;
                 }
                 _ => {}
@@ -4522,7 +4738,13 @@ impl<'a> Checker<'a> {
 
     /// Checks a field access, returning the field's type, or `None` if it
     /// can't be determined, along with what it compiles to.
-    fn field(&mut self, receiver: &Expr, field: &str, expected: Option<&Type>) -> Typed {
+    fn field(
+        &mut self,
+        receiver: &Expr,
+        field: &str,
+        span: Span,
+        expected: Option<&Type>,
+    ) -> Typed {
         let Some(receiver) = self.receiver(receiver, field, expected) else {
             return Typed::UNKNOWN;
         };
@@ -4573,22 +4795,29 @@ impl<'a> Checker<'a> {
             }
             Receiver::Type(ty) => match self.static_function(&ty, field) {
                 Some(found) => {
-                    self.check_imported(&ty, field, &found);
-                    return self.function_value(found.function);
+                    self.check_imported(&ty, field, &found, span);
+                    return self.function_value(found.function, span);
                 }
                 None => self.no_static_function(ty, field),
             },
         };
-        self.error(error);
+        self.error(span, error);
         Typed::UNKNOWN
     }
 
-    /// Checks calling `callee`, of type `ty`, called `name`, with `args`, which
-    /// calls its `call` from the standard library's `Call` trait, as in
+    /// Checks calling `callee`, of type `ty`, called `name`, with `args`, at
+    /// `span`, which calls its `call` from the standard library's `Call` trait, as in
     /// `adder(a: 3)` for `adder.call(input: (a: 3))`. If `Input` is a tuple,
     /// the arguments are its elements, so a tuple is never unpacked into them.
     /// Otherwise, the only argument is the `Input`, as in `negate(3)`.
-    fn call_value(&mut self, ty: Option<Type>, callee: Callee, name: &str, args: &[Arg]) -> Typed {
+    fn call_value(
+        &mut self,
+        ty: Option<Type>,
+        callee: Callee,
+        name: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> Typed {
         // Like a function's arguments, the input is checked first, so its
         // errors come before the call's, and it's used as `Input`, which is
         // found without reporting errors.
@@ -4608,8 +4837,15 @@ impl<'a> Checker<'a> {
             .as_ref()
             .is_some_and(|param| self.tuples.contains_key(&param.id));
         let input = match args {
-            [Arg { label: None, value }] if !input_is_tuple => value.clone(),
-            _ => Expr::Tuple(args.to_vec()),
+            [
+                Arg {
+                    label: None, value, ..
+                },
+            ] if !input_is_tuple => value.clone(),
+            _ => Expr {
+                kind: ExprKind::Tuple(args.to_vec()),
+                span,
+            },
         };
         let Typed {
             ty: found,
@@ -4621,18 +4857,21 @@ impl<'a> Checker<'a> {
                 name: name.to_string(),
                 ty: ty.clone(),
             };
-            self.trait_method("Call", "call", ty, not_callable)
+            self.trait_method("Call", "call", ty, span, not_callable)
         });
         let returns = function.and_then(|function| self.functions[function].returns.clone());
         if found != param {
             if let Callee::Function(index) = callee {
-                self.check_function_args(index, name, args);
+                self.check_function_args(index, name, args, span);
             } else if let (Some(expected), Some(found)) = (param, found) {
-                self.error(CheckError::WrongCallInput {
-                    name: name.to_string(),
-                    expected,
-                    found,
-                });
+                self.error(
+                    span,
+                    CheckError::WrongCallInput {
+                        name: name.to_string(),
+                        expected,
+                        found,
+                    },
+                );
             }
             return Typed {
                 ty: returns,
@@ -4654,13 +4893,13 @@ impl<'a> Checker<'a> {
     /// is checked again as its parameter, as it may not have had a type to use
     /// as part of the input, so errors in the arguments themselves, which have
     /// already been reported, are dropped.
-    fn check_function_args(&mut self, index: usize, name: &str, args: &[Arg]) {
+    fn check_function_args(&mut self, index: usize, name: &str, args: &[Arg], span: Span) {
         let errors = self.errors.len();
         let params = self.param_types(index);
         let (found, _) = self.args(args, &params);
         self.errors.truncate(errors);
         let signature = self.functions[index].clone();
-        self.check_args(name.to_string(), args, found, signature);
+        self.check_args(name.to_string(), args, found, signature, span);
     }
 
     /// What calling the function at `index` with `input`, its `Input`,
@@ -4681,14 +4920,17 @@ impl<'a> Checker<'a> {
     /// Reports an error unless `found`, the method or static function of `ty`
     /// called `member`, can be used here. Like functions, they can only be used
     /// from their own module or one that imports it. Returns whether it can.
-    fn check_imported(&mut self, ty: &Type, member: &str, found: &Method) -> bool {
+    fn check_imported(&mut self, ty: &Type, member: &str, found: &Method, span: Span) -> bool {
         let imported = self.visible_modules().any(|module| module == found.module);
         if !imported {
-            self.error(CheckError::MemberNotImported {
-                ty: ty.clone(),
-                member: member.to_string(),
-                module: self.modules[found.module].display.clone(),
-            });
+            self.error(
+                span,
+                CheckError::MemberNotImported {
+                    ty: ty.clone(),
+                    member: member.to_string(),
+                    module: self.modules[found.module].display.clone(),
+                },
+            );
         }
         imported
     }
@@ -4701,6 +4943,7 @@ impl<'a> Checker<'a> {
         receiver: &Expr,
         method: &str,
         args: &[Arg],
+        span: Span,
         expected: Option<&Type>,
     ) -> Typed {
         // The receiver and arguments are checked first, so their errors come
@@ -4716,17 +4959,17 @@ impl<'a> Checker<'a> {
                         receiver: Box::new(receiver),
                         index,
                     });
-                    return self.call_value(field_ty, Callee::Value(value), method, args);
+                    return self.call_value(field_ty, Callee::Value(value), method, args, span);
                 }
                 _ => Some(Receiver::Value(ty, lowered)),
             },
             // So is a static function, like any other function.
             Some(Receiver::Type(ty)) if let Some(found) = self.static_function(&ty, method) => {
-                self.check_imported(&ty, method, &found);
-                let fn_type = self.function_type(found.function);
+                self.check_imported(&ty, method, &found, span);
+                let fn_type = self.function_type(found.function, span);
                 let name = format!("{ty}.{method}");
                 let callee = Callee::Function(found.function);
-                return self.call_value(fn_type, callee, &name, args);
+                return self.call_value(fn_type, callee, &name, args, span);
             }
             receiver => receiver,
         };
@@ -4749,7 +4992,7 @@ impl<'a> Checker<'a> {
         if let Receiver::Type(ty) = &receiver
             && let Some(option) = self.option(ty, method)
         {
-            return self.choose(ty, method, option, args, found, lowered_args);
+            return self.choose(ty, method, option, args, found, lowered_args, span);
         }
         let (ty, found_method, lowered_receiver) = match receiver {
             Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
@@ -4757,22 +5000,22 @@ impl<'a> Checker<'a> {
                 Some(Member::Field(..)) => unreachable!("fields were handled above"),
                 None => {
                     let error = self.no_member(ty, method);
-                    self.error(error);
+                    self.error(span, error);
                     return Typed::UNKNOWN;
                 }
             },
             Receiver::Type(ty) => {
                 let error = self.no_static_function(ty, method);
-                self.error(error);
+                self.error(span, error);
                 return Typed::UNKNOWN;
             }
         };
-        if !self.check_imported(&ty, method, &found_method) {
+        if !self.check_imported(&ty, method, &found_method, span) {
             return Typed::UNKNOWN;
         }
 
         let signature = self.functions[found_method.function].clone();
-        let returns = self.check_args(format!("{ty}.{method}"), args, found, signature);
+        let returns = self.check_args(format!("{ty}.{method}"), args, found, signature, span);
 
         // A method's receiver is its first argument.
         let lowered_args = lowered_receiver
@@ -4792,6 +5035,7 @@ impl<'a> Checker<'a> {
     /// Creating an option is like calling a function with one unlabelled
     /// parameter. The argument has the type `found`, and compiles to
     /// `lowered`.
+    #[allow(clippy::too_many_arguments)]
     fn choose(
         &mut self,
         ty: &Type,
@@ -4800,17 +5044,19 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         found: Vec<Option<Type>>,
         lowered: Option<Vec<ir::Expr>>,
+        span: Span,
     ) -> Typed {
         let signature = Signature {
             name: format!("{ty}.{name}"),
             params: vec![ParamSignature {
                 label: None,
                 name: "value",
+                span,
                 ty: value_ty,
             }],
             returns: Some(ty.clone()),
         };
-        let returns = self.check_args(signature.name.clone(), args, found, signature);
+        let returns = self.check_args(signature.name.clone(), args, found, signature, span);
         Typed {
             ty: returns,
             expr: lowered
@@ -4831,6 +5077,7 @@ impl<'a> Checker<'a> {
     fn construct(
         &mut self,
         type_name: &TypeName,
+        span: Span,
         values: &[FieldValue],
         expected: Option<&Type>,
     ) -> Typed {
@@ -4860,11 +5107,11 @@ impl<'a> Checker<'a> {
             expr: None,
         };
         if self.choice_options.contains_key(&ty.id) {
-            self.error(CheckError::ConstructedChoice(ty.clone()));
+            self.error(span, CheckError::ConstructedChoice(ty.clone()));
             return with_error(ty);
         }
         if self.primitives.contains_key(&ty.id) {
-            self.error(CheckError::ConstructedPrimitive(ty.clone()));
+            self.error(span, CheckError::ConstructedPrimitive(ty.clone()));
             return with_error(ty);
         }
         // Only the type's own module can construct it, and only in the type's
@@ -4872,17 +5119,20 @@ impl<'a> Checker<'a> {
         // `Void.new()`. An unknown `impl` type isn't reported again.
         let declared_in = self.group_modules[ty.id];
         if declared_in != self.module {
-            self.error(CheckError::ConstructedOutsideModule {
-                ty: ty.clone(),
-                module: self.modules[declared_in].display.clone(),
-            });
+            self.error(
+                span,
+                CheckError::ConstructedOutsideModule {
+                    ty: ty.clone(),
+                    module: self.modules[declared_in].display.clone(),
+                },
+            );
             return with_error(ty);
         }
         match &self.impl_type {
             Some(Some(impl_type)) if *impl_type == ty => {}
             Some(None) => {}
             _ => {
-                self.error(CheckError::ConstructedOutsideImpl(ty.clone()));
+                self.error(span, CheckError::ConstructedOutsideImpl(ty.clone()));
                 return with_error(ty);
             }
         }
@@ -4891,30 +5141,39 @@ impl<'a> Checker<'a> {
 
         // Every field must be given, in the order the group declares them.
         if values.len() != fields.len() {
-            self.error(CheckError::WrongFieldCount {
-                ty: name,
-                expected: fields.len(),
-                found: values.len(),
-            });
+            self.error(
+                span,
+                CheckError::WrongFieldCount {
+                    ty: name,
+                    expected: fields.len(),
+                    found: values.len(),
+                },
+            );
             return with_error(ty);
         }
 
         for ((value, found), field) in values.iter().zip(found).zip(&fields) {
             if value.name != field.name {
-                self.error(CheckError::WrongField {
-                    ty: name.clone(),
-                    expected: field.name.to_string(),
-                    found: value.name.clone(),
-                });
+                self.error(
+                    value.span,
+                    CheckError::WrongField {
+                        ty: name.clone(),
+                        expected: field.name.to_string(),
+                        found: value.name.clone(),
+                    },
+                );
             } else if let (Some(expected), Some(found)) = (&field.ty, found)
                 && *expected != found
             {
-                self.error(CheckError::FieldTypeMismatch {
-                    ty: name.clone(),
-                    field: field.name.to_string(),
-                    expected: expected.clone(),
-                    found,
-                });
+                self.error(
+                    value.value.span,
+                    CheckError::FieldTypeMismatch {
+                        ty: name.clone(),
+                        field: field.name.to_string(),
+                        expected: expected.clone(),
+                        found,
+                    },
+                );
             }
         }
 
@@ -4930,22 +5189,25 @@ impl<'a> Checker<'a> {
     /// Checks a call, returning what's called's return type, or `None` if it
     /// can't be determined, along with what it compiles to. Functions and other
     /// values are called alike, through the standard library's `Call` trait.
-    fn call(&mut self, callee: &Name, args: &[Arg]) -> Typed {
+    fn call(&mut self, callee: &Name, args: &[Arg], span: Span) -> Typed {
         let name = callee.to_string();
         match self.lookup(callee) {
             Ok(Binding::Function(index)) => {
-                let ty = self.function_type(index);
-                self.call_value(ty, Callee::Function(index), &name, args)
+                let ty = self.function_type(index, span);
+                self.call_value(ty, Callee::Function(index), &name, args, span)
             }
             Ok(Binding::Value { .. } | Binding::Global(_)) => {
-                let Typed { ty, expr } = self.expr(&Expr::Var(callee.clone()));
-                self.call_value(ty, Callee::Value(expr), &name, args)
+                let Typed { ty, expr } = self.expr(&Expr {
+                    kind: ExprKind::Var(callee.clone()),
+                    span: callee.span,
+                });
+                self.call_value(ty, Callee::Value(expr), &name, args, span)
             }
             // Arguments are checked first, so their errors come before the
             // call's.
             Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Trait(_) | Binding::Generic(_)) => {
                 self.args(args, &[]);
-                self.error(CheckError::NotAFunction(name));
+                self.error(callee.span, CheckError::NotAFunction(name));
                 Typed::UNKNOWN
             }
             Err(error) => {
@@ -4960,8 +5222,9 @@ impl<'a> Checker<'a> {
     /// or `None` if it's unknown. Its `Input` is the type of its only parameter
     /// if that has no label and isn't a tuple, and otherwise a tuple of its
     /// parameters, which have only their labels, since their names are private
-    /// to the function. So a tuple `Input` always holds the arguments.
-    fn function_type(&mut self, index: usize) -> Option<Type> {
+    /// to the function. So a tuple `Input` always holds the arguments. It's used
+    /// by the code at `span`.
+    fn function_type(&mut self, index: usize, span: Span) -> Option<Type> {
         let Signature {
             params, returns, ..
         } = self.functions[index].clone();
@@ -4989,14 +5252,14 @@ impl<'a> Checker<'a> {
             Some(Binding::Generic(template)) => *template,
             _ => panic!("the standard library should declare `Fn`"),
         };
-        self.instance(template, vec![input, returns?], true)
+        self.instance(template, vec![input, returns?], span, true)
     }
 
     /// The function at `index` in `functions` as a value, which compiles to a
     /// pointer to a function taking its `Input` as a single parameter, so that
     /// every `Fn` can be called in the same way.
-    fn function_value(&mut self, index: usize) -> Typed {
-        let Some(ty) = self.function_type(index) else {
+    fn function_value(&mut self, index: usize, span: Span) -> Typed {
+        let Some(ty) = self.function_type(index, span) else {
             return Typed::UNKNOWN;
         };
         let value = match self.function_values.get(&index) {
@@ -5080,49 +5343,68 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         found: Vec<Option<Type>>,
         signature: Signature,
+        span: Span,
     ) -> Option<Type> {
         if args.len() != signature.params.len() {
-            self.error(CheckError::WrongArgumentCount {
-                function,
-                expected: signature.params.len(),
-                found: args.len(),
-            });
+            self.error(
+                span,
+                CheckError::WrongArgumentCount {
+                    function,
+                    expected: signature.params.len(),
+                    found: args.len(),
+                },
+            );
             return signature.returns;
         }
 
         for ((arg, found), param) in args.iter().zip(found).zip(&signature.params) {
             if arg.label.as_deref() != param.label {
-                self.error(CheckError::WrongLabel {
-                    function: function.clone(),
-                    expected: param.label.map(str::to_string),
-                    found: arg.label.clone(),
-                });
+                self.error(
+                    arg.span,
+                    CheckError::WrongLabel {
+                        function: function.clone(),
+                        expected: param.label.map(str::to_string),
+                        found: arg.label.clone(),
+                    },
+                );
             } else if let (Some(expected), Some(found)) = (&param.ty, found)
                 && *expected != found
             {
-                self.error(CheckError::ArgumentTypeMismatch {
-                    function: function.clone(),
-                    param: param.label.unwrap_or(param.name).to_string(),
-                    expected: expected.clone(),
-                    found,
-                });
+                self.error(
+                    arg.value.span,
+                    CheckError::ArgumentTypeMismatch {
+                        function: function.clone(),
+                        param: param.label.unwrap_or(param.name).to_string(),
+                        expected: expected.clone(),
+                        found,
+                    },
+                );
             }
         }
 
         signature.returns
     }
 
-    /// Reports an error if a value of type `found` can't be given to `name`,
-    /// whose type is `expected`. Unknown types are assumed to be fine.
-    fn check_assignable(&mut self, name: &str, expected: Option<Type>, found: Option<Type>) {
+    /// Reports an error if a value of type `found`, at `span`, can't be given to
+    /// `name`, whose type is `expected`. Unknown types are assumed to be fine.
+    fn check_assignable(
+        &mut self,
+        name: &str,
+        span: Span,
+        expected: Option<Type>,
+        found: Option<Type>,
+    ) {
         if let (Some(expected), Some(found)) = (expected, found)
             && expected != found
         {
-            self.error(CheckError::AssignTypeMismatch {
-                name: name.to_string(),
-                expected,
-                found,
-            });
+            self.error(
+                span,
+                CheckError::AssignTypeMismatch {
+                    name: name.to_string(),
+                    expected,
+                    found,
+                },
+            );
         }
     }
 
@@ -5211,13 +5493,13 @@ impl<'a> Checker<'a> {
 fn trait_names<'b>(
     ty: &'b TypeName,
     aliases: &'b [String],
-) -> Box<dyn Iterator<Item = &'b str> + 'b> {
+) -> Box<dyn Iterator<Item = &'b Name> + 'b> {
     match ty {
         TypeName::Named(name) if name.module.is_none() => {
             let is_trait_name = name.name == "Self" || aliases.contains(&name.name);
-            Box::new(is_trait_name.then_some(name.name.as_str()).into_iter())
+            Box::new(is_trait_name.then_some(name).into_iter())
         }
-        TypeName::Named(_) | TypeName::SelfParam(_) => Box::new(iter::empty()),
+        TypeName::Named(_) | TypeName::SelfParam(..) => Box::new(iter::empty()),
         TypeName::Tuple(elements) => Box::new(
             elements
                 .iter()
@@ -5266,12 +5548,12 @@ fn int_range(bits: u32, signed: bool) -> (i128, i128) {
 /// Whether `expr` has a type of its own, rather than being made only of
 /// integer literals, which take their type from where they're used.
 fn has_own_type(expr: &Expr) -> bool {
-    match expr {
-        Expr::Int(_) => false,
-        Expr::Unary(UnOp::Neg | UnOp::BitNot, operand) | Expr::Paren(operand) => {
+    match &expr.kind {
+        ExprKind::Int(_) => false,
+        ExprKind::Unary(UnOp::Neg | UnOp::BitNot, operand) | ExprKind::Paren(operand) => {
             has_own_type(operand)
         }
-        Expr::Binary(
+        ExprKind::Binary(
             lhs,
             BinOp::Add
             | BinOp::Sub
@@ -5283,7 +5565,7 @@ fn has_own_type(expr: &Expr) -> bool {
             rhs,
         ) => has_own_type(lhs) || has_own_type(rhs),
         // A shift has the type of what's shifted, whatever it's shifted by.
-        Expr::Binary(lhs, BinOp::ShiftLeft | BinOp::ShiftRight, _) => has_own_type(lhs),
+        ExprKind::Binary(lhs, BinOp::ShiftLeft | BinOp::ShiftRight, _) => has_own_type(lhs),
         _ => true,
     }
 }
@@ -5316,7 +5598,45 @@ mod tests {
     /// Checks each `(path, src)` pair as a module, with paths like
     /// `/dir/other`.
     fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<ModuleError>> {
-        check(&modules(files)).map(|_| ())
+        let result = check(&modules(files)).map(|_| ());
+        // Every error must point at something in the file it's reported in.
+        for err in result.as_ref().err().into_iter().flatten() {
+            let found = pointed_at(files, err);
+            assert!(!found.is_empty(), "`{err}` points at nothing: {err:?}");
+        }
+        result
+    }
+
+    /// The source that `err`, from checking `files`, points at.
+    fn pointed_at<'a>(files: &[(&'a str, &'a str)], err: &ModuleError) -> &'a str {
+        let src = files
+            .iter()
+            .find(|(path, _)| *path == err.module)
+            .map(|(_, src)| *src)
+            .or_else(|| stdlib_source(&err.module))
+            .unwrap_or_else(|| panic!("`{}` should be a module", err.module));
+        src.get(err.span.start..err.span.end)
+            .unwrap_or_else(|| panic!("`{err}` points outside its module: {err:?}"))
+    }
+
+    /// The source that each error from checking `src` as `/main` points at.
+    fn pointed_at_top(src: &str) -> Vec<&str> {
+        let files = [("/main", src)];
+        check_files(&files)
+            .expect_err("`src` should have errors")
+            .iter()
+            .map(|err| pointed_at(&files, err))
+            .collect()
+    }
+
+    /// The source that each error from checking `src` as the body of a function
+    /// points at.
+    fn pointed_at_body(src: &str) -> Vec<String> {
+        let src = format!("fn body() {{\n{src}\n}}");
+        pointed_at_top(&src)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     fn file_messages(files: &[(&str, &str)]) -> Vec<String> {
@@ -7645,6 +7965,269 @@ mod tests {
                 CheckError::Redeclared("a".to_string()),
             ])
         );
+    }
+
+    #[test]
+    fn errors_point_at_names() {
+        assert_eq!(pointed_at_body("let x = 1 + y"), ["y"]);
+        assert_eq!(pointed_at_body("x = 1"), ["x = 1"]);
+        assert_eq!(pointed_at_body("missing(a: 1)"), ["missing"]);
+        assert_eq!(pointed_at_body("let x: Missing = 1"), ["Missing"]);
+        assert_eq!(
+            pointed_at_body("let x: other::Missing = 1"),
+            ["other::Missing"]
+        );
+        assert_eq!(
+            pointed_at_top("group Box<T> {}\nfn f(a: Box<Missing>) {}"),
+            ["Missing"]
+        );
+        assert_eq!(pointed_at_top("fn f(a: Missing) {}"), ["Missing"]);
+        assert_eq!(pointed_at_top("fn f() -> Missing {}"), ["Missing"]);
+        assert_eq!(pointed_at_top("use /missing"), ["use /missing"]);
+    }
+
+    #[test]
+    fn errors_point_at_the_values_with_the_wrong_type() {
+        assert_eq!(pointed_at_body("let x: Bool = 1 + 2"), ["1 + 2"]);
+        assert_eq!(pointed_at_body("if 1 + 2 {}"), ["1 + 2"]);
+        assert_eq!(pointed_at_body("let x = 1 + true"), ["true"]);
+        assert_eq!(pointed_at_body("let x = true + 1"), ["true"]);
+        assert_eq!(pointed_at_body("let x = true < 1"), ["true"]);
+        assert_eq!(pointed_at_body("let x = 1 == true"), ["true"]);
+        assert_eq!(pointed_at_body("let x = -true"), ["true"]);
+        assert_eq!(pointed_at_body("let x = !1"), ["1"]);
+        assert_eq!(
+            pointed_at_body("let x = (1 + 2).missing"),
+            ["(1 + 2).missing"]
+        );
+        assert_eq!(pointed_at_top("fn f() -> Int { return true }"), ["true"]);
+        assert_eq!(pointed_at_top("fn f() -> Int { return }"), ["return"]);
+    }
+
+    #[test]
+    fn errors_point_at_the_arguments_of_calls() {
+        let f = "fn f(to value: Int) -> Int { return value }";
+        let in_main = |call: &str| format!("{f}\nlet x = {call}");
+        assert_eq!(pointed_at_top(&in_main("f(to: true)")), ["true"]);
+        assert_eq!(pointed_at_top(&in_main("f(from: 1)")), ["from: 1"]);
+        assert_eq!(pointed_at_top(&in_main("f()")), ["f()"]);
+        assert_eq!(
+            pointed_at_top(&in_main("f(to: 1, to: 2)")),
+            ["f(to: 1, to: 2)"]
+        );
+    }
+
+    #[test]
+    fn errors_point_at_the_first_line_of_statements_with_blocks() {
+        assert_eq!(
+            pointed_at_top(
+                "
+                fn f() -> Int {
+                    let x = 1
+                }
+                "
+            ),
+            ["fn f() -> Int"]
+        );
+        assert_eq!(
+            pointed_at_top(
+                "
+                group Point {
+                    let x: Point
+                }
+                "
+            ),
+            ["group Point"]
+        );
+        assert_eq!(
+            pointed_at_top(
+                "
+                choice Answer {
+                    yes
+                    no
+                }
+                fn f(answer: Answer) {
+                    match answer {
+                        Answer.yes => {}
+                    }
+                }
+                "
+            ),
+            ["match answer"]
+        );
+    }
+
+    #[test]
+    fn errors_point_at_redeclarations() {
+        assert_eq!(pointed_at_body("let x = 1\nlet x = 2"), ["let x = 2"]);
+        assert_eq!(pointed_at_top("fn f(a: Int, a: Int) {}"), ["a: Int"]);
+        assert_eq!(
+            pointed_at_top(
+                "
+                group Point {
+                    let x: Int
+                    let x: Int
+                }
+                "
+            ),
+            ["let x: Int"]
+        );
+        assert_eq!(
+            pointed_at_top(
+                "
+                fn f() {}
+                fn f() {}
+                "
+            ),
+            ["fn f()"]
+        );
+    }
+
+    #[test]
+    fn errors_point_at_patterns() {
+        let in_match = |patterns: &str| {
+            format!(
+                "
+                fn f(point: (x: Int, y: Int)) {{
+                    match point {{
+                        {patterns}
+                    }}
+                }}
+                "
+            )
+        };
+        assert_eq!(
+            pointed_at_top(&in_match("(x: true, y: _) => {}\n_ => {}")),
+            ["true"]
+        );
+        assert_eq!(
+            pointed_at_top(&in_match("_ => {}\n(x: 1, y: _) => {}")),
+            ["(x: 1, y: _)"]
+        );
+        assert_eq!(
+            pointed_at_top(&in_match("(x: let a, y: let a) => {}")),
+            ["let a"]
+        );
+        assert_eq!(pointed_at_body("(let a, 1) = (1, 2)"), ["(let a, 1)"]);
+    }
+
+    #[test]
+    fn errors_point_at_groups_being_constructed() {
+        const POINT: &str = "
+            group Point {
+                let x: Int
+                let y: Int
+            }
+        ";
+        let in_impl = |construct: &str| {
+            format!(
+                "{POINT}
+                impl Point {{
+                    static fn new() -> Point {{
+                        return {construct}
+                    }}
+                }}
+                "
+            )
+        };
+        assert_eq!(
+            pointed_at_top(&in_impl("Point { x: 1, y: true }")),
+            ["true"]
+        );
+        assert_eq!(pointed_at_top(&in_impl("Point { x: 1, z: 2 }")), ["z: 2"]);
+        assert_eq!(
+            pointed_at_top(&in_impl("Point { x: 1 }")),
+            ["Point { x: 1 }"]
+        );
+    }
+
+    #[test]
+    fn errors_point_at_impls_of_traits() {
+        const TRAIT: &str = "
+            trait Named {
+                fn name() -> Int
+            }
+            group Thing {}
+        ";
+        let with_impl = |functions: &str| {
+            format!(
+                "{TRAIT}
+                impl Thing with Named {{
+                    {functions}
+                }}
+                "
+            )
+        };
+        assert_eq!(pointed_at_top(&with_impl("")), ["Named"]);
+        assert_eq!(
+            pointed_at_top(&with_impl("fn name() -> Bool { return true }")),
+            ["fn name() -> Bool"]
+        );
+        assert_eq!(
+            pointed_at_top(&with_impl(
+                "
+                fn name() -> Int { return 1 }
+                fn other() {}
+                "
+            )),
+            ["fn other()"]
+        );
+    }
+
+    #[test]
+    fn errors_point_at_self_params() {
+        assert_eq!(pointed_at_top("let x: Self.T = 1"), ["Self.T"]);
+    }
+
+    #[test]
+    fn errors_in_default_trait_functions_point_at_the_trait() {
+        let files = [
+            (
+                "/main",
+                "
+                use /named
+                group Thing {}
+                impl Thing with Named {
+                    fn name() -> Int { return 1 }
+                }
+                ",
+            ),
+            (
+                "/named",
+                "
+                trait Named {
+                    fn name() -> Int
+                    fn other() -> Int { return missing }
+                }
+                ",
+            ),
+        ];
+        let errs = check_files(&files).expect_err("`missing` isn't declared");
+        assert!(errs.iter().all(|err| err.module == "/named"), "{errs:?}");
+        assert!(
+            errs.iter().all(|err| pointed_at(&files, err) == "missing"),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn missing_types_that_were_not_written_point_at_their_declaration() {
+        assert_eq!(
+            pointed_at_top(
+                "
+                let Void = 1
+                fn f() {}
+                "
+            ),
+            ["fn f()"]
+        );
+    }
+
+    #[test]
+    fn stdlib_sources_are_found_by_module() {
+        assert!(stdlib_source("stdlib/core").is_some());
+        assert_eq!(stdlib_source("stdlib/missing"), None);
+        assert_eq!(stdlib_source("/core"), None);
     }
 
     #[test]

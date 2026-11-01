@@ -21,5 +21,5 @@ pub mod check;
 pub mod lexer;
 pub mod parser;
 
-pub use check::{Module, check};
+pub use check::{Module, check, stdlib_source};
 pub use parser::parse_with_warnings;
