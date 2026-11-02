@@ -33,7 +33,7 @@ impl Span {
     }
 }
 
-/// The path to a module, as in `use /dir/other`.
+/// The path to a module, as in `use /dir/other`. Paths only appear in `use`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModulePath {
     /// `/dir/other`: from the root of the project.
@@ -44,8 +44,8 @@ pub enum ModulePath {
     /// `stdlib/core`: from the root of a package, whose name comes first.
     /// Always has at least two segments.
     Package(Vec<String>),
-    /// `other`: by name alone. Only used as a qualifier, where it matches any
-    /// imported module with that name.
+    /// `other`: by name alone, which never leads to a module, but is parsed so
+    /// that the checker can explain why.
     Named(String),
 }
 
@@ -63,8 +63,12 @@ impl fmt::Display for ModulePath {
 /// What a `use` imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Import {
-    /// `use /dir/other`: one module.
-    Module(ModulePath),
+    /// `use /dir/other` or `use /dir/other as renamed`: one module, whose names
+    /// are qualified by its alias if it has one, and otherwise by its own name.
+    Module {
+        path: ModulePath,
+        alias: Option<String>,
+    },
     /// `use /dir/*`: every module in a directory, including those in its
     /// subdirectories, given the directory's path.
     /// The path can be empty, as in `use ./*`, or just a package's name, as in
@@ -75,7 +79,11 @@ pub enum Import {
 impl fmt::Display for Import {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Module(path) => write!(f, "{path}"),
+            Self::Module { path, alias: None } => write!(f, "{path}"),
+            Self::Module {
+                path,
+                alias: Some(alias),
+            } => write!(f, "{path} as {alias}"),
             // Written like a module path whose last segment is `*`.
             Self::Directory(path) => {
                 let with_star = |segments: &Vec<String>| {
@@ -95,11 +103,11 @@ impl fmt::Display for Import {
     }
 }
 
-/// A name, optionally qualified by the module it's declared in, as in `f`,
-/// `other::f` or `/dir/other::f`.
+/// A name, optionally qualified by the name of the module it's declared in, as
+/// in `f` or `other::f`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Name {
-    pub module: Option<ModulePath>,
+    pub module: Option<String>,
     pub name: String,
     pub span: Span,
 }

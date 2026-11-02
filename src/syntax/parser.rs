@@ -184,40 +184,15 @@ where
 {
     let ident = select! { Token::Ident(name) => name.to_string() }.labelled("identifier");
 
-    // `/dir/other`, `./dir/other`, `stdlib/core` or `other`.
-    let segments = ident
-        .separated_by(just(Token::Slash))
-        .at_least(1)
-        .collect::<Vec<_>>();
-    let module_path = choice((
-        just(Token::Slash)
-            .ignore_then(segments.clone())
-            .map(ModulePath::Absolute),
-        just(Token::Dot)
-            .then(just(Token::Slash))
-            .ignore_then(segments.clone())
-            .map(ModulePath::Relative),
-        ident
-            .then(just(Token::Slash).ignore_then(segments))
-            .map(|(package, mut path)| {
-                path.insert(0, package);
-                ModulePath::Package(path)
-            }),
-        ident.map(ModulePath::Named),
-    ))
-    .labelled("module path")
-    .boxed();
-
-    // `f`, `other::f` or `/dir/other::f`. Which module a name comes from is
-    // decided by the checker. `Self` is a keyword, so it can't be qualified,
-    // and the checker decides what it refers to.
+    // `f` or `other::f`. Which module a name comes from is decided by the
+    // checker. `Self` is a keyword, so it can't be qualified, and the checker
+    // decides what it refers to.
     let name = just(Token::SelfType)
         .map_with(|_, e| Name {
             span: Span::from(e.span()),
             ..Name::new("Self")
         })
-        .or(module_path
-            .clone()
+        .or(ident
             .then_ignore(just(Token::ColonColon))
             .or_not()
             .then(ident)
@@ -841,29 +816,52 @@ where
         (function, block)
     };
 
-    // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module in a
-    // directory and its subdirectories. The lexer reads the final `/*` as a
-    // wildcard.
-    let dir_segments = ident
+    // `/dir/other`, `./dir/other`, `stdlib/core` or `other`, optionally followed
+    // by an alias, as in `/dir/other as renamed`. `as` only means this here, so
+    // it can still be used as a name or label, as in `isSame(as: other)`.
+    let segments = ident
         .separated_by(just(Token::Slash))
         .at_least(1)
         .collect::<Vec<_>>();
-    let directory = choice((
+    let module = choice((
         just(Token::Slash)
-            .ignore_then(dir_segments.clone())
+            .ignore_then(segments.clone())
             .map(ModulePath::Absolute),
         just(Token::Dot)
             .then(just(Token::Slash))
-            .ignore_then(dir_segments.clone())
+            .ignore_then(segments.clone())
             .map(ModulePath::Relative),
-        dir_segments.map(ModulePath::Package),
+        ident
+            .then(just(Token::Slash).ignore_then(segments.clone()))
+            .map(|(package, mut path)| {
+                path.insert(0, package);
+                ModulePath::Package(path)
+            }),
+        ident.map(ModulePath::Named),
+    ))
+    .labelled("module path")
+    .then(just(Token::Ident("as")).ignore_then(ident).or_not())
+    .map(|(path, alias)| Import::Module { path, alias });
+
+    // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module in a
+    // directory and its subdirectories. The lexer reads the final `/*` as a
+    // wildcard.
+    let directory = choice((
+        just(Token::Slash)
+            .ignore_then(segments.clone())
+            .map(ModulePath::Absolute),
+        just(Token::Dot)
+            .then(just(Token::Slash))
+            .ignore_then(segments.clone())
+            .map(ModulePath::Relative),
+        segments.map(ModulePath::Package),
         just(Token::Dot).to(ModulePath::Relative(vec![])),
         empty().to(ModulePath::Absolute(vec![])),
     ))
     .then_ignore(just(Token::Wildcard))
     .map(Import::Directory);
     let use_ = just(Token::Use)
-        .ignore_then(directory.or(module_path.map(Import::Module)))
+        .ignore_then(directory.or(module))
         .map_with(|import, e| Stmt {
             kind: StmtKind::Use(import),
             span: Span::from(e.span()),
@@ -1248,6 +1246,7 @@ mod tests {
         }
         for stmt in [
             "use /dir/other",
+            "use /dir/other as renamed",
             "use ./*",
             "primitive Int",
             "primitive Fn<T, U>",
@@ -3014,10 +3013,7 @@ mod tests {
                     option("success", "Int"),
                     ChoiceOption {
                         name: "failure".to_string(),
-                        ty: TypeName::Named(qualified(
-                            ModulePath::Named("other".to_string()),
-                            "Error"
-                        )),
+                        ty: TypeName::Named(qualified("other", "Error")),
                         span: Span::default()
                     },
                 ],
@@ -3160,10 +3156,7 @@ mod tests {
                 arms: vec![
                     MatchArm {
                         pattern: pattern_node(PatternKind::Option {
-                            ty: TypeName::Named(qualified(
-                                ModulePath::Named("other".to_string()),
-                                "Shape",
-                            )),
+                            ty: TypeName::Named(qualified("other", "Shape",)),
                             option: "circle".to_string(),
                             value: Some(Box::new(pattern_node(PatternKind::Binding(
                                 "r".to_string()
@@ -3276,17 +3269,15 @@ mod tests {
                 "
             ),
             Ok(vec![
-                stmt_node(StmtKind::Use(Import::Module(ModulePath::Absolute(vec![
+                use_module(ModulePath::Absolute(vec![
                     "dir".to_string(),
                     "other".to_string()
-                ])))),
-                stmt_node(StmtKind::Use(Import::Module(ModulePath::Relative(vec![
+                ])),
+                use_module(ModulePath::Relative(vec![
                     "dir".to_string(),
                     "other".to_string()
-                ])))),
-                stmt_node(StmtKind::Use(Import::Module(ModulePath::Named(
-                    "stdlib".to_string()
-                )))),
+                ])),
+                use_module(ModulePath::Named("stdlib".to_string())),
                 decl(Mutability::Let, "x", None, expr_node(ExprKind::Int(1))),
                 decl(
                     Mutability::Var,
@@ -3322,13 +3313,10 @@ mod tests {
             Ok(vec![alias("ID", TypeName::new("Int"))])
         );
         assert_eq!(
-            parse_body("alias Shape = /shapes/shape::Shape"),
+            parse_body("alias Shape = shape::Shape"),
             Ok(vec![alias(
                 "Shape",
-                TypeName::Named(qualified(
-                    ModulePath::Absolute(vec!["shapes".to_string(), "shape".to_string()]),
-                    "Shape"
-                )),
+                TypeName::Named(qualified("shape", "Shape")),
             )])
         );
     }
@@ -3439,9 +3427,13 @@ mod tests {
         assert!(parse("if c {\nuse /lib\n}").is_err());
     }
 
-    fn qualified(module: ModulePath, name: &str) -> Name {
+    fn use_module(path: ModulePath) -> Stmt {
+        stmt_node(StmtKind::Use(Import::Module { path, alias: None }))
+    }
+
+    fn qualified(module: &str, name: &str) -> Name {
         Name {
-            module: Some(module),
+            module: Some(module.to_string()),
             name: name.to_string(),
             span: Span::default(),
         }
@@ -3449,24 +3441,19 @@ mod tests {
 
     #[test]
     fn parses_qualified_names() {
-        let other = || ModulePath::Named("other".to_string());
-        let path = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
         assert_eq!(
             parse_expr("other::x"),
-            expr_node(ExprKind::Var(qualified(other(), "x")))
+            expr_node(ExprKind::Var(qualified("other", "x")))
         );
         assert_eq!(
-            parse_expr("/dir/other::f() / ./other::y"),
+            parse_expr("other::f() / other::y"),
             expr_node(ExprKind::Binary(
                 Box::new(expr_node(ExprKind::Call {
-                    callee: qualified(ModulePath::Absolute(path(&["dir", "other"])), "f"),
+                    callee: qualified("other", "f"),
                     args: vec![],
                 })),
                 BinOp::Div,
-                Box::new(expr_node(ExprKind::Var(qualified(
-                    ModulePath::Relative(path(&["other"])),
-                    "y"
-                )))),
+                Box::new(expr_node(ExprKind::Var(qualified("other", "y")))),
             ))
         );
         assert_eq!(
@@ -3474,15 +3461,64 @@ mod tests {
             Ok(vec![stmt_node(StmtKind::Decl {
                 mutability: Mutability::Let,
                 name: "x".to_string(),
-                ty: Some(TypeName::Named(qualified(
-                    ModulePath::Named("stdlib".to_string()),
-                    "Int"
-                ))),
+                ty: Some(TypeName::Named(qualified("stdlib", "Int"))),
                 value: expr_node(ExprKind::Int(1)),
             })])
         );
         // Division still works without spaces.
         assert_eq!(parse_expr("a/b"), *bin(var("a"), BinOp::Div, var("b")));
+        // A slash before a qualified name is always division.
+        assert_eq!(
+            parse_expr("a/b::c"),
+            *bin(
+                var("a"),
+                BinOp::Div,
+                Box::new(expr_node(ExprKind::Var(qualified("b", "c"))))
+            )
+        );
+    }
+
+    #[test]
+    fn parses_aliased_imports() {
+        let alias = |path, alias: &str| {
+            stmt_node(StmtKind::Use(Import::Module {
+                path,
+                alias: Some(alias.to_string()),
+            }))
+        };
+        let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            parse("use ./a as x\nuse /dir/a as y\nuse stdlib/core as z"),
+            Ok(vec![
+                alias(ModulePath::Relative(segments(&["a"])), "x"),
+                alias(ModulePath::Absolute(segments(&["dir", "a"])), "y"),
+                alias(ModulePath::Package(segments(&["stdlib", "core"])), "z"),
+            ])
+        );
+    }
+
+    #[test]
+    fn as_is_only_a_keyword_in_uses() {
+        assert_eq!(parse_expr("as"), *var("as"));
+        assert!(parse("fn same(as other: Int) {}\nlet as = same(as: 1)").is_ok());
+    }
+
+    #[test]
+    fn rejects_module_paths_outside_uses() {
+        for src in [
+            "let x = /a::b",
+            "let x = ./a::b",
+            "let x = /dir/a::b",
+            "let x = ./dir/a::f()",
+            "let x: /a::B = 1",
+            "let x: ./a::B = 1",
+            "let x: dir/a::B = 1",
+            "alias B = /a::B",
+            "alias B = dir/a::B",
+            "let x = /a::B { y: 1 }",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]
@@ -3499,6 +3535,15 @@ mod tests {
             "use /a\n/b",
             "use /a use /b",
             "use a::b",
+            "use /a as",
+            "use /a as b as c",
+            "use /a as b/c",
+            "use /a as /b",
+            "use /a as b::c",
+            "use /a\nas b",
+            "use as b",
+            "use /a as use",
+            "use /a as alias",
             "let x = a::",
             "let x = ::a",
             "let x = a::b::c",
@@ -3552,7 +3597,7 @@ mod tests {
         assert_eq!(
             parse_expr("user::User {age:1+2,isAdmin:f()}"),
             construct(
-                qualified(ModulePath::Named("user".to_string()), "User"),
+                qualified("user", "User"),
                 vec![
                     field_value("age", *bin(int(1), BinOp::Add, int(2))),
                     field_value("isAdmin", *call("f", vec![])),
@@ -4232,7 +4277,7 @@ mod tests {
                     ],
                 }),
                 stmt_node(StmtKind::Impl {
-                    ty: qualified(ModulePath::Named("user".to_string()), "User"),
+                    ty: qualified("user", "User"),
                     with: None,
                     aliases: vec![],
                     functions: vec![],
@@ -4282,10 +4327,7 @@ mod tests {
                 )"
             ),
             method_call(
-                expr_node(ExprKind::Var(qualified(
-                    ModulePath::Named("other".to_string()),
-                    "x"
-                ))),
+                expr_node(ExprKind::Var(qualified("other", "x"))),
                 "f",
                 vec![arg(Some("a"), expr_node(ExprKind::Int(1)))],
             )
@@ -4441,7 +4483,7 @@ mod tests {
                 }),
                 stmt_node(StmtKind::Impl {
                     ty: Name::new("Int"),
-                    with: Some(qualified(ModulePath::Named("logic".to_string()), "And")),
+                    with: Some(qualified("logic", "And")),
                     aliases: vec![],
                     functions: vec![],
                 }),
@@ -4528,7 +4570,7 @@ mod tests {
                 },
                 ImplAlias {
                     name: "Output".to_string(),
-                    ty: TypeName::Named(qualified(ModulePath::Named("core".to_string()), "Bool")),
+                    ty: TypeName::Named(qualified("core", "Bool")),
                     span: Span::default()
                 },
             ]
@@ -4671,13 +4713,7 @@ mod tests {
         );
         assert_eq!(
             parse_expr("other::user.age"),
-            field_access(
-                expr_node(ExprKind::Var(qualified(
-                    ModulePath::Named("other".to_string()),
-                    "user"
-                ))),
-                "age"
-            )
+            field_access(expr_node(ExprKind::Var(qualified("other", "user"))), "age")
         );
     }
 
@@ -4745,25 +4781,25 @@ mod tests {
 
     #[test]
     fn parses_package_paths() {
-        let package = || ModulePath::Package(vec!["stdlib".to_string(), "core".to_string()]);
         assert_eq!(
-            parse("use stdlib/core\nlet x: stdlib/core::Int = stdlib/core::Int.zero()"),
+            parse("use stdlib/core\nlet x: core::Int = core::Int.zero()"),
             Ok(vec![
-                stmt_node(StmtKind::Use(Import::Module(package()))),
+                use_module(ModulePath::Package(vec![
+                    "stdlib".to_string(),
+                    "core".to_string()
+                ])),
                 stmt_node(StmtKind::Decl {
                     mutability: Mutability::Let,
                     name: "x".to_string(),
-                    ty: Some(TypeName::Named(qualified(package(), "Int"))),
+                    ty: Some(TypeName::Named(qualified("core", "Int"))),
                     value: method_call(
-                        expr_node(ExprKind::Var(qualified(package(), "Int"))),
+                        expr_node(ExprKind::Var(qualified("core", "Int"))),
                         "zero",
                         vec![]
                     ),
                 }),
             ])
         );
-        // Without `::`, `/` is still division.
-        assert_eq!(parse_expr("a/b"), *bin(var("a"), BinOp::Div, var("b")));
     }
 
     #[test]
@@ -4802,6 +4838,9 @@ mod tests {
             "use ./users/*/admins",
             "use ./users/*.x",
             "use ./*/*",
+            "use ./users/* as x",
+            "use ./* as x",
+            "use /* as x",
             "use users/*/",
             "let x = users::*",
             "fn f() {\nuse ./*\n}",

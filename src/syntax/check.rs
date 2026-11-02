@@ -27,7 +27,10 @@
 //! rejected.
 //!
 //! A module's own top-level names come before the names it imports, which
-//! must not clash with each other.
+//! must not clash with each other. When they do, a name is qualified by the
+//! last part of its module's path, as in `other::f`, or by the alias given in
+//! the module's `use`, as in `use /dir/other as renamed`. Only a `use` can
+//! contain a path.
 //!
 //! The standard library is a package called `stdlib`, whose files are modules
 //! named from the package, such as `stdlib/core`. Every program imports
@@ -145,6 +148,8 @@ pub enum CheckError {
     UnknownModule(String),
     /// A qualified name's module isn't the current module or one it imports.
     NotImported(String),
+    /// A `use` gave a module an alias that an earlier `use` gave another module.
+    AliasRedeclared { alias: String, module: String },
     /// A `use` of a directory found no modules that could be imported.
     EmptyDirectory(String),
     /// A package was used where one of its modules was needed.
@@ -161,7 +166,7 @@ pub enum CheckError {
     /// `::` was used after a name that's declared, but isn't a module.
     NotAModule(String),
     /// A qualified name's module matched more than one module by name, so
-    /// its full path is needed.
+    /// they need different names, using `as`.
     AmbiguousModule { name: String, modules: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
@@ -469,6 +474,9 @@ impl fmt::Display for CheckError {
             ),
             Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
             Self::NotImported(path) => write!(f, "`{path}` is not an imported module"),
+            Self::AliasRedeclared { alias, module } => {
+                write!(f, "`{alias}` is already an alias of `{module}`")
+            }
             Self::EmptyDirectory(import) => {
                 write!(
                     f,
@@ -500,7 +508,7 @@ impl fmt::Display for CheckError {
             ),
             Self::AmbiguousModule { name, modules } => write!(
                 f,
-                "`{name}` could be {}, so the full path must be used",
+                "`{name}` could be {}, so use `as` to give them different names",
                 quoted_list(modules, "or")
             ),
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
@@ -1141,13 +1149,16 @@ struct ModuleInfo<'a> {
     /// The module's path from the root of its package or the project.
     path: &'a [String],
     /// The name used to qualify the module's names, such as `other` in
-    /// `other::f`.
+    /// `other::f`, unless a `use` gives it an alias.
     name: &'a str,
     program: &'a Program,
     /// The names declared at the module's top level.
     scope: HashMap<&'a str, Binding>,
     /// The other modules whose top-level names this one can use.
     imports: Vec<usize>,
+    /// The names that can qualify a name in this module, with the modules they
+    /// refer to, which are this one and its imports.
+    qualifiers: Vec<(&'a str, usize)>,
 }
 
 /// Why `Checker::lookup` couldn't find a name.
@@ -1361,6 +1372,7 @@ impl<'a> Checker<'a> {
             program: &module.program,
             scope: HashMap::new(),
             imports: vec![],
+            qualifiers: vec![],
         });
         self.modules.len() - 1
     }
@@ -1699,16 +1711,19 @@ impl<'a> Checker<'a> {
     /// project always import `stdlib/core`.
     fn resolve_imports(&mut self) {
         let mut imports = vec![];
+        let mut qualifiers = vec![(self.modules[self.module].name, self.module)];
         if self.modules[self.module].package.is_none() {
             imports.push(self.core);
+            qualifiers.push((self.modules[self.core].name, self.core));
         }
+        let mut aliases = HashMap::new();
 
         for stmt in self.modules[self.module].program {
             let StmtKind::Use(import) = &stmt.kind else {
                 continue;
             };
-            let path = match import {
-                Import::Module(path) => path,
+            let (path, alias) = match import {
+                Import::Module { path, alias } => (path, alias),
                 Import::Directory(dir) => {
                     let found = self.resolve_directory(dir);
                     if found.is_empty() {
@@ -1718,19 +1733,39 @@ impl<'a> Checker<'a> {
                         if !imports.contains(&module) {
                             imports.push(module);
                         }
+                        let qualifier = (self.modules[module].name, module);
+                        if !qualifiers.contains(&qualifier) {
+                            qualifiers.push(qualifier);
+                        }
                     }
                     continue;
                 }
             };
-            match self.resolve_path(path) {
-                // Importing a module twice, or importing itself, is harmless.
-                Some(module) if module == self.module || imports.contains(&module) => {}
-                Some(module) => imports.push(module),
-                None => self.error(stmt.span, self.unknown_module(path)),
+            let Some(module) = self.resolve_path(path) else {
+                self.error(stmt.span, self.unknown_module(path));
+                continue;
+            };
+            // Importing a module twice, or importing itself, is harmless.
+            if module != self.module && !imports.contains(&module) {
+                imports.push(module);
+            }
+            if let Some(alias) = alias
+                && let first = *aliases.entry(alias.as_str()).or_insert(module)
+                && first != module
+            {
+                let module = self.modules[first].display.clone();
+                let alias = alias.clone();
+                self.error(stmt.span, CheckError::AliasRedeclared { alias, module });
+                continue;
+            }
+            let name = alias.as_deref().unwrap_or(self.modules[module].name);
+            if !qualifiers.contains(&(name, module)) {
+                qualifiers.push((name, module));
             }
         }
 
         self.modules[self.module].imports = imports;
+        self.modules[self.module].qualifiers = qualifiers;
     }
 
     /// The error for a module path that doesn't lead to a module.
@@ -1797,34 +1832,30 @@ impl<'a> Checker<'a> {
         iter::once(self.module).chain(self.modules[self.module].imports.iter().copied())
     }
 
-    /// Finds the module a qualified name refers to. It must be the current
-    /// module or one it imports.
-    fn resolve_qualifier(&self, path: &ModulePath) -> Result<usize, CheckError> {
-        if let ModulePath::Named(name) = path {
-            let matches: Vec<_> = self
-                .visible_modules()
-                .filter(|&module| self.modules[module].name == name)
-                .collect();
-            return match matches[..] {
-                // Modules aren't identifiers, so a name can be both. If it's
-                // only an identifier, that's probably the mistake.
-                [] if self.is_declared(name) => Err(CheckError::NotAModule(name.clone())),
-                [] if name == STDLIB_PACKAGE => Err(CheckError::PackageNotModule(name.clone())),
-                [] => Err(CheckError::NotImported(name.clone())),
-                [module] => Ok(module),
-                _ => Err(CheckError::AmbiguousModule {
-                    name: name.clone(),
-                    modules: matches
-                        .iter()
-                        .map(|&module| self.modules[module].display.clone())
-                        .collect(),
-                }),
-            };
+    /// Finds the module that the qualifier `name` refers to. It must be the
+    /// current module or one it imports.
+    fn resolve_qualifier(&self, name: &str) -> Result<usize, CheckError> {
+        let matches: Vec<_> = self.modules[self.module]
+            .qualifiers
+            .iter()
+            .filter(|(qualifier, _)| *qualifier == name)
+            .map(|&(_, module)| module)
+            .collect();
+        match matches[..] {
+            // Modules aren't identifiers, so a name can be both. If it's only
+            // an identifier, that's probably the mistake.
+            [] if self.is_declared(name) => Err(CheckError::NotAModule(name.to_string())),
+            [] if name == STDLIB_PACKAGE => Err(CheckError::PackageNotModule(name.to_string())),
+            [] => Err(CheckError::NotImported(name.to_string())),
+            [module] => Ok(module),
+            _ => Err(CheckError::AmbiguousModule {
+                name: name.to_string(),
+                modules: matches
+                    .iter()
+                    .map(|&module| self.modules[module].display.clone())
+                    .collect(),
+            }),
         }
-
-        self.resolve_path(path)
-            .filter(|module| self.visible_modules().any(|visible| visible == *module))
-            .ok_or_else(|| CheckError::NotImported(path.to_string()))
     }
 
     /// Whether `name` is declared anywhere the current code could see it,
@@ -4726,9 +4757,10 @@ impl<'a> Checker<'a> {
                 }
                 Err(LookupError::Undeclared)
                     if name.module.is_none()
-                        && self
-                            .visible_modules()
-                            .any(|module| self.modules[module].name == name.name) =>
+                        && self.modules[self.module]
+                            .qualifiers
+                            .iter()
+                            .any(|(qualifier, _)| *qualifier == name.name) =>
                 {
                     self.error(
                         receiver.span,
@@ -8032,13 +8064,12 @@ mod tests {
     fn names_need_importing() {
         assert_eq!(
             file_messages(&[
-                ("/main", "let a = x\nlet b = lib::x\nlet c = /lib::x"),
+                ("/main", "let a = x\nlet b = lib::x"),
                 ("/lib", "let x = 1"),
             ]),
             [
                 "/main: `x` is not declared",
                 "/main: `lib` is not an imported module",
-                "/main: `/lib` is not an imported module",
             ]
         );
     }
@@ -8091,7 +8122,6 @@ mod tests {
                     let x = f()
                     let y: Int = a::f()
                     let z: Bool = b::f()
-                    let w: Bool = /dir/b::f()
                     ",
                 ),
                 ("/a", a),
@@ -8125,7 +8155,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_with_the_same_name_need_full_paths() {
+    fn modules_with_the_same_name_need_aliases() {
         assert_eq!(
             file_messages(&[
                 (
@@ -8134,14 +8164,256 @@ mod tests {
                     use /a/other
                     use /b/other
                     let x = other::value
-                    let y: Int = /a/other::value
-                    let z: Bool = ./b/other::value
                     ",
                 ),
                 ("/a/other", "let value = 1"),
                 ("/b/other", "let value = true"),
             ]),
-            ["/main: `other` could be `/a/other` or `/b/other`, so the full path must be used"]
+            [
+                "/main: `other` could be `/a/other` or `/b/other`, so use `as` to give them different names"
+            ]
+        );
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /a/other as first
+                    use /b/other as second
+                    let x: Int = first::value
+                    let y: Bool = second::value
+                    ",
+                ),
+                ("/a/other", "let value = 1"),
+                ("/b/other", "let value = true"),
+            ]),
+            Ok(())
+        );
+        // Aliasing one is enough to leave the name for the other.
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /a/other as first
+                    use /b/other
+                    let x: Int = first::value
+                    let y: Bool = other::value
+                    ",
+                ),
+                ("/a/other", "let value = 1"),
+                ("/b/other", "let value = true"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn top_level_values_can_be_qualified_by_module_name_or_alias() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use ./filea
+                    use ./fileb
+
+                    let x: Int = filea::temp
+                    let y: Bool = fileb::temp
+                    ",
+                ),
+                ("/filea", "let temp = 1"),
+                ("/fileb", "let temp = true"),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use ./filea as aliasa
+                    use ./dir/filea as aliasb
+
+                    let x: Int = aliasa::temp
+                    let y: Bool = aliasb::temp
+                    ",
+                ),
+                ("/filea", "let temp = 1"),
+                ("/dir/filea", "let temp = true"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn aliases_replace_the_names_of_modules() {
+        assert_eq!(
+            file_messages(&[
+                (
+                    "/main",
+                    "use /lib as renamed\nlet x = renamed::y\nlet z = lib::y"
+                ),
+                ("/lib", "let y = 1"),
+            ]),
+            ["/main: `lib` is not an imported module"]
+        );
+    }
+
+    #[test]
+    fn aliased_modules_are_still_imported() {
+        assert_eq!(
+            check_files(&[
+                ("/main", "use /lib as renamed\nlet a: Int = y"),
+                ("/lib", "let y = 1"),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /a as x\nuse /b as y\nlet z = value"),
+                ("/a", "let value = 1"),
+                ("/b", "let value = 2"),
+            ]),
+            ["/main: `value` is declared in `/a` and `/b`, so it must be qualified"]
+        );
+    }
+
+    #[test]
+    fn aliases_qualify_types_and_functions() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use ./users/user as person
+                    alias Person = person::User
+                    let a: person::User = person::make()
+                    let b: Person = person::User.new()
+                    let c = a.age + b.age
+                    ",
+                ),
+                (
+                    "/users/user",
+                    "
+                    group User {
+                        let age: Int
+                    }
+                    impl User {
+                        static fn new() -> User {
+                            return User { age: 1 }
+                        }
+                    }
+                    fn make() -> User {
+                        return User.new()
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn aliases_are_only_visible_in_their_own_module() {
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /a\nlet x = renamed::y"),
+                ("/a", "use /lib as renamed"),
+                ("/lib", "let y = 1"),
+            ]),
+            ["/main: `renamed` is not an imported module"]
+        );
+    }
+
+    #[test]
+    fn modules_can_be_imported_under_several_names() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /lib
+                    use /lib as x
+                    use /lib as y
+                    let a = lib::z + x::z + y::z
+                    let b = z
+                    ",
+                ),
+                ("/lib", "let z = 1"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn modules_can_alias_themselves() {
+        assert_eq!(
+            check_files(&[(
+                "/main",
+                "use /main as me\nlet a = 1\nlet b = me::a + main::a"
+            )]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_the_same_alias_for_two_modules() {
+        // Even if it's never used, and only once if it is.
+        for main in [
+            "use /a as x\nuse /b as x",
+            "use /a as x\nuse /b as x\nlet y = x::value",
+        ] {
+            assert_eq!(
+                file_messages(&[
+                    ("/main", main),
+                    ("/a", "let value = 1"),
+                    ("/b", "let value = 2"),
+                ]),
+                ["/main: `x` is already an alias of `/a`"]
+            );
+        }
+        let files = [
+            ("/main", "use /a as x\nuse /b as x"),
+            ("/a", ""),
+            ("/b", ""),
+        ];
+        let errs = check_files(&files).expect_err("the alias should be rejected");
+        assert_eq!(pointed_at(&files, &errs[0]), "use /b as x");
+    }
+
+    #[test]
+    fn the_same_alias_for_one_module_is_harmless() {
+        assert_eq!(
+            check_files(&[
+                ("/main", "use /a as x\nuse ./a as x\nlet y = x::value"),
+                ("/a", "let value = 1"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn unknown_modules_can_not_be_aliased() {
+        assert_eq!(
+            file_messages(&[("/main", "use /missing as x\nlet y = x::z")]),
+            [
+                "/main: cannot find module `/missing`",
+                "/main: `x` is not an imported module",
+            ]
+        );
+    }
+
+    #[test]
+    fn aliases_are_not_values() {
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /lib as renamed\nlet x = renamed.y"),
+                ("/lib", "let y = 1"),
+            ]),
+            [
+                "/main: `renamed` is a module, not a value, so use `renamed::y` to refer to a name in it"
+            ]
         );
     }
 
@@ -8165,7 +8437,7 @@ mod tests {
     #[test]
     fn std_names_can_be_qualified() {
         assert_eq!(
-            check_top("let x: core::Int = 1\nlet y: Int = x\nlet z: stdlib/core::Bool = true"),
+            check_top("let x: core::Int = 1\nlet y: Int = x\nlet z: core::Bool = true"),
             Ok(())
         );
     }
@@ -9848,7 +10120,6 @@ mod tests {
                 use stdlib/core
                 use stdlib/missing
                 let a: stdlib::Int = 1
-                let b: stdlib/core::Int = 1
                 ",
             )]),
             [
@@ -10738,9 +11009,7 @@ primitive Float"
                     "
                     use /core
                     let a: Bool = flag
-                    let b: Bool = /core::flag
-                    let c: Int = stdlib/core::Int.zero()
-                    let d = core::flag
+                    let b = core::flag
                     ",
                 ),
                 (
@@ -10755,7 +11024,34 @@ primitive Float"
                     ",
                 ),
             ]),
-            ["/main: `core` could be `stdlib/core` or `/core`, so the full path must be used",]
+            [
+                "/main: `core` could be `stdlib/core` or `/core`, so use `as` to give them different names",
+            ]
+        );
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /core as mine
+                    let a: Bool = flag
+                    let b: Bool = mine::flag
+                    let c: Int = core::Int.zero()
+                    ",
+                ),
+                (
+                    "/core",
+                    "
+                    let flag = true
+                    impl Int {
+                        static fn zero() -> Int {
+                            return 0
+                        }
+                    }
+                    ",
+                ),
+            ]),
+            Ok(())
         );
     }
 

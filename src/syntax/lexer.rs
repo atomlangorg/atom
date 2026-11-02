@@ -675,15 +675,13 @@ mod tests {
     #[test]
     fn lexes_qualified_names() {
         assert_eq!(
-            lex("other::f() /dir/other::Int"),
+            lex("other::f() / other::Int"),
             vec![
                 Token::Ident("other"),
                 Token::ColonColon,
                 Token::Ident("f"),
                 Token::LParen,
                 Token::RParen,
-                Token::Slash,
-                Token::Ident("dir"),
                 Token::Slash,
                 Token::Ident("other"),
                 Token::ColonColon,

@@ -1405,6 +1405,43 @@ mod tests {
         assert_eq!(run_files(&files), 109);
     }
 
+    #[test]
+    fn qualifies_names_by_module_name_and_alias() {
+        let names = [
+            (
+                "/main",
+                "
+                use ./filea
+                use ./fileb
+
+                fn main() -> Int {
+                    return filea::temp() * 10 + fileb::temp()
+                }
+                ",
+            ),
+            ("/filea", "fn temp() -> Int { return 1 }"),
+            ("/fileb", "fn temp() -> Int { return 2 }"),
+        ];
+        assert_eq!(run_files(&names), 12);
+
+        let aliases = [
+            (
+                "/main",
+                "
+                use ./filea as aliasa
+                use ./dir/filea as aliasb
+
+                fn main() -> Int {
+                    return aliasa::temp() * 10 + aliasb::temp()
+                }
+                ",
+            ),
+            ("/filea", "fn temp() -> Int { return 1 }"),
+            ("/dir/filea", "fn temp() -> Int { return 2 }"),
+        ];
+        assert_eq!(run_files(&aliases), 12);
+    }
+
     /// The largest integer.
     const MAX: &str = "9223372036854775807";
     /// The smallest integer, which can't be written as a literal.
