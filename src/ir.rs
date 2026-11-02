@@ -107,7 +107,7 @@ pub enum PrimitiveFn {
     /// `Fn.call`, which calls the function that the `Fn` points to with the
     /// input.
     CallFn,
-    /// `tag` on a choice, which is the option it is.
+    /// `ChoiceTag.new`, which is the option that a choice is.
     ChoiceTag,
     /// `ChoiceOption.tag`, which is the option it already is.
     OptionTag,

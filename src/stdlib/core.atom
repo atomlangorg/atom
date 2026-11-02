@@ -188,18 +188,14 @@ impl Fn with Call {
     primitive fn call(input: Self.Input) -> Self.Output
 }
 
-// Every `choice`, which implements this without needing an `impl`. `tag` is
-// the option that a value is, as a `Tag`, so `Shape.Tag` is the `Tag` of the
-// choice `Shape`.
-trait Choice {
-    alias Tag
-
-    fn tag() -> Tag
-}
-
-// Which option of the choice `Base` something is, as in `Shape.Tag` for
-// `ChoiceTag<Shape>`. Tags are equal if they're for the same option.
+// Which option of the choice `Base` something is, as in `ChoiceTag<Shape>`.
+// `Base` must be a choice. Tags are equal if they're for the same option.
 primitive ChoiceTag<Base>
+
+impl ChoiceTag {
+    // Creates the tag of the option that `value` is.
+    static primitive fn new(of value: Self.Base) -> Self
+}
 
 impl ChoiceTag with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
@@ -207,9 +203,10 @@ impl ChoiceTag with Equal {
 }
 
 // An option of the choice `Base` that holds a `Value`, which is what naming an
-// option refers to, as in `Shape.circle`. Calling it creates the choice, so
-// `Shape.circle(3)` is `Shape.circle.call(input: 3)`, and if `Value` is `Void`
-// it can be left out, so `Shape.empty()` is `Shape.empty(Void.new())`.
+// option refers to, as in `Shape.circle`. `Base` must be a choice. Calling it
+// creates the choice, so `Shape.circle(3)` is `Shape.circle.call(input: 3)`,
+// and if `Value` is `Void` it can be left out, so `Shape.empty()` is
+// `Shape.empty(Void.new())`.
 primitive ChoiceOption<Base, Value>
 
 impl ChoiceOption {

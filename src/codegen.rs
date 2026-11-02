@@ -353,13 +353,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .expect("every function returns a value, even if it's `Void`");
                 self.builder.build_return(Some(&result))?;
             }
-            // Only a choice's options can be created, so a `ChoiceOption` of
-            // anything else has no values to call this on.
-            Body::Primitive(PrimitiveFn::CallOption)
-                if !matches!(self.program.types[function.returns], TypeDef::Choice { .. }) =>
-            {
-                self.builder.build_unreachable()?;
-            }
             Body::Primitive(PrimitiveFn::CallOption) => {
                 let ty = self.types[function.returns].into_struct_type();
                 let option = value
@@ -1668,19 +1661,21 @@ mod tests {
 
             fn main() -> Int {{
                 let shape = Shape.flag(true)
-                let tag: Shape.Tag = shape.tag()
+                let tag: ChoiceTag<Shape> = ChoiceTag.new(of: shape)
                 let option = Shape.flag
                 let a = score(matched: tag == Shape.flag.tag(), worth: 1)
                 let b = score(matched: tag == Shape.circle.tag(), worth: 2)
                 let c = score(matched: tag != Shape.circle.tag(), worth: 4)
                 let d = score(matched: tag != option.tag(), worth: 8)
-                let e = score(matched: tag == option(false).tag(), worth: 16)
-                let f = score(matched: Shape.empty().tag() == Shape.empty.tag(), worth: 32)
-                return a + b + c + d + e + f
+                let e = score(matched: tag == ChoiceTag.new(of: option(false)), worth: 16)
+                let f = score(matched: ChoiceTag<Shape>.new(of: Shape.empty()) == Shape.empty.tag(), worth: 32)
+                let read = ChoiceTag<Shape>.new
+                let g = score(matched: read(of: shape) == tag, worth: 64)
+                return a + b + c + d + e + f + g
             }}
             "
         );
-        assert_eq!(run(&src), 53);
+        assert_eq!(run(&src), 117);
     }
 
     #[test]
@@ -1707,7 +1702,7 @@ mod tests {
                 let none: ChoiceOption<Optional<Int>, Void> = Optional.none
                 let a = unwrap(some(5), or: 0)
                 let b = unwrap(none(), or: 7)
-                if some(1).tag() == Optional<Int>.some.tag() {
+                if ChoiceTag<Optional<Int>>.new(of: some(1)) == Optional<Int>.some.tag() {
                     return a * 10 + b
                 }
                 return 0
@@ -1726,14 +1721,14 @@ mod tests {
             }
 
             let a: ChoiceOption<Shape, Int> = Shape.square
-            let b: Shape.Tag = Shape.square.tag()
+            let b: ChoiceTag<Shape> = Shape.square.tag()
             let c: Shape = Shape.square(5)
-            let d: Shape.Tag = Shape.square(5).tag()
+            let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(5))
 
             let n: ChoiceOption<Shape, Void> = Shape.other
-            let o: Shape.Tag = Shape.other.tag()
+            let o: ChoiceTag<Shape> = Shape.other.tag()
             let p: Shape = Shape.other()
-            let q: Shape.Tag = Shape.other(Void.new()).tag()
+            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(Void.new()))
 
             fn main() -> Int {
                 return 0
@@ -1741,20 +1736,6 @@ mod tests {
             ";
         assert_eq!(read_choice(src, "c", "Shape", 64), (0, 5));
         assert_eq!(read_choice(src, "p", "Shape", 8).0, 2);
-    }
-
-    #[test]
-    fn options_of_types_that_are_not_choices_still_compile() {
-        let src = "
-            fn never(option: ChoiceOption<Int, Bool>) -> Int {
-                return option(true)
-            }
-
-            fn main() -> Int {
-                return 9
-            }
-            ";
-        assert_eq!(run(src), 9);
     }
 
     #[test]

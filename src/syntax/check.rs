@@ -365,8 +365,8 @@ pub enum CheckError {
     /// A generic type's name was used without arguments where they can't be
     /// inferred.
     CannotInferGeneric(String),
-    /// `ty.member` was used as a type, which `ty` doesn't have.
-    NoMemberType { ty: Type, member: String },
+    /// A generic type that's only for choices was given something else.
+    NotAChoice { generic: String, found: Type },
     /// `Self.T` was used outside the `impl` of a generic type.
     SelfParamOutsideGeneric(String),
     /// `Self.T` names a parameter the `impl`'s generic type doesn't have.
@@ -763,7 +763,12 @@ impl fmt::Display for CheckError {
                 f,
                 "the arguments of `{name}` can't be inferred here, so they must be given, as in `{name}<...>`"
             ),
-            Self::NoMemberType { ty, member } => write!(f, "`{ty}` has no type `{member}`"),
+            Self::NotAChoice { generic, found } => {
+                write!(
+                    f,
+                    "`{generic}` can only be used with a choice, found `{found}`"
+                )
+            }
             Self::SelfParamOutsideGeneric(param) => write!(
                 f,
                 "`Self.{param}` can only be used in the `impl` of a generic type"
@@ -1387,7 +1392,7 @@ impl<'a> Checker<'a> {
                     | StmtKind::Choice { name, .. }
                     | StmtKind::Primitive { name, .. } => {
                         let id = self.declare_type(name, stmt.span);
-                        // Its `Tag` can be used before its options are
+                        // It can be used as a choice before its options are
                         // defined.
                         if matches!(stmt.kind, StmtKind::Choice { .. }) {
                             self.choice_options.insert(id, vec![]);
@@ -1998,7 +2003,6 @@ impl<'a> Checker<'a> {
             TypeName::Named(name) => self.find_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args, false),
             TypeName::SelfParam(param, span) => self.self_param(param, *span, false),
-            TypeName::Member { ty, member, span } => self.member_type(ty, member, *span, false),
             TypeName::Tuple(elements) => {
                 let elements = elements
                     .iter()
@@ -2030,7 +2034,6 @@ impl<'a> Checker<'a> {
             TypeName::Named(name) => self.resolve_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args, true),
             TypeName::SelfParam(param, span) => self.self_param(param, *span, true),
-            TypeName::Member { ty, member, span } => self.member_type(ty, member, *span, true),
             TypeName::Tuple(elements) => {
                 // Every element is resolved, so each one's errors are found.
                 let elements: Vec<_> = elements
@@ -2113,8 +2116,24 @@ impl<'a> Checker<'a> {
                 }
             })
             .collect();
-        let args = args.into_iter().collect::<Option<_>>()?;
+        let args = args.into_iter().collect::<Option<Vec<_>>>()?;
+        if self.is_only_for_choices(template) && !self.choice_options.contains_key(&args[0].id) {
+            if report {
+                let error = CheckError::NotAChoice {
+                    generic: name.to_string(),
+                    found: args[0].clone(),
+                };
+                self.error(name.span, error);
+            }
+            return None;
+        }
         self.instance(template, args, name.span, true)
+    }
+
+    /// Whether the generic type at `template` in `templates` has values only
+    /// when its first argument is a choice.
+    fn is_only_for_choices(&self, template: usize) -> bool {
+        template == self.std_template("ChoiceTag") || template == self.std_template("ChoiceOption")
     }
 
     /// What `Self.param` stands for in the `impl` of a type made from a
@@ -2156,36 +2175,6 @@ impl<'a> Checker<'a> {
                 None
             }
         }
-    }
-
-    /// The type called `member` belonging to `ty`, reporting errors if
-    /// `report` is set. Only a choice has one, which is its `Tag`.
-    fn member_type(
-        &mut self,
-        ty: &TypeName,
-        member: &str,
-        span: Span,
-        report: bool,
-    ) -> Option<Type> {
-        let ty = if report {
-            self.resolve_type(ty)?
-        } else {
-            self.find_type(ty)?
-        };
-        if member == "Tag" && self.choice_options.contains_key(&ty.id) {
-            return self.tag_type(ty, span);
-        }
-        if report {
-            let member = member.to_string();
-            self.error(span, CheckError::NoMemberType { ty, member });
-        }
-        None
-    }
-
-    /// The type of the tags of the choice `ty`, used by the code at `span`.
-    fn tag_type(&mut self, ty: Type, span: Span) -> Option<Type> {
-        let template = self.std_template("ChoiceTag");
-        self.instance(template, vec![ty], span, true)
     }
 
     /// The type `type_name` refers to where a value of one of `contexts` is
@@ -2260,7 +2249,11 @@ impl<'a> Checker<'a> {
                     name: param.clone(),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // Its first parameter stands for a choice, like its arguments.
+        if self.is_only_for_choices(template) {
+            self.choice_options.insert(stand_ins[0].id, vec![]);
+        }
         let ty = self.instance(template, stand_ins, stmt.span, false)?;
         self.checked_instances.insert(ty.id);
         Some((module, ty, stmt.span))
@@ -2311,9 +2304,7 @@ impl<'a> Checker<'a> {
         let errors = self.errors.len();
         self.at_top_level(module, Some((template, args)), |checker| match &stmt.kind {
             StmtKind::Group { fields, .. } => checker.define_group(id, &name, fields),
-            StmtKind::Choice { options, .. } => {
-                checker.define_choice(id, &name, options, stmt.span);
-            }
+            StmtKind::Choice { options, .. } => checker.define_choice(id, &name, options),
             StmtKind::Primitive { name, .. } => checker.define_primitive(id, name, stmt.span),
             _ => unreachable!("only groups, choices and primitives are generic"),
         });
@@ -3183,6 +3174,9 @@ impl<'a> Checker<'a> {
             }
             // Every type made from a generic type has its own functions.
             _ if name.starts_with("Fn<") && name.ends_with(">.call") => ir::PrimitiveFn::CallFn,
+            _ if name.starts_with("ChoiceTag<") && name.ends_with(">.new") => {
+                ir::PrimitiveFn::ChoiceTag
+            }
             _ if name.starts_with("ChoiceTag<") && name.ends_with(">.isEqual") => {
                 ir::PrimitiveFn::Equal
             }
@@ -3289,9 +3283,7 @@ impl<'a> Checker<'a> {
     fn define_type(&mut self, id: usize, stmt: &'a Stmt) {
         match &stmt.kind {
             StmtKind::Group { name, fields, .. } => self.define_group(id, name, fields),
-            StmtKind::Choice { name, options, .. } => {
-                self.define_choice(id, name, options, stmt.span);
-            }
+            StmtKind::Choice { name, options, .. } => self.define_choice(id, name, options),
             StmtKind::Primitive { name, .. } => self.define_primitive(id, name, stmt.span),
             _ => unreachable!("only groups, choices and primitives declare types"),
         }
@@ -3323,8 +3315,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolves the options of the choice called `name` with `id`.
-    fn define_choice(&mut self, id: usize, name: &str, options: &'a [ChoiceOption], span: Span) {
-        // Its `Tag` can be used by its options.
+    fn define_choice(&mut self, id: usize, name: &str, options: &'a [ChoiceOption]) {
+        // Its options can use it as a choice.
         self.choice_options.insert(id, vec![]);
         // Option names only need to be unique within their choice.
         let mut option_names = HashSet::new();
@@ -3349,43 +3341,6 @@ impl<'a> Checker<'a> {
             });
         }
         self.choice_options.insert(id, signatures);
-        self.implement_choice(id, name, span);
-    }
-
-    /// Makes the choice called `name` with `id` implement the standard
-    /// library's `Choice` trait, which it does without an `impl`.
-    fn implement_choice(&mut self, id: usize, name: &str, span: Span) {
-        let ty = Type {
-            id,
-            name: name.to_string(),
-        };
-        let Some(returns) = self.tag_type(ty, span) else {
-            return;
-        };
-        let full_name = self.full_name(&format!("{name}.tag"));
-        let function = self.functions.len();
-        self.functions.push(Signature {
-            name: full_name.clone(),
-            params: vec![],
-            returns: Some(returns.clone()),
-        });
-        self.lowered_functions.push(Some(ir::Function {
-            name: full_name,
-            locals: vec![id],
-            params: 1,
-            returns: returns.id,
-            body: ir::Body::Primitive(ir::PrimitiveFn::ChoiceTag),
-        }));
-        let method = Method {
-            module: self.core,
-            function,
-        };
-        self.methods.entry(id).or_default().insert("tag", method);
-        let choice_trait = match self.modules[self.core].scope.get("Choice") {
-            Some(Binding::Trait(index)) => *index,
-            _ => panic!("the standard library should declare `Choice`"),
-        };
-        self.implementations.insert((id, choice_trait));
     }
 
     /// Resolves the fields of the group called `name` with `id`.
@@ -5635,7 +5590,6 @@ fn trait_names<'b>(
         TypeName::Generic { args, .. } => {
             Box::new(args.iter().flat_map(move |arg| trait_names(arg, aliases)))
         }
-        TypeName::Member { ty, .. } => trait_names(ty, aliases),
     }
 }
 
@@ -10953,14 +10907,14 @@ primitive Float"
             }
 
             let a: ChoiceOption<Shape, Int> = Shape.square
-            let b: Shape.Tag = Shape.square.tag()
+            let b: ChoiceTag<Shape> = Shape.square.tag()
             let c: Shape = Shape.square(5)
-            let d: Shape.Tag = Shape.square(5).tag()
+            let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(5))
 
             let n: ChoiceOption<Shape, Void> = Shape.other
-            let o: Shape.Tag = Shape.other.tag()
+            let o: ChoiceTag<Shape> = Shape.other.tag()
             let p: Shape = Shape.other()
-            let q: Shape.Tag = Shape.other(Void.new()).tag()
+            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(Void.new()))
             ";
         assert_eq!(check_top(src), Ok(()));
     }
@@ -11089,7 +11043,7 @@ primitive Float"
             let b: ChoiceOption<Optional<Int>, Int> = Optional.some
             let c: Optional<Int> = Optional.none()
             let d: Optional<Int> = Optional<Int>.some(1)
-            let e: Optional<Int>.Tag = Optional<Int>.none.tag()
+            let e: ChoiceTag<Optional<Int>> = Optional<Int>.none.tag()
             "
         );
         assert_eq!(check_top(&src), Ok(()));
@@ -11114,11 +11068,11 @@ primitive Float"
             "
             {SHAPE}
             fn isEmpty(shape: Shape) -> Bool {{
-                return shape.tag() == Shape.empty.tag()
+                return ChoiceTag<Shape>.new(of: shape) == Shape.empty.tag()
             }}
 
             fn isNotEmpty(shape: Shape) -> Bool {{
-                return shape.tag() != Shape.empty.tag()
+                return Shape.empty.tag() != ChoiceTag.new(of: shape)
             }}
             "
         );
@@ -11132,8 +11086,8 @@ primitive Float"
                 }}
                 let a = Shape.empty.tag() == Other.only.tag()
                 let b = Shape.empty.tag() == Shape.empty
-                let c: Shape.Tag = 0
-                let d: Shape.Tag = Other.only.tag()
+                let c: ChoiceTag<Shape> = 0
+                let d: ChoiceTag<Shape> = Other.only.tag()
                 "
             )),
             [
@@ -11171,22 +11125,67 @@ primitive Float"
     }
 
     #[test]
+    fn errors_in_impls_of_tags_are_reported() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                impl ChoiceTag {{
+                    fn broken() -> Int {{
+                        return true
+                    }}
+                }}
+                "
+            )),
+            ["`broken` must return `Int`, found `Bool`"]
+        );
+    }
+
+    #[test]
+    fn tags_and_options_can_have_impls() {
+        let src = format!(
+            "
+            {SHAPE}
+            impl ChoiceTag {{
+                fn isSame(as other: Self) -> Bool {{
+                    return self == other
+                }}
+
+                static fn from(value: Self.Base) -> ChoiceTag<Self.Base> {{
+                    return Self.new(of: value)
+                }}
+            }}
+
+            impl ChoiceOption {{
+                fn make(with value: Self.Value) -> Self.Base {{
+                    return self.call(input: value)
+                }}
+            }}
+
+            let a: Bool = Shape.empty.tag().isSame(as: ChoiceTag.from(value: Shape.empty()))
+            let b: Shape = Shape.circle.make(with: 1)
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
     fn tag_types_can_be_used_anywhere() {
         let src = "
-            alias ShapeTag = Shape.Tag
+            alias ShapeTag = ChoiceTag<Shape>
 
             group Holder {
-                let tag: Later.Tag
+                let tag: ChoiceTag<Later>
             }
 
             choice Nested {
-                tag: Nested.Tag
-                other: Later.Tag
+                tag: ChoiceTag<Nested>
+                other: ChoiceTag<Later>
             }
 
             choice Generic<T> {
                 value: T
-                tag: Generic<T>.Tag
+                tag: ChoiceTag<Generic<T>>
             }
 
             let a: ShapeTag = Shape.empty.tag()
@@ -11194,10 +11193,10 @@ primitive Float"
             fn f() {
                 choice Local {
                     only
-                    tag: Local.Tag
+                    tag: ChoiceTag<Local>
                 }
-                let tag: Local.Tag = Local.only.tag()
-                let b: Generic<Int>.Tag = Generic<Int>.value.tag()
+                let tag: ChoiceTag<Local> = Local.only.tag()
+                let b: ChoiceTag<Generic<Int>> = Generic<Int>.value.tag()
             }
 
             choice Shape {
@@ -11212,30 +11211,56 @@ primitive Float"
     }
 
     #[test]
-    fn only_choices_have_tag_types() {
+    fn rejects_wrong_values_for_tags() {
         assert_eq!(
             messages_top(&format!(
                 "
                 {SHAPE}
-                alias ID = Int.zero
-                let a: Int.Tag = 1
-                let b: Shape.Kind = 1
-                let c: Missing.Tag = 1
-                let d: missing.Tag = 1
-
-                group Holder<T> {{
-                    let tag: T.Tag
+                choice Other {{
+                    only
                 }}
+                let a = ChoiceTag<Shape>.new(of: Other.only())
+                let b = ChoiceTag<Shape>.new(Shape.empty())
+                let c = ChoiceTag<Shape>.new()
+                let d = ChoiceTag.new(of: Shape.empty())
+                let e = ChoiceTag<Shape> {{}}
                 "
             )),
             [
-                "`Int` has no type `zero`",
+                "argument `of` of `ChoiceTag<Shape>.new` expects `Shape`, found `Other`",
+                "argument to `ChoiceTag<Shape>.new` is missing the label `of`",
+                "`ChoiceTag<Shape>.new` takes 1 argument, found 0",
+                "the arguments of `ChoiceTag` can't be inferred here, so they must be given, as in `ChoiceTag<...>`",
+                "`ChoiceTag<Shape>` is a primitive, so it can only be created by the compiler, such as with a literal",
+            ]
+        );
+    }
+
+    #[test]
+    fn tags_and_options_are_only_for_choices() {
+        assert_eq!(
+            messages_top(
+                "
+                group Point {}
+                let a: ChoiceTag<Int> = 1
+                let b: ChoiceOption<Point, Int> = 1
+                let c = ChoiceTag<Int>.new(of: 1)
+                let d: ChoiceTag<Missing> = 1
+                alias Tag = ChoiceTag<Bool>
+
+                group Holder<T> {
+                    let tag: ChoiceTag<T>
+                }
+                "
+            ),
+            [
+                "`ChoiceTag` can only be used with a choice, found `Bool`",
                 // Generic types are checked before top-level values.
-                "`T` has no type `Tag`",
-                "`Int` has no type `Tag`",
-                "`Shape` has no type `Kind`",
+                "`ChoiceTag` can only be used with a choice, found `T`",
+                "`ChoiceTag` can only be used with a choice, found `Int`",
+                "`ChoiceOption` can only be used with a choice, found `Point`",
+                "`ChoiceTag` can only be used with a choice, found `Int`",
                 "unknown type `Missing`",
-                "unknown type `missing`",
             ]
         );
     }
@@ -11248,8 +11273,8 @@ primitive Float"
                     "/main",
                     "
                     use /shapes
-                    let a: Shape.Tag = Shape.empty.tag()
-                    let b: Shape.Tag = Shape.empty().tag()
+                    let a: ChoiceTag<Shape> = Shape.empty.tag()
+                    let b: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.empty())
                     ",
                 ),
                 ("/shapes", SHAPE),
@@ -11259,44 +11284,33 @@ primitive Float"
     }
 
     #[test]
-    fn choices_implement_choice_implicitly() {
-        // Methods are used on values, so an option can be called `tag`.
+    fn choices_have_no_reserved_names() {
         let src = "
             choice Shape {
                 tag: Int
+                Tag
             }
 
-            let a: Shape.Tag = Shape.tag.tag()
-            let b: Shape.Tag = Shape.tag(1).tag()
+            impl Shape {
+                fn tag() -> Int {
+                    return 1
+                }
+            }
+
+            trait Choice {}
+
+            let a: Int = Shape.tag(1).tag()
+            let b: ChoiceTag<Shape> = Shape.tag.tag()
             ";
         assert_eq!(check_top(src), Ok(()));
         assert_eq!(
             messages_top(&format!(
                 "
                 {SHAPE}
-                impl Shape {{
-                    fn tag() -> Int {{
-                        return 1
-                    }}
-                }}
+                let a = Shape.empty().tag()
                 "
             )),
-            ["`Shape` already has a method `tag`"]
-        );
-        assert_eq!(
-            messages_top(&format!(
-                "
-                {SHAPE}
-                impl Shape with Choice {{
-                    alias Tag = Int
-
-                    fn tag() -> Int {{
-                        return 1
-                    }}
-                }}
-                "
-            )),
-            ["`Shape` already has a method `tag`"]
+            ["`Shape` has no field or method `tag`"]
         );
     }
 
