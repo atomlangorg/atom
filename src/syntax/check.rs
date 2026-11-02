@@ -322,13 +322,6 @@ pub enum CheckError {
     },
     /// `.` was used after a module's name, where `::` was probably meant.
     ModuleNotValue { module: String, member: String },
-    /// A method or static function was called from a module that doesn't
-    /// import the module declaring it.
-    MemberNotImported {
-        ty: Type,
-        member: String,
-        module: String,
-    },
     /// A member was declared with the same name as another member of its
     /// type that it shares names with. Fields share names with methods, and
     /// options share names with static functions.
@@ -717,10 +710,6 @@ impl fmt::Display for CheckError {
             Self::ModuleNotValue { module, member } => write!(
                 f,
                 "`{module}` is a module, not a value, so use `{module}::{member}` to refer to a name in it"
-            ),
-            Self::MemberNotImported { ty, member, module } => write!(
-                f,
-                "`{ty}.{member}` is declared in `{module}`, which is not imported"
             ),
             Self::MemberRedeclared {
                 ty,
@@ -1185,16 +1174,8 @@ enum Member {
     /// The field's index in the order its group declares them, and its type,
     /// which is `None` if it's unknown.
     Field(usize, Option<Type>),
-    Method(Method),
-}
-
-/// A method or static function from an `impl`.
-#[derive(Debug, Clone, Copy)]
-struct Method {
-    /// The index in `Checker::modules` of the module whose `impl` declares it.
-    module: usize,
-    /// An index into `Checker::functions`.
-    function: usize,
+    /// A method, as an index into `Checker::functions`.
+    Method(usize),
 }
 
 /// The result of checking an expression.
@@ -1239,8 +1220,6 @@ enum Pending<'a> {
         /// types made from a generic type, whose `impl` is checked once on
         /// its own.
         quiet: bool,
-        /// The module of the trait, if it's a default implementation.
-        written_in: Option<usize>,
     },
 }
 
@@ -1319,13 +1298,12 @@ struct Checker<'a> {
     evaluated_never: bool,
     /// For each type `id`, its methods by name. Methods aren't names in any
     /// scope, and are only found through the type of the value they're called
-    /// on, in the modules that can see the module declaring them. They share
-    /// names with the type's fields.
-    methods: HashMap<usize, HashMap<&'a str, Method>>,
+    /// on, wherever they're declared. They share names with the type's fields.
+    methods: HashMap<usize, HashMap<&'a str, usize>>,
     /// For each type `id`, its static functions by name, which are found like
     /// methods but on the type itself. They have their own names, separate
     /// from the type's fields and methods.
-    statics: HashMap<usize, HashMap<&'a str, Method>>,
+    statics: HashMap<usize, HashMap<&'a str, usize>>,
     globals: Vec<Global<'a>>,
     aliases: Vec<Alias<'a>>,
     /// Indexes into `globals`, in the order their types were worked out, so
@@ -1349,10 +1327,6 @@ struct Checker<'a> {
     /// `id`s. Tuples are the same type only if all of those are the same.
     tuple_ids: HashMap<Vec<TupleKey>, usize>,
     errors: Vec<ModuleError>,
-    /// The module holding the code being checked, if that's not `module`, as
-    /// a trait's default implementation is checked as if it's in an `impl`.
-    /// Errors are reported where the code is written.
-    written_in: Option<usize>,
 }
 
 impl<'a> Checker<'a> {
@@ -1388,7 +1362,7 @@ impl<'a> Checker<'a> {
     }
 
     fn error(&mut self, span: Span, error: CheckError) {
-        self.error_in(self.written_in.unwrap_or(self.module), span, error);
+        self.error_in(self.module, span, error);
     }
 
     fn error_in(&mut self, module: usize, span: Span, error: CheckError) {
@@ -1498,7 +1472,6 @@ impl<'a> Checker<'a> {
                                 kind: FnKind::Function,
                                 aliases: None,
                                 quiet: false,
-                                written_in: None,
                             },
                         ));
                     }
@@ -1527,8 +1500,7 @@ impl<'a> Checker<'a> {
                             functions,
                             false,
                         );
-                        self.pending
-                            .extend(declared.into_iter().map(|pending| (module, pending)));
+                        self.pending.extend(declared);
                     }
                     StmtKind::Decl {
                         name, ty, value, ..
@@ -1585,12 +1557,9 @@ impl<'a> Checker<'a> {
                         kind,
                         aliases,
                         quiet,
-                        written_in,
                     } => {
                         let errors = self.errors.len();
-                        self.written_in = written_in;
                         self.fn_body(index, name, span, body, kind, aliases);
-                        self.written_in = None;
                         if quiet {
                             self.quieten(errors);
                         }
@@ -1601,7 +1570,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Declares the functions of `impl ty`, whose type is `self_ty`, `with`
-    /// a trait if given, returning their bodies to check. Its errors are
+    /// a trait if given, returning their bodies to check, with the modules
+    /// they're written in. Its errors are
     /// reported unless it's `quiet`, which it is for the types made from a
     /// generic type, whose `impl` is checked once on its own.
     fn declare_impl(
@@ -1612,7 +1582,7 @@ impl<'a> Checker<'a> {
         aliases: &'a [ImplAlias],
         functions: &'a [ImplFunction],
         quiet: bool,
-    ) -> Vec<Pending<'a>> {
+    ) -> Vec<(usize, Pending<'a>)> {
         let errors = self.errors.len();
         // A type made from a generic type is named with its arguments, so
         // each one's functions have their own names.
@@ -1658,7 +1628,7 @@ impl<'a> Checker<'a> {
                 self.define_primitive_fn(index, &name, function.span, kind);
                 continue;
             }
-            pending.push(Pending::Fn {
+            let body = Pending::Fn {
                 index,
                 name: &function.name,
                 span: function.span,
@@ -1666,8 +1636,8 @@ impl<'a> Checker<'a> {
                 kind,
                 aliases: impl_aliases,
                 quiet,
-                written_in: None,
-            });
+            };
+            pending.push((self.module, body));
         }
         self.impl_type = outer_impl_type;
         self.current_impl_aliases = None;
@@ -1826,12 +1796,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// The modules whose top-level names the current module can use: itself,
-    /// then its imports.
-    fn visible_modules(&self) -> impl Iterator<Item = usize> + '_ {
-        iter::once(self.module).chain(self.modules[self.module].imports.iter().copied())
-    }
-
     /// Finds the module that the qualifier `name` refers to. It must be the
     /// current module or one it imports.
     fn resolve_qualifier(&self, name: &str) -> Result<usize, CheckError> {
@@ -1862,9 +1826,10 @@ impl<'a> Checker<'a> {
     /// even if it's a value that a function can't use.
     fn is_declared(&self, name: &str) -> bool {
         self.scopes.iter().any(|scope| scope.contains_key(name))
-            || self
-                .visible_modules()
-                .any(|module| self.modules[module].scope.contains_key(name))
+            || self.modules[self.module]
+                .qualifiers
+                .iter()
+                .any(|&(_, module)| self.modules[module].scope.contains_key(name))
     }
 
     /// A generic type from `stdlib/core`, such as `Fn`, as an index into
@@ -2439,8 +2404,7 @@ impl<'a> Checker<'a> {
                     quiet,
                 )
             });
-            self.pending
-                .extend(declared.into_iter().map(|pending| (module, pending)));
+            self.pending.extend(declared);
         }
     }
 
@@ -2461,9 +2425,7 @@ impl<'a> Checker<'a> {
         let impl_type = self.impl_type.take();
         let impl_aliases = self.current_impl_aliases.take();
         let type_params = std::mem::replace(&mut self.type_params, type_params);
-        let written_in = self.written_in.take();
         let checked = check(self);
-        self.written_in = written_in;
         self.module = module;
         self.scopes = scopes;
         self.fn_scope_start = fn_scope_start;
@@ -2633,9 +2595,8 @@ impl<'a> Checker<'a> {
         let (name, params, ret) = method;
         let index = self.signature(params, ret, full_name);
         if let Some(self_ty) = self_ty {
-            // Methods must be unique across every module, even ones that
-            // can't see each other, since a call can't say which module's
-            // method it means.
+            // Methods must be unique across every module, since a call can't
+            // say which module's method it means.
             let existing = if is_static {
                 match (
                     self.option(self_ty, name),
@@ -2662,16 +2623,12 @@ impl<'a> Checker<'a> {
                     },
                 );
             } else {
-                let found = Method {
-                    module: self.module,
-                    function: index,
-                };
                 let table = if is_static {
                     &mut self.statics
                 } else {
                     &mut self.methods
                 };
-                table.entry(self_ty.id).or_default().insert(name, found);
+                table.entry(self_ty.id).or_default().insert(name, index);
             }
         }
         index
@@ -3020,10 +2977,11 @@ impl<'a> Checker<'a> {
 
     /// Declares the default implementations that `impl ty with` the trait at
     /// `trait_index` in `traits` uses, since it doesn't implement them in
-    /// `functions`, returning their bodies to check. They're checked as if
-    /// they were written in the `impl`, so `Self`, which is `self_ty`, and
-    /// the aliases, at `aliases` in `impl_aliases`, are the `impl`'s, and
-    /// they can be used like its own functions.
+    /// `functions`, returning their bodies to check, with the trait's module.
+    /// Names mean what they do where they're written, so they're checked in
+    /// that module, but `Self`, which is `self_ty`, and the aliases, at
+    /// `aliases` in `impl_aliases`, are the `impl`'s, and they can be used like
+    /// its own functions.
     fn declare_defaults(
         &mut self,
         type_name: &str,
@@ -3032,7 +2990,7 @@ impl<'a> Checker<'a> {
         functions: &'a [ImplFunction],
         aliases: Option<usize>,
         quiet: bool,
-    ) -> Vec<Pending<'a>> {
+    ) -> Vec<(usize, Pending<'a>)> {
         let is_implemented = |declared: &TraitFunction| {
             functions
                 .iter()
@@ -3047,28 +3005,31 @@ impl<'a> Checker<'a> {
 
         let outer_impl_type = self.impl_type.replace(self_ty.cloned());
         self.current_impl_aliases = aliases;
-        let written_in = self.traits[trait_index].module;
-        let outer_written_in = self.written_in.replace(written_in);
+        let trait_module = self.traits[trait_index].module;
         let mut pending = vec![];
         for declared in declared.iter().filter(|declared| !is_implemented(declared)) {
             let Some(body) = &declared.body else {
                 continue;
             };
             let name = format!("{type_name}.{}", declared.name);
+            // Named after the `impl`, since each one has its own copy.
+            let full_name = self.full_name(&name);
+            let impl_module = std::mem::replace(&mut self.module, trait_module);
             let index = self.declare_method(
                 self_ty,
                 (&declared.name, &declared.params, &declared.ret),
                 declared.span,
                 declared.is_static,
-                self.full_name(&name),
+                full_name,
             );
+            self.module = impl_module;
             let kind = if declared.is_static {
                 FnKind::Static(self_ty.cloned())
             } else {
                 FnKind::Method(self_ty.cloned())
             };
             if complete {
-                pending.push(Pending::Fn {
+                let body = Pending::Fn {
                     index,
                     name: &declared.name,
                     span: declared.span,
@@ -3076,11 +3037,10 @@ impl<'a> Checker<'a> {
                     kind,
                     aliases,
                     quiet,
-                    written_in: Some(written_in),
-                });
+                };
+                pending.push((trait_module, body));
             }
         }
-        self.written_in = outer_written_in;
         self.impl_type = outer_impl_type;
         self.current_impl_aliases = None;
         pending
@@ -4466,8 +4426,7 @@ impl<'a> Checker<'a> {
     /// Finds `method` of `ty`, as an index into `functions`, which the
     /// compiler calls for some syntax, such as an operator. `ty` must
     /// implement the standard library's trait called `trait_name`, or
-    /// `not_implemented` is reported at `span`. Like calling the method
-    /// directly, the module implementing it must be imported.
+    /// `not_implemented` is reported at `span`.
     fn trait_method(
         &mut self,
         trait_name: &str,
@@ -4489,8 +4448,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        self.check_imported(ty, method, &found, span)
-            .then_some(found.function)
+        Some(found)
     }
 
     /// Checks `lhs & rhs`, `lhs | rhs`, `lhs == rhs` or `lhs != rhs`, which
@@ -4802,7 +4760,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Finds the static function of `ty` called `name`.
-    fn static_function(&self, ty: &Type, name: &str) -> Option<Method> {
+    fn static_function(&self, ty: &Type, name: &str) -> Option<usize> {
         self.statics
             .get(&ty.id)
             .and_then(|statics| statics.get(name))
@@ -4915,8 +4873,7 @@ impl<'a> Checker<'a> {
             }
             Receiver::Type(ty) => match self.static_function(&ty, field) {
                 Some(found) => {
-                    self.check_imported(&ty, field, &found, span);
-                    return self.function_value(found.function, span);
+                    return self.function_value(found, span);
                 }
                 None => self.no_static_function(ty, field),
             },
@@ -4955,7 +4912,7 @@ impl<'a> Checker<'a> {
             .as_ref()
             .filter(|ty| self.implementations.contains(&(ty.id, call_trait)))
             .and_then(|ty| match self.member(ty, "call") {
-                Some(Member::Method(found)) => self.functions[found.function].params.first(),
+                Some(Member::Method(found)) => self.functions[found].params.first(),
                 _ => None,
             })
             .and_then(|param| param.ty.clone());
@@ -5184,16 +5141,10 @@ impl<'a> Checker<'a> {
         let Some(function) = self.static_function(&ty, method) else {
             return Typed::UNKNOWN;
         };
-        if !self.check_imported(&ty, method, &function, span) {
-            return Typed::UNKNOWN;
-        }
-        let signature = self.functions[function.function].clone();
+        let signature = self.functions[function].clone();
         Typed {
             ty: self.check_args(full_name, args, found, signature, span),
-            expr: lowered.map(|args| ir::Expr::Call {
-                function: function.function,
-                args,
-            }),
+            expr: lowered.map(|args| ir::Expr::Call { function, args }),
         }
     }
 
@@ -5214,11 +5165,7 @@ impl<'a> Checker<'a> {
             return value_ty.filter(|_| index == 0);
         }
         let function = self.static_function(&ty, method)?;
-        self.functions[function.function]
-            .params
-            .get(index)?
-            .ty
-            .clone()
+        self.functions[function].params.get(index)?.ty.clone()
     }
 
     /// Works out which of the arguments of the generic type at `template` in
@@ -5303,24 +5250,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Reports an error unless `found`, the method or static function of `ty`
-    /// called `member`, can be used here. Like functions, they can only be used
-    /// from their own module or one that imports it. Returns whether it can.
-    fn check_imported(&mut self, ty: &Type, member: &str, found: &Method, span: Span) -> bool {
-        let imported = self.visible_modules().any(|module| module == found.module);
-        if !imported {
-            self.error(
-                span,
-                CheckError::MemberNotImported {
-                    ty: ty.clone(),
-                    member: member.to_string(),
-                    module: self.modules[found.module].display.clone(),
-                },
-            );
-        }
-        imported
-    }
-
     /// Checks a call to a method on a value, a static function on a type, or
     /// the creation of an option of a choice, returning its return type, or
     /// `None` if it can't be determined, along with what it compiles to.
@@ -5360,10 +5289,9 @@ impl<'a> Checker<'a> {
             },
             // So is a static function, like any other function.
             Some(Receiver::Type(ty)) if let Some(found) = self.static_function(&ty, method) => {
-                self.check_imported(&ty, method, &found, span);
-                let fn_type = self.function_type(found.function, span);
+                let fn_type = self.function_type(found, span);
                 let name = format!("{ty}.{method}");
-                let callee = Callee::Function(found.function);
+                let callee = Callee::Function(found);
                 return self.call_value(fn_type, callee, &name, args, span);
             }
             // An option is called directly, since it's known which one it is.
@@ -5377,7 +5305,7 @@ impl<'a> Checker<'a> {
         };
         let params = match &receiver {
             Some(Receiver::Value(ty, _)) => match self.member(ty, method) {
-                Some(Member::Method(found)) => self.param_types(found.function),
+                Some(Member::Method(found)) => self.param_types(found),
                 _ => vec![],
             },
             Some(Receiver::Type(_)) | None => vec![],
@@ -5403,11 +5331,7 @@ impl<'a> Checker<'a> {
                 return Typed::UNKNOWN;
             }
         };
-        if !self.check_imported(&ty, method, &found_method, span) {
-            return Typed::UNKNOWN;
-        }
-
-        let signature = self.functions[found_method.function].clone();
+        let signature = self.functions[found_method].clone();
         let returns = self.check_args(format!("{ty}.{method}"), args, found, signature, span);
 
         // A method's receiver is its first argument.
@@ -5417,7 +5341,7 @@ impl<'a> Checker<'a> {
         Typed {
             ty: returns,
             expr: lowered_args.map(|args| ir::Expr::Call {
-                function: found_method.function,
+                function: found_method,
                 args,
             }),
         }
@@ -6215,7 +6139,7 @@ mod tests {
     }
 
     #[test]
-    fn boolean_operators_need_their_implementation_imported() {
+    fn boolean_operators_do_not_need_their_implementation_imported() {
         let flags = "
             group Flags {
                 let bits: Int
@@ -6233,19 +6157,15 @@ mod tests {
             }
             ";
         assert_eq!(
-            file_messages(&[
+            check_files(&[
                 ("/flags", flags),
                 ("/and", and),
                 (
                     "/main",
                     "use /flags\nfn f(a: Flags) -> Bool {\nreturn a & a\n}"
                 ),
-                (
-                    "/other",
-                    "use /flags\nuse /and\nfn f(a: Flags) -> Bool {\nreturn a & a\n}"
-                ),
             ]),
-            ["/main: `Flags.and` is declared in `/and`, which is not imported"]
+            Ok(())
         );
     }
 
@@ -9431,7 +9351,7 @@ mod tests {
     }
 
     #[test]
-    fn methods_need_their_module_imported() {
+    fn methods_do_not_need_their_module_imported() {
         let score = "
             use /user
             impl User {
@@ -9441,7 +9361,7 @@ mod tests {
             }
         ";
         assert_eq!(
-            file_messages(&[
+            check_files(&[
                 (
                     "/main",
                     "
@@ -9458,44 +9378,15 @@ mod tests {
                 ),
                 ("/score", score),
             ]),
-            [
-                "/main: `User.score` is declared in `/score`, which is not imported",
-                "/main: `User.score` is declared in `/score`, which is not imported",
-            ]
-        );
-        // Imports aren't transitive, even if the type's module imports it.
-        assert_eq!(
-            file_messages(&[
-                ("/main", "use /user\nlet a = User.new().score()"),
-                (
-                    "/user",
-                    "use /score\ngroup User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}\nlet b = User.new().score()"
-                ),
-                ("/score", score),
-            ]),
-            ["/main: `User.score` is declared in `/score`, which is not imported"]
-        );
-        // A method's own module can use it, even without importing anything.
-        assert_eq!(
-            check_files(&[
-                (
-                    "/user",
-                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}"
-                ),
-                ("/score", &format!("{score}\nlet c = User.new().score()")),
-            ]),
             Ok(())
         );
     }
 
     #[test]
-    fn methods_on_std_types_need_their_module_imported() {
-        // The type comes from the standard library, which is always imported,
-        // but the method comes from `/ints`, which must be imported.
+    fn methods_on_std_types_do_not_need_their_module_imported() {
         assert_eq!(
-            file_messages(&[
-                ("/main", "use /ints\nlet a = 1.doubled()"),
-                ("/other", "let b = 1.doubled()"),
+            check_files(&[
+                ("/main", "let a = 1.doubled()"),
                 (
                     "/ints",
                     "
@@ -9507,7 +9398,24 @@ mod tests {
                     ",
                 ),
             ]),
-            ["/other: `Int.doubled` is declared in `/ints`, which is not imported"]
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn methods_are_unique_across_modules_that_do_not_import_each_other() {
+        let user = "group User {}";
+        let score = "
+            use /user
+            impl User {
+                fn score() -> Int {
+                    return 1
+                }
+            }
+        ";
+        assert_eq!(
+            file_messages(&[("/user", user), ("/a", score), ("/b", score)]),
+            ["/b: `User` already has a method `score`"]
         );
     }
 
@@ -10074,7 +9982,7 @@ mod tests {
     }
 
     #[test]
-    fn static_functions_need_their_module_imported() {
+    fn static_functions_do_not_need_their_module_imported() {
         let ints = "
             impl Int {
                 static fn zero() -> Int {
@@ -10083,12 +9991,8 @@ mod tests {
             }
         ";
         assert_eq!(
-            file_messages(&[
-                ("/main", "use /ints\nlet a = Int.zero()"),
-                ("/other", "let b = Int.zero()"),
-                ("/ints", ints),
-            ]),
-            ["/other: `Int.zero` is declared in `/ints`, which is not imported"]
+            check_files(&[("/main", "let a = Int.zero()"), ("/ints", ints)]),
+            Ok(())
         );
     }
 
@@ -10706,6 +10610,161 @@ mod tests {
                 "trait `Describe` declares this function as `fn doubled() -> Int`",
                 "`impl Void with Describe` is missing `fn size() -> Int`",
             ]
+        );
+    }
+
+    /// `/main`, with a `User` that `impl`s `Greet` from `/greet`, and `extra`.
+    fn main_with_greet(extra: &str) -> String {
+        format!(
+            "
+            use /greet
+            group User {{}}
+            impl User with Greet {{}}
+            {extra}
+            "
+        )
+    }
+
+    #[test]
+    fn default_trait_functions_use_their_own_module_s_names() {
+        let greet = "
+            trait Greet {
+                fn greet() -> Int {
+                    return helper()
+                }
+            }
+            fn helper() -> Int {
+                return 1
+            }
+            ";
+        assert_eq!(
+            check_files(&[("/greet", greet), ("/main", &main_with_greet(""))]),
+            Ok(())
+        );
+        // A name in the `impl`'s module doesn't take its place.
+        let helper = "
+            fn helper() -> Bool {
+                return true
+            }
+            ";
+        assert_eq!(
+            check_files(&[("/greet", greet), ("/main", &main_with_greet(helper))]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn default_trait_functions_use_their_own_module_s_imports() {
+        let greet = "
+            use /helpers
+            trait Greet {
+                fn greet() -> Count {
+                    return helper()
+                }
+            }
+            ";
+        let helpers = "
+            alias Count = Int
+            fn helper() -> Count {
+                return 1
+            }
+            ";
+        assert_eq!(
+            check_files(&[
+                ("/greet", greet),
+                ("/helpers", helpers),
+                ("/main", &main_with_greet("")),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn default_trait_functions_use_their_own_module_s_qualifiers() {
+        let greet = "
+            trait Greet {
+                fn greet() -> Int {
+                    return greet::helper()
+                }
+            }
+            fn helper() -> Int {
+                return 1
+            }
+            ";
+        let main = "
+            use /greet as renamed
+            group User {}
+            impl User with renamed::Greet {}
+            ";
+        assert_eq!(check_files(&[("/greet", greet), ("/main", main)]), Ok(()));
+    }
+
+    #[test]
+    fn default_trait_functions_can_not_use_names_from_the_impl_s_module() {
+        let greet = "
+            trait Greet {
+                fn greet() -> Int {
+                    return helper()
+                }
+            }
+            ";
+        let helper = "
+            fn helper() -> Int {
+                return 1
+            }
+            ";
+        assert_eq!(
+            file_messages(&[("/greet", greet), ("/main", &main_with_greet(helper))]),
+            ["/greet: `helper` is not declared"]
+        );
+    }
+
+    #[test]
+    fn default_trait_functions_can_call_methods_from_the_impl_s_module() {
+        let greet = "
+            trait Greet {
+                fn name() -> Int
+                fn greet() -> Int {
+                    return self.name() + self.extra()
+                }
+            }
+            ";
+        let main = "
+            use /greet
+            group User {}
+            impl User {
+                fn extra() -> Int {
+                    return 1
+                }
+            }
+            impl User with Greet {
+                fn name() -> Int {
+                    return 2
+                }
+            }
+            ";
+        // `extra` isn't part of `Greet`, but each `impl` checks its own copy,
+        // where `Self` is known.
+        assert_eq!(check_files(&[("/greet", greet), ("/main", main)]), Ok(()));
+    }
+
+    #[test]
+    fn default_trait_functions_can_only_construct_groups_from_their_own_module() {
+        let make = "
+            trait Make {
+                static fn make() -> Self {
+                    return Self {}
+                }
+            }
+            ";
+        let main = "
+            use /make
+            group User {}
+            impl User with Make {}
+            ";
+        assert_eq!(
+            file_messages(&[("/make", make), ("/main", main)]),
+            ["/make: `User` can only be constructed in `/main`, which declares it"]
         );
     }
 
@@ -12702,7 +12761,7 @@ primitive Float"
     }
 
     #[test]
-    fn static_functions_as_values_must_be_imported() {
+    fn static_functions_as_values_do_not_need_their_module_imported() {
         let ints = "
             impl Int {
                 static fn one() -> Int {
@@ -12715,10 +12774,7 @@ primitive Float"
                 return Int.one
             }
             ";
-        assert_eq!(
-            file_messages(&[("/ints", ints), ("/other", other)]),
-            ["/other: `Int.one` is declared in `/ints`, which is not imported"]
-        );
+        assert_eq!(check_files(&[("/ints", ints), ("/other", other)]), Ok(()));
     }
 
     #[test]
@@ -12971,8 +13027,8 @@ primitive Float"
     }
 
     #[test]
-    fn inferred_static_functions_must_be_imported() {
-        let messages = check_files(&[
+    fn inferred_static_functions_do_not_need_their_module_imported() {
+        let checked = check_files(&[
             (
                 "/main",
                 "
@@ -13007,16 +13063,7 @@ primitive Float"
                 ",
             ),
         ]);
-        let messages: Vec<_> = messages
-            .err()
-            .into_iter()
-            .flatten()
-            .map(|err| err.error.to_string())
-            .collect();
-        assert_eq!(
-            messages,
-            ["`Box<Int>.extra` is declared in `/extra`, which is not imported"]
-        );
+        assert_eq!(checked, Ok(()));
     }
 
     #[test]

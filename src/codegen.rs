@@ -1406,6 +1406,111 @@ mod tests {
     }
 
     #[test]
+    fn default_trait_functions_call_names_from_their_own_module() {
+        let files = [
+            (
+                "/main",
+                "
+                use /greet
+
+                group User {}
+
+                impl User {
+                    static fn new() -> User {
+                        return User {}
+                    }
+                }
+
+                impl User with Greet {}
+
+                fn helper() -> Int {
+                    return 1
+                }
+
+                fn main() -> Int {
+                    return User.new().greet() + helper()
+                }
+                ",
+            ),
+            (
+                "/greet",
+                "
+                use /helpers
+
+                trait Greet {
+                    fn greet() -> Int {
+                        return helper()
+                    }
+                }
+                ",
+            ),
+            (
+                "/helpers",
+                "
+                fn helper() -> Int {
+                    return 20
+                }
+                ",
+            ),
+        ];
+        assert_eq!(run_files(&files), 21);
+    }
+
+    #[test]
+    fn default_trait_functions_are_separate_for_each_impl() {
+        let thing = |value: i32| {
+            format!(
+                "
+                use /greet
+
+                group Thing {{}}
+
+                impl Thing {{
+                    static fn new() -> Thing {{
+                        return Thing {{}}
+                    }}
+                }}
+
+                impl Thing with Greet {{
+                    fn value() -> Int {{
+                        return {value}
+                    }}
+                }}
+                "
+            )
+        };
+        let (a, b) = (thing(1), thing(2));
+        let files = [
+            (
+                "/main",
+                "
+                use /a
+                use /b
+
+                fn main() -> Int {
+                    return a::Thing.new().greet() * 10 + b::Thing.new().greet()
+                }
+                ",
+            ),
+            (
+                "/greet",
+                "
+                trait Greet {
+                    fn value() -> Int
+
+                    fn greet() -> Int {
+                        return self.value()
+                    }
+                }
+                ",
+            ),
+            ("/a", a.as_str()),
+            ("/b", b.as_str()),
+        ];
+        assert_eq!(run_files(&files), 12);
+    }
+
+    #[test]
     fn qualifies_names_by_module_name_and_alias() {
         let names = [
             (
