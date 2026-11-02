@@ -839,22 +839,41 @@ where
     // `/dir/`, `./dir/`, `stdlib/`, `./` or `/`, is every module in a directory
     // and its subdirectories.
     let import = start
-        .then(ident.then(alias.clone()).or_not())
-        .map(|((path, mut segments), module)| match module {
-            Some((name, alias)) => {
+        .then(ident.or_not())
+        .map(|((path, mut segments), name)| match name {
+            Some(name) => {
                 segments.push(name);
                 Import::Module {
                     path: path(segments),
-                    alias,
+                    alias: None,
                 }
             }
             None => Import::Directory(path(segments)),
         })
-        .or(ident.then(alias).map(|(name, alias)| Import::Module {
+        .or(ident.map(|name| Import::Module {
             path: ModulePath::Named(name),
-            alias,
+            alias: None,
         }))
-        .labelled("module path");
+        // Spaces and comments aren't tokens, so the only sign of one inside a
+        // path is that the path's source is longer than the path.
+        .validate(|import, e, emitter| {
+            let span: SimpleSpan = e.span();
+            if span.into_range().len() > import.to_string().len() {
+                emitter.emit(Rich::custom(
+                    span,
+                    "module paths can't contain spaces or comments",
+                ));
+            }
+            import
+        })
+        .labelled("module path")
+        .then(alias)
+        // A directory never has an alias, since any name after its final slash
+        // is part of the path instead.
+        .map(|(import, alias)| match import {
+            Import::Module { path, .. } => Import::Module { path, alias },
+            directory => directory,
+        });
     let use_ = just(Token::Use)
         .ignore_then(import)
         .map_with(|import, e| Stmt {
@@ -4812,24 +4831,87 @@ mod tests {
     }
 
     #[test]
+    fn rejects_spaces_and_comments_in_module_paths() {
+        for src in [
+            "use . /a",
+            "use ./ a",
+            "use / a",
+            "use /a /b",
+            "use /a/ b",
+            "use a /b",
+            "use a/ b",
+            "use ./a/ b",
+            "use ./a /b",
+            "use ./a\t/b",
+            "use ./users /",
+            "use a /",
+            "use . /",
+            "use ./users/ as",
+            "use ./users/ as x",
+            "use ./ as x",
+            "use / as x",
+            "use /a/ b as c",
+            "use /a/*c*//b",
+            "use /a/*c*//",
+        ] {
+            let errs = super::parse(src).expect_err(src);
+            assert!(
+                errs.iter().any(|err| err
+                    .to_string()
+                    .contains("module paths can't contain spaces or comments")),
+                "{src:?}: {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spaces_are_allowed_around_module_paths() {
+        let relative = |segments: &[&str]| {
+            ModulePath::Relative(segments.iter().map(|s| s.to_string()).collect())
+        };
+        let src = "  use   ./a/b   as   c  \n\tuse\t./d/\t";
+        assert_eq!(
+            parse(src),
+            Ok(vec![
+                stmt_node(StmtKind::Use(Import::Module {
+                    path: relative(&["a", "b"]),
+                    alias: Some("c".to_string()),
+                })),
+                stmt_node(StmtKind::Use(Import::Directory(relative(&["d"])))),
+            ])
+        );
+        // The real spans are what show whether a path contains spaces.
+        assert!(super::parse(src).is_ok());
+    }
+
+    #[test]
+    fn division_can_have_spaces() {
+        assert_eq!(parse_expr("a / b"), *bin(var("a"), BinOp::Div, var("b")));
+    }
+
+    #[test]
     fn comments_can_follow_any_part_of_a_use() {
-        let module = |path: &[&str], alias: Option<&str>| {
+        let module = |alias: Option<&str>| {
             stmt_node(StmtKind::Use(Import::Module {
-                path: ModulePath::Relative(path.iter().map(|s| s.to_string()).collect()),
+                path: ModulePath::Relative(vec!["a".to_string()]),
                 alias: alias.map(str::to_string),
             }))
         };
-        assert_eq!(parse("use ./a/* note */"), Ok(vec![module(&["a"], None)]));
-        assert_eq!(parse("use /* note */ ./a"), Ok(vec![module(&["a"], None)]));
-        assert_eq!(
-            parse("use ./a as b/* note */"),
-            Ok(vec![module(&["a"], Some("b"))])
-        );
         let users = stmt_node(StmtKind::Use(Import::Directory(ModulePath::Relative(
             vec!["users".to_string()],
         ))));
-        assert_eq!(parse("use ./users/ /* note */"), Ok(vec![users.clone()]));
-        assert_eq!(parse("use ./users/ // note"), Ok(vec![users]));
+        for (src, expected) in [
+            ("use ./a/* note */", module(None)),
+            ("use /* note */ ./a", module(None)),
+            ("use ./a as b/* note */", module(Some("b"))),
+            ("use ./a /* note */ as b", module(Some("b"))),
+            ("use ./users/ /* note */", users.clone()),
+            ("use ./users/ // note", users.clone()),
+        ] {
+            assert_eq!(parse(src), Ok(vec![expected]), "{src:?}");
+            // The real spans are what show whether a path contains comments.
+            assert!(super::parse(src).is_ok(), "{src:?}");
+        }
     }
 
     #[test]
@@ -4848,6 +4930,7 @@ mod tests {
         for src in [
             "use *",
             "use ./users*",
+            "use ./*c*/a",
             // `/*` always starts a comment, which is never closed here.
             "use ./users/*",
             "use ./*",
