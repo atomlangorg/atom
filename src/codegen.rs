@@ -1679,6 +1679,61 @@ mod tests {
     }
 
     #[test]
+    fn generic_arguments_inferred_from_calls_compile() {
+        let src = "
+            choice Optional<T> {
+                none
+                some: T
+            }
+
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+
+                static fn holding(_ value: Self.T, fallback: Optional<Self.T>) -> Self {
+                    match fallback {
+                        Optional.some(let found) => {
+                            return Self { value: found }
+                        }
+                        Optional.none => {
+                            return Self { value: value }
+                        }
+                    }
+                }
+            }
+
+            fn read(optional: Optional<Int>) -> Int {
+                match optional {
+                    Optional.some(let found) => {
+                        return found
+                    }
+                    Optional.none => {
+                        return 0
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let a = Box.of(1).value
+                let b = Box.of(Box.of(20)).value.value
+                let c = read(optional: Optional.some(300))
+                let d = Box.holding(0, fallback: Optional.some(4000)).value
+                let shape = Optional.some(true)
+                if ChoiceTag.new(of: shape) == Optional<Bool>.some.tag() {
+                    return a + b + c + d
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 4321);
+    }
+
+    #[test]
     fn generic_choices_have_options_and_tags() {
         let src = "
             choice Optional<T> {

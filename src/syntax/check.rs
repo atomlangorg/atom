@@ -978,6 +978,19 @@ enum Ctor {
     Option(usize),
 }
 
+/// `value`, the checked value for the option at `option` of the choice with
+/// id `choice`, as the choice.
+fn chosen(choice: usize, option: usize, value: Typed) -> Typed {
+    Typed {
+        ty: value.ty,
+        expr: value.expr.map(|value| ir::Expr::Choose {
+            choice,
+            option,
+            value: Box::new(value),
+        }),
+    }
+}
+
 /// The names of the values that `pattern` binds, in order.
 fn bindings(pattern: &Pattern) -> Vec<(&str, Span)> {
     match &pattern.kind {
@@ -994,6 +1007,17 @@ fn bindings(pattern: &Pattern) -> Vec<(&str, Span)> {
         | PatternKind::Bool(_)
         | PatternKind::Option { .. } => vec![],
     }
+}
+
+/// The parameters of a static function or option of a generic type, as they're
+/// written, for working out the type's arguments from a call's.
+struct DeclaredParams<'a> {
+    /// The index in `Checker::modules` of the module they're written in.
+    module: usize,
+    types: Vec<&'a TypeName>,
+    /// Whether they're in an `impl`, where a generic parameter is written
+    /// `Self.T`, rather than a choice's options, where it's written `T`.
+    in_impl: bool,
 }
 
 /// An `impl ty with trait_name`, whose functions are checked against the
@@ -2117,6 +2141,18 @@ impl<'a> Checker<'a> {
             })
             .collect();
         let args = args.into_iter().collect::<Option<Vec<_>>>()?;
+        self.named_instance(template, args, name, report)
+    }
+
+    /// The type made from the generic type called `name`, at `template` in
+    /// `templates`, with `args`, reporting errors if `report` is set.
+    fn named_instance(
+        &mut self,
+        template: usize,
+        args: Vec<Type>,
+        name: &Name,
+        report: bool,
+    ) -> Option<Type> {
         if self.is_only_for_choices(template) && !self.choice_options.contains_key(&args[0].id) {
             if report {
                 let error = CheckError::NotAChoice {
@@ -2128,6 +2164,14 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.instance(template, args, name.span, true)
+    }
+
+    /// Whether `ty` is made from the generic type at `template` in
+    /// `templates`.
+    fn is_made_from(&self, ty: &Type, template: usize) -> bool {
+        self.instances
+            .get(&ty.id)
+            .is_some_and(|(found, _)| *found == template)
     }
 
     /// Whether the generic type at `template` in `templates` has values only
@@ -2190,11 +2234,10 @@ impl<'a> Checker<'a> {
         if let TypeName::Named(name) = type_name
             && let Ok(Binding::Generic(template)) = self.lookup(name)
         {
-            let found = contexts.iter().flatten().find(|ty| {
-                self.instances
-                    .get(&ty.id)
-                    .is_some_and(|(found, _)| *found == template)
-            });
+            let found = contexts
+                .iter()
+                .flatten()
+                .find(|ty| self.is_made_from(ty, template));
             if found.is_none() && report {
                 self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
             }
@@ -4989,6 +5032,22 @@ impl<'a> Checker<'a> {
             };
         }
         let (found, lowered) = self.args(args, std::slice::from_ref(&value_ty));
+        self.checked_option_value(name, base, value_ty, args, found, lowered, span)
+    }
+
+    /// Checks `args`, which have the types `found` and compile to `lowered`,
+    /// as the value for an option, as `option_value` does.
+    #[allow(clippy::too_many_arguments)]
+    fn checked_option_value(
+        &mut self,
+        name: String,
+        base: Type,
+        value_ty: Option<Type>,
+        args: &[Arg],
+        found: Vec<Option<Type>>,
+        lowered: Option<Vec<ir::Expr>>,
+        span: Span,
+    ) -> Typed {
         let signature = Signature {
             name: name.clone(),
             params: vec![ParamSignature {
@@ -5004,6 +5063,182 @@ impl<'a> Checker<'a> {
             expr: lowered
                 .and_then(|args| <[_; 1]>::try_from(args).ok())
                 .map(|[value]| value),
+        }
+    }
+
+    /// The declared types of the parameters of the static function or option
+    /// called `method` of the generic type at `template` in `templates`, if
+    /// it has one.
+    fn declared_params(&self, template: usize, method: &str) -> Option<DeclaredParams<'a>> {
+        let Template { module, stmt, .. } = self.templates[template];
+        if let StmtKind::Choice { options, .. } = &stmt.kind
+            && let Some(option) = options.iter().find(|option| option.name == method)
+        {
+            return Some(DeclaredParams {
+                module,
+                types: vec![&option.ty],
+                in_impl: false,
+            });
+        }
+        self.templates[template]
+            .impls
+            .iter()
+            .find_map(|&(module, stmt)| {
+                let StmtKind::Impl { functions, .. } = &stmt.kind else {
+                    return None;
+                };
+                let found = functions
+                    .iter()
+                    .find(|found| found.is_static && found.function.name == method)?;
+                Some(DeclaredParams {
+                    module,
+                    types: found
+                        .function
+                        .params
+                        .iter()
+                        .map(|param| &param.ty)
+                        .collect(),
+                    in_impl: true,
+                })
+            })
+    }
+
+    /// Checks a call to the static function or option called `method` of the
+    /// generic type called `name`, at `template` in `templates`, working out
+    /// its arguments from the types of `args`, which are matched against
+    /// `declared`. Each of `args` is checked once, in order, so once every
+    /// argument of the type is known, the rest take their types from its
+    /// parameters, as in any other call.
+    fn inferred_call(
+        &mut self,
+        name: &Name,
+        template: usize,
+        method: &str,
+        declared: &DeclaredParams<'a>,
+        args: &[Arg],
+        span: Span,
+    ) -> Typed {
+        let mut inferred = vec![None; self.templates[template].params.len()];
+        let mut found = vec![];
+        let mut lowered = vec![];
+        for (index, arg) in args.iter().enumerate() {
+            let expected = self.param_once_inferred(template, method, &inferred, name, index);
+            let Typed { ty, expr } = self.expr_as(&arg.value, expected.as_ref());
+            if let (Some(param), Some(ty)) = (declared.types.get(index), &ty) {
+                self.infer_from(param, ty, template, declared, &mut inferred);
+            }
+            found.push(ty);
+            lowered.push(expr);
+        }
+        let lowered: Option<Vec<_>> = lowered.into_iter().collect();
+
+        let Some(inferred) = inferred.into_iter().collect() else {
+            // An unknown argument has been reported, and may be why.
+            if found.iter().all(Option::is_some) {
+                self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
+            }
+            return Typed::UNKNOWN;
+        };
+        let Some(ty) = self.named_instance(template, inferred, name, true) else {
+            return Typed::UNKNOWN;
+        };
+        let full_name = format!("{ty}.{method}");
+        if let Some((option, value_ty)) = self.option(&ty, method) {
+            let choice = ty.id;
+            let value =
+                self.checked_option_value(full_name, ty, value_ty, args, found, lowered, span);
+            return chosen(choice, option, value);
+        }
+        let Some(function) = self.static_function(&ty, method) else {
+            return Typed::UNKNOWN;
+        };
+        if !self.check_imported(&ty, method, &function, span) {
+            return Typed::UNKNOWN;
+        }
+        let signature = self.functions[function.function].clone();
+        Typed {
+            ty: self.check_args(full_name, args, found, signature, span),
+            expr: lowered.map(|args| ir::Expr::Call {
+                function: function.function,
+                args,
+            }),
+        }
+    }
+
+    /// The type of the parameter at `index` of the static function or option
+    /// called `method` of the generic type called `name`, once all of its
+    /// arguments have been `inferred`.
+    fn param_once_inferred(
+        &mut self,
+        template: usize,
+        method: &str,
+        inferred: &[Option<Type>],
+        name: &Name,
+        index: usize,
+    ) -> Option<Type> {
+        let args = inferred.iter().cloned().collect::<Option<Vec<_>>>()?;
+        let ty = self.named_instance(template, args, name, false)?;
+        if let Some((_, value_ty)) = self.option(&ty, method) {
+            return value_ty.filter(|_| index == 0);
+        }
+        let function = self.static_function(&ty, method)?;
+        self.functions[function.function]
+            .params
+            .get(index)?
+            .ty
+            .clone()
+    }
+
+    /// Works out which of the arguments of the generic type at `template` in
+    /// `templates` are known from a value of type `found` being given to a
+    /// parameter declared as `param`, adding them to `inferred`. The first
+    /// type found for one is kept, so any others are reported as mismatches.
+    fn infer_from(
+        &mut self,
+        param: &TypeName,
+        found: &Type,
+        template: usize,
+        declared: &DeclaredParams<'a>,
+        inferred: &mut [Option<Type>],
+    ) {
+        let params = self.templates[template].params;
+        let position = |name: &str| params.iter().position(|param| param == name);
+        let index = match param {
+            TypeName::SelfParam(param, _) => position(param),
+            TypeName::Named(name) if !declared.in_impl && name.module.is_none() => {
+                position(&name.name)
+            }
+            TypeName::Named(name) if name.is_self() && self.is_made_from(found, template) => {
+                let args = self.instances[&found.id].1.clone();
+                for (inferred, arg) in inferred.iter_mut().zip(args) {
+                    inferred.get_or_insert(arg);
+                }
+                None
+            }
+            TypeName::Named(_) => None,
+            TypeName::Tuple(elements) => {
+                let types = self.tuples.get(&found.id).cloned().unwrap_or_default();
+                for (element, ty) in elements.iter().zip(&types) {
+                    self.infer_from(&element.ty, &ty.ty, template, declared, inferred);
+                }
+                None
+            }
+            TypeName::Generic { name, args } => {
+                let binding =
+                    self.at_top_level(declared.module, None, |checker| checker.lookup(name));
+                if let Ok(Binding::Generic(generic)) = binding
+                    && self.is_made_from(found, generic)
+                {
+                    let found_args = self.instances[&found.id].1.clone();
+                    for (arg, found_arg) in args.iter().zip(&found_args) {
+                        self.infer_from(arg, found_arg, template, declared, inferred);
+                    }
+                }
+                None
+            }
+        };
+        if let Some(index) = index {
+            inferred[index].get_or_insert_with(|| found.clone());
         }
     }
 
@@ -5065,6 +5300,15 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<&Type>,
     ) -> Typed {
+        // A generic type's name can leave out its arguments if they're not
+        // known from `expected`, when they can be worked out from the call's.
+        if let ExprKind::Var(name) = &receiver.kind
+            && let Ok(Binding::Generic(template)) = self.lookup(name)
+            && !expected.is_some_and(|expected| self.is_made_from(expected, template))
+            && let Some(declared) = self.declared_params(template, method)
+        {
+            return self.inferred_call(name, template, method, &declared, args, span);
+        }
         // The receiver and arguments are checked first, so their errors come
         // before the call's. What's called is found in between, without
         // reporting errors, so the arguments can take their types from its
@@ -5094,15 +5338,8 @@ impl<'a> Checker<'a> {
             Some(Receiver::Type(ty)) if let Some((option, value_ty)) = self.option(&ty, method) => {
                 let choice = ty.id;
                 let name = format!("{ty}.{method}");
-                let Typed { ty, expr } = self.option_value(name, ty, value_ty, args, span);
-                return Typed {
-                    ty,
-                    expr: expr.map(|value| ir::Expr::Choose {
-                        choice,
-                        option,
-                        value: Box::new(value),
-                    }),
-                };
+                let value = self.option_value(name, ty, value_ty, args, span);
+                return chosen(choice, option, value);
             }
             receiver => receiver,
         };
@@ -11222,7 +11459,7 @@ primitive Float"
                 let a = ChoiceTag<Shape>.new(of: Other.only())
                 let b = ChoiceTag<Shape>.new(Shape.empty())
                 let c = ChoiceTag<Shape>.new()
-                let d = ChoiceTag.new(of: Shape.empty())
+                let d = ChoiceTag.new()
                 let e = ChoiceTag<Shape> {{}}
                 "
             )),
@@ -12273,6 +12510,220 @@ primitive Float"
         ";
 
     #[test]
+    fn generic_arguments_are_inferred_from_calls() {
+        let src = format!(
+            "
+            {GENERICS}
+            choice Shape {{
+                empty
+            }}
+
+            group Pair<A, B> {{
+                let first: A
+                let second: B
+            }}
+
+            impl Pair {{
+                static fn of(first: Self.A, second: Self.B) -> Self {{
+                    return Self {{ first: first, second: second }}
+                }}
+
+                static fn tupled(pair: (a: Self.A, b: Self.B)) -> Self {{
+                    return Self {{ first: pair.a, second: pair.b }}
+                }}
+
+                static fn copy(of other: Self) -> Self {{
+                    return other
+                }}
+            }}
+
+            impl Box {{
+                static fn unwrapping(_ boxed: Box<Self.T>) -> Self {{
+                    return boxed
+                }}
+
+                fn again() -> Box<Self.T> {{
+                    let same = Box.of(self.value)
+                    return same
+                }}
+            }}
+
+            choice Nested<T> {{
+                boxed: Box<T>
+                pair: (a: T, b: Bool)
+            }}
+
+            let a: Box<Int> = Box.of(1)
+            let b: Bool = Box.of(true).get()
+            let c: Optional<Int> = Optional<Int>.none()
+            let d: Int = Box.of(Box.of(1)).get().get()
+            let e: Optional<Bool> = Optional.some(true)
+            let f = Optional.some(1)
+            let g: Optional<Int> = f
+            let h: Pair<Int, Bool> = Pair.of(first: 1, second: true)
+            let i: Pair<Int, Bool> = Pair.tupled(pair: (a: 1, b: true))
+            let j: Box<Int> = Box.unwrapping(Box.of(1))
+            let k: Pair<Int, Bool> = Pair.copy(of: h)
+            let l: Nested<Int> = Nested.boxed(Box.of(1))
+            let m: Nested<Int> = Nested.pair((a: 1, b: true))
+            let n: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.empty())
+            let o = ChoiceTag.new(of: Shape.empty()) == Shape.empty.tag()
+
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn inferred_arguments_take_types_from_those_already_known() {
+        let src = "
+            choice Optional<T> {
+                none
+                some: T
+            }
+
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn with(value: Self.T, fallback: Optional<Self.T>) -> Self {
+                    return Self { value: value }
+                }
+            }
+
+            fn f() {
+                let small: IntU8 = 1
+                let a: Box<IntU8> = Box.with(value: small, fallback: Optional.none())
+                let b: Box<IntU8> = Box.with(value: small, fallback: Optional.some(1))
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn rejects_calls_whose_generic_arguments_cannot_be_inferred() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {GENERICS}
+                group Pair<A, B> {{}}
+
+                impl Pair {{
+                    static fn left(_ value: Self.A) -> Self {{
+                        return Self {{}}
+                    }}
+
+                    static fn same(first: Self.A, second: Self.A, other: Self.B) -> Self {{
+                        return Self {{}}
+                    }}
+
+                    static fn optional(first: Self.A, second: Optional<Self.A>, other: Self.B) -> Self {{
+                        return Self {{}}
+                    }}
+                }}
+
+                impl Box {{
+                    static fn plain(_ value: Int) -> Self {{
+                        return Box.plain(value)
+                    }}
+                }}
+
+                choice Shape {{
+                    empty
+                }}
+
+                fn f() {{
+                    let a = Optional.none()
+                    let b = Optional.none(Void.new())
+                    let c = Box.of()
+                    let d = Pair.left(1)
+                    let e = Box.plain(1)
+                    let g = Box.of(missing)
+                    let h = Box.of(1, 2)
+                    let i = Box.of(value: 1)
+                    let j = Pair.same(first: 1, second: true, other: 1)
+                    let k: Box<Bool> = Box.of(1)
+                    let l: Int = Box.of(1)
+                    let m = Box.of(true) == 1
+                    let n = ChoiceTag.new(of: 1)
+                    let o = Box.missing(1)
+                    // Arguments only take types from a generic type once all
+                    // of its arguments are known, which needs `other` here.
+                    let p = Pair.optional(first: 1, second: Optional.none(), other: true)
+                }}
+                "
+            )),
+            [
+                "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
+                "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
+                "the arguments of `Box` can't be inferred here, so they must be given, as in `Box<...>`",
+                "the arguments of `Pair` can't be inferred here, so they must be given, as in `Pair<...>`",
+                "the arguments of `Box` can't be inferred here, so they must be given, as in `Box<...>`",
+                "`missing` is not declared",
+                "`Box<Int>.of` takes 1 argument, found 2",
+                "argument to `Box<Int>.of` should not have a label, found `value`",
+                "argument `second` of `Pair<Int, Int>.same` expects `Int`, found `Bool`",
+                "argument `value` of `Box<Bool>.of` expects `Bool`, found `Int`",
+                "cannot assign `Box<Int>` to `l`, which has type `Int`",
+                "operator `==` expects a type that implements `Equal`, found `Box<Bool>`",
+                "`ChoiceTag` can only be used with a choice, found `Int`",
+                "the arguments of `Box` can't be inferred here, so they must be given, as in `Box<...>`",
+                "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
+            ]
+        );
+    }
+
+    #[test]
+    fn inferred_static_functions_must_be_imported() {
+        let messages = check_files(&[
+            (
+                "/main",
+                "
+                use /box
+
+                let a = Box.extra(1)
+                let b = Box.of(1)
+                ",
+            ),
+            (
+                "/box",
+                "
+                group Box<T> {}
+
+                impl Box {
+                    static fn of(_ value: Self.T) -> Self {
+                        return Self {}
+                    }
+                }
+                ",
+            ),
+            (
+                "/extra",
+                "
+                use /box
+
+                impl Box {
+                    static fn extra(_ value: Self.T) -> Self {
+                        return Self.of(value)
+                    }
+                }
+                ",
+            ),
+        ]);
+        let messages: Vec<_> = messages
+            .err()
+            .into_iter()
+            .flatten()
+            .map(|err| err.error.to_string())
+            .collect();
+        assert_eq!(
+            messages,
+            ["`Box<Int>.extra` is declared in `/extra`, which is not imported"]
+        );
+    }
+
+    #[test]
     fn generic_types_can_be_used_with_any_arguments() {
         let src = format!(
             "
@@ -12347,7 +12798,7 @@ primitive Float"
                 {GENERICS}
                 fn f() {{
                     let a = Optional.none
-                    let b: Int = Box.of(1).value
+                    let b = Box.of()
                     match 1 {{
                         Optional.none => {{}}
                         _ => {{}}
