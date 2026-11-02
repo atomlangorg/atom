@@ -1371,7 +1371,7 @@ mod tests {
             (
                 "/main",
                 "
-                use ./shapes/*
+                use ./shapes/
 
                 fn main() -> Int {
                     let box = Square.new(side: 3)

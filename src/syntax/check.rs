@@ -11070,7 +11070,7 @@ primitive Float"
                 (
                     "/main",
                     "
-                    use ./users/*
+                    use ./users/
                     let user: User = User.new(age: maxAge)
                     let admin: Admin = Admin.promote(user: user)
                     ",
@@ -11112,7 +11112,7 @@ primitive Float"
             file_messages(&[
                 (
                     "/main",
-                    "use /users/*\nlet a = top\nlet b = nested\nlet c = deeper\nlet d = outside",
+                    "use /users/\nlet a = top\nlet b = nested\nlet c = deeper\nlet d = outside",
                 ),
                 ("/users/user", "let top = 1"),
                 ("/users/admins/admin", "let nested = 2"),
@@ -11129,17 +11129,17 @@ primitive Float"
     fn root_directory_imports_cover_the_whole_project() {
         assert_eq!(
             check_files(&[
-                ("/main", "use /*\nlet x = a + b + c"),
+                ("/main", "use /\nlet x = a + b + c"),
                 ("/a", "let a = 1"),
                 ("/dir/b", "let b = 2"),
                 ("/dir/sub/c", "let c = 3"),
             ]),
             Ok(())
         );
-        // `./*` from inside a directory doesn't reach outside it.
+        // `./` from inside a directory doesn't reach outside it.
         assert_eq!(
             file_messages(&[
-                ("/dir/main", "use ./*\nlet x = b + a"),
+                ("/dir/main", "use ./\nlet x = b + a"),
                 ("/a", "let a = 1"),
                 ("/dir/sub/b", "let b = 2"),
             ]),
@@ -11151,7 +11151,7 @@ primitive Float"
     fn directory_imports_are_relative_or_absolute() {
         assert_eq!(
             check_files(&[
-                ("/dir/main", "use ./*\nuse /*\nlet x = sibling + root"),
+                ("/dir/main", "use ./\nuse /\nlet x = sibling + root"),
                 ("/dir/sibling", "let sibling = 1"),
                 ("/root", "let root = 2"),
             ]),
@@ -11161,12 +11161,12 @@ primitive Float"
 
     #[test]
     fn directory_imports_skip_the_importing_module() {
-        // Only `/main` is in the root, so `/*` has nothing else to import.
+        // Only `/main` is in the root, so `/` has nothing else to import.
         assert_eq!(
-            file_messages(&[("/main", "use ./*\nuse /missing/*")]),
+            file_messages(&[("/main", "use ./\nuse /missing/")]),
             [
-                "/main: `./*` doesn't match any modules that can be imported",
-                "/main: `/missing/*` doesn't match any modules that can be imported",
+                "/main: `./` doesn't match any modules that can be imported",
+                "/main: `/missing/` doesn't match any modules that can be imported",
             ]
         );
     }
@@ -11175,7 +11175,7 @@ primitive Float"
     fn directory_imports_can_import_the_stdlib() {
         // `stdlib/core` is imported anyway, so this changes nothing.
         assert_eq!(
-            check_files(&[("/main", "use stdlib/*\nlet a: core::Int = 1")]),
+            check_files(&[("/main", "use stdlib/\nlet a: core::Int = 1")]),
             Ok(())
         );
     }
@@ -11187,7 +11187,7 @@ primitive Float"
                 (
                     "/main",
                     "
-                    use ./shapes/*
+                    use ./shapes/
                     let a = size
                     let b: Int = circle::size
                     let c: Bool = square::size
@@ -11208,7 +11208,7 @@ primitive Float"
             check_files(&[
                 (
                     "/main",
-                    "use ./lib/*\nuse ./lib/a\nuse ./lib/*\nlet x = a + b"
+                    "use ./lib/\nuse ./lib/a\nuse ./lib/\nlet x = a + b"
                 ),
                 ("/lib/a", "let a = 1"),
                 ("/lib/b", "let b = 2"),

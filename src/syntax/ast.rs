@@ -41,8 +41,8 @@ pub enum ModulePath {
     /// `./dir/other`: from the directory of the current file, within its
     /// package if it's in one.
     Relative(Vec<String>),
-    /// `stdlib/core`: from the root of a package, whose name comes first.
-    /// Always has at least two segments.
+    /// `stdlib/core`: from the root of a package, whose name comes first. Only
+    /// a directory can have just the one segment, as in `stdlib/`.
     Package(Vec<String>),
     /// `other`: by name alone, which never leads to a module, but is parsed so
     /// that the checker can explain why.
@@ -69,10 +69,10 @@ pub enum Import {
         path: ModulePath,
         alias: Option<String>,
     },
-    /// `use /dir/*`: every module in a directory, including those in its
+    /// `use /dir/`: every module in a directory, including those in its
     /// subdirectories, given the directory's path.
-    /// The path can be empty, as in `use ./*`, or just a package's name, as in
-    /// `use stdlib/*`.
+    /// The path can be empty, as in `use ./`, or just a package's name, as in
+    /// `use stdlib/`.
     Directory(ModulePath),
 }
 
@@ -84,21 +84,13 @@ impl fmt::Display for Import {
                 path,
                 alias: Some(alias),
             } => write!(f, "{path} as {alias}"),
-            // Written like a module path whose last segment is `*`.
-            Self::Directory(path) => {
-                let with_star = |segments: &Vec<String>| {
-                    let mut segments = segments.clone();
-                    segments.push("*".to_string());
-                    segments
-                };
-                let path = match path {
-                    ModulePath::Absolute(segments) => ModulePath::Absolute(with_star(segments)),
-                    ModulePath::Relative(segments) => ModulePath::Relative(with_star(segments)),
-                    ModulePath::Package(segments) => ModulePath::Package(with_star(segments)),
-                    ModulePath::Named(name) => ModulePath::Package(vec![name.clone(), "*".into()]),
-                };
+            // An empty path already ends in a `/`.
+            Self::Directory(
+                path @ (ModulePath::Absolute(segments) | ModulePath::Relative(segments)),
+            ) if segments.is_empty() => {
                 write!(f, "{path}")
             }
+            Self::Directory(path) => write!(f, "{path}/"),
         }
     }
 }
@@ -378,7 +370,7 @@ pub struct Stmt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtKind {
-    /// `use /dir/other` or `use /dir/*`: makes the names declared at the top
+    /// `use /dir/other` or `use /dir/`: makes the names declared at the top
     /// level of other modules visible. Only allowed at the top level.
     Use(Import),
     /// `let name = value` or `var name = value`

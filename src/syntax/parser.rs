@@ -816,52 +816,47 @@ where
         (function, block)
     };
 
-    // `/dir/other`, `./dir/other`, `stdlib/core` or `other`, optionally followed
-    // by an alias, as in `/dir/other as renamed`. `as` only means this here, so
-    // it can still be used as a name or label, as in `isSame(as: other)`.
-    let segments = ident
-        .separated_by(just(Token::Slash))
-        .at_least(1)
-        .collect::<Vec<_>>();
-    let module = choice((
+    // Where a path starts from, and the directories it goes through.
+    let directories = ident.then_ignore(just(Token::Slash)).repeated();
+    let start = choice((
         just(Token::Slash)
-            .ignore_then(segments.clone())
-            .map(ModulePath::Absolute),
+            .to(ModulePath::Absolute as fn(_) -> _)
+            .then(directories.clone().collect::<Vec<_>>()),
         just(Token::Dot)
             .then(just(Token::Slash))
-            .ignore_then(segments.clone())
-            .map(ModulePath::Relative),
-        ident
-            .then(just(Token::Slash).ignore_then(segments.clone()))
-            .map(|(package, mut path)| {
-                path.insert(0, package);
-                ModulePath::Package(path)
-            }),
-        ident.map(ModulePath::Named),
-    ))
-    .labelled("module path")
-    .then(just(Token::Ident("as")).ignore_then(ident).or_not())
-    .map(|(path, alias)| Import::Module { path, alias });
-
-    // `/dir/*`, `./dir/*`, `stdlib/*`, `./*` or `/*`: every module in a
-    // directory and its subdirectories. The lexer reads the final `/*` as a
-    // wildcard.
-    let directory = choice((
-        just(Token::Slash)
-            .ignore_then(segments.clone())
-            .map(ModulePath::Absolute),
-        just(Token::Dot)
-            .then(just(Token::Slash))
-            .ignore_then(segments.clone())
-            .map(ModulePath::Relative),
-        segments.map(ModulePath::Package),
-        just(Token::Dot).to(ModulePath::Relative(vec![])),
-        empty().to(ModulePath::Absolute(vec![])),
-    ))
-    .then_ignore(just(Token::Wildcard))
-    .map(Import::Directory);
+            .to(ModulePath::Relative as fn(_) -> _)
+            .then(directories.clone().collect::<Vec<_>>()),
+        directories
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(|segments| (ModulePath::Package as fn(_) -> _, segments)),
+    ));
+    // `as` only means this here, so it can still be used as a name or label, as
+    // in `isSame(as: other)`.
+    let alias = just(Token::Ident("as")).ignore_then(ident).or_not();
+    // `/dir/other`, `./dir/other`, `stdlib/core` or `other` is a module, which
+    // can have an alias, as in `/dir/other as renamed`. Ending in a slash, as in
+    // `/dir/`, `./dir/`, `stdlib/`, `./` or `/`, is every module in a directory
+    // and its subdirectories.
+    let import = start
+        .then(ident.then(alias.clone()).or_not())
+        .map(|((path, mut segments), module)| match module {
+            Some((name, alias)) => {
+                segments.push(name);
+                Import::Module {
+                    path: path(segments),
+                    alias,
+                }
+            }
+            None => Import::Directory(path(segments)),
+        })
+        .or(ident.then(alias).map(|(name, alias)| Import::Module {
+            path: ModulePath::Named(name),
+            alias,
+        }))
+        .labelled("module path");
     let use_ = just(Token::Use)
-        .ignore_then(directory.or(module))
+        .ignore_then(import)
         .map_with(|import, e| Stmt {
             kind: StmtKind::Use(import),
             span: Span::from(e.span()),
@@ -1247,7 +1242,8 @@ mod tests {
         for stmt in [
             "use /dir/other",
             "use /dir/other as renamed",
-            "use ./*",
+            "use ./",
+            "use ./users/",
             "primitive Int",
             "primitive Fn<T, U>",
         ] {
@@ -3525,10 +3521,7 @@ mod tests {
     fn rejects_malformed_modules() {
         for src in [
             "use",
-            "use /",
-            "use ./",
-            "use /a/",
-            "use a/",
+            "use .",
             "use .a",
             "use ../a",
             "use /a::b",
@@ -4807,7 +4800,7 @@ mod tests {
         let directory = |path| stmt_node(StmtKind::Use(Import::Directory(path)));
         let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
         assert_eq!(
-            parse("use ./users/*\nuse /users/admins/*\nuse ./*\nuse /*\nuse stdlib/*"),
+            parse("use ./users/\nuse /users/admins/\nuse ./\nuse /\nuse stdlib/"),
             Ok(vec![
                 directory(ModulePath::Relative(segments(&["users"]))),
                 directory(ModulePath::Absolute(segments(&["users", "admins"]))),
@@ -4819,8 +4812,29 @@ mod tests {
     }
 
     #[test]
+    fn comments_can_follow_any_part_of_a_use() {
+        let module = |path: &[&str], alias: Option<&str>| {
+            stmt_node(StmtKind::Use(Import::Module {
+                path: ModulePath::Relative(path.iter().map(|s| s.to_string()).collect()),
+                alias: alias.map(str::to_string),
+            }))
+        };
+        assert_eq!(parse("use ./a/* note */"), Ok(vec![module(&["a"], None)]));
+        assert_eq!(parse("use /* note */ ./a"), Ok(vec![module(&["a"], None)]));
+        assert_eq!(
+            parse("use ./a as b/* note */"),
+            Ok(vec![module(&["a"], Some("b"))])
+        );
+        let users = stmt_node(StmtKind::Use(Import::Directory(ModulePath::Relative(
+            vec!["users".to_string()],
+        ))));
+        assert_eq!(parse("use ./users/ /* note */"), Ok(vec![users.clone()]));
+        assert_eq!(parse("use ./users/ // note"), Ok(vec![users]));
+    }
+
+    #[test]
     fn displays_directory_imports_as_written() {
-        for src in ["./users/*", "/users/admins/*", "./*", "/*", "stdlib/*"] {
+        for src in ["./users/", "/users/admins/", "./", "/", "stdlib/"] {
             let program = parse(&format!("use {src}")).unwrap();
             let StmtKind::Use(import) = &program[0].kind else {
                 panic!("expected a `use`");
@@ -4834,16 +4848,20 @@ mod tests {
         for src in [
             "use *",
             "use ./users*",
-            "use ./users/**",
-            "use ./users/*/admins",
-            "use ./users/*.x",
-            "use ./*/*",
-            "use ./users/* as x",
-            "use ./* as x",
-            "use /* as x",
-            "use users/*/",
+            // `/*` always starts a comment, which is never closed here.
+            "use ./users/*",
+            "use ./*",
+            "use /*",
+            "use ./users/ /admins",
+            "use ./users/ as x",
+            "use ./ as x",
+            "use / as x",
+            "use / /",
+            "use ./ ./",
+            "use users/ /",
+            "use ./users/\n/admins",
             "let x = users::*",
-            "fn f() {\nuse ./*\n}",
+            "fn f() {\nuse ./\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
         }
