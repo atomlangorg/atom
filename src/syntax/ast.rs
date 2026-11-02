@@ -17,10 +17,7 @@
 use std::fmt;
 
 /// Where something is written in its file, as a range of bytes.
-///
-/// Spans are always equal, since code means the same thing wherever it's
-/// written, so nodes of the AST are compared by what they say.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -35,14 +32,6 @@ impl Span {
         }
     }
 }
-
-impl PartialEq for Span {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl Eq for Span {}
 
 /// The path to a module, as in `use /dir/other`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +113,11 @@ impl Name {
             span: Span::default(),
         }
     }
+
+    /// Whether this is the keyword `Self`.
+    pub fn is_self(&self) -> bool {
+        self.module.is_none() && self.name == "Self"
+    }
 }
 
 impl fmt::Display for Name {
@@ -155,6 +149,12 @@ impl TypeName {
     /// The type called `name`, without a module.
     pub fn new(name: impl Into<String>) -> Self {
         Self::Named(Name::new(name))
+    }
+
+    /// Whether this is written `Void`, which is what's meant where no type is
+    /// written.
+    pub fn is_void(&self) -> bool {
+        matches!(self, Self::Named(name) if name.module.is_none() && name.name == "Void")
     }
 }
 

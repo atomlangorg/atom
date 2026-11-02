@@ -86,7 +86,16 @@ pub fn parse(src: &str) -> Result<Program, Vec<ParseError<'_>>> {
 /// which are found even if parsing fails.
 pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, Vec<Warning>) {
     let tokens = lexer::tokens(src).map(|(tok, span)| (tok, span.into()));
-    let stream = Stream::from_iter(tokens).map((src.len()..src.len()).into(), |(t, s)| (t, s));
+    parse_tokens(tokens, src.len())
+}
+
+/// Parses `tokens` into a program, also returning any warnings. The source
+/// ends at the byte `end`.
+fn parse_tokens<'src>(
+    tokens: impl Iterator<Item = (Token<'src>, SimpleSpan)> + 'src,
+    end: usize,
+) -> (Result<Program, Vec<ParseError<'src>>>, Vec<Warning>) {
+    let stream = Stream::from_iter(tokens).map((end..end).into(), |(t, s)| (t, s));
 
     let mut warnings = TruncateState(vec![]);
     let result = program_parser()
@@ -1049,6 +1058,14 @@ where
 mod tests {
     use super::*;
 
+    /// Parses `src` with every span empty, like the ASTs these tests expect,
+    /// so that they're compared by what they say rather than where it's
+    /// written. `super::parse` keeps the real spans.
+    fn parse(src: &str) -> Result<Program, Vec<ParseError<'_>>> {
+        let tokens = lexer::tokens(src).map(|(tok, _)| (tok, (0..0).into()));
+        parse_tokens(tokens, 0).0
+    }
+
     fn expr_node(kind: ExprKind) -> Expr {
         Expr {
             kind,
@@ -1095,6 +1112,355 @@ mod tests {
             name: name.to_string(),
             value,
         })
+    }
+
+    /// Parses `src`, keeping its real spans.
+    fn parse_spanned(src: &str) -> Program {
+        super::parse(src).unwrap_or_else(|errs| panic!("{src:?} should parse: {errs:?}"))
+    }
+
+    /// The source that `span` points at in `src`.
+    fn text(src: &str, span: Span) -> &str {
+        &src[span.start..span.end]
+    }
+
+    /// The source that the value of `let x = {value}` points at.
+    fn spanned_value(value: &str) -> String {
+        let src = format!("let x = {value}");
+        let program = parse_spanned(&src);
+        match &program[0].kind {
+            StmtKind::Decl { value, .. } => text(&src, value.span).to_string(),
+            stmt => panic!("expected a declaration, got {stmt:?}"),
+        }
+    }
+
+    #[test]
+    fn spans_tell_apart_the_same_code_in_different_places() {
+        assert_ne!(Span { start: 0, end: 1 }, Span { start: 0, end: 2 });
+        assert_ne!(parse_spanned("let x = 1"), parse_spanned("let x  = 1"));
+        assert_eq!(parse_spanned("let x = 1"), parse_spanned("let x = 1"));
+    }
+
+    #[test]
+    fn expressions_span_all_of_their_source() {
+        for value in [
+            "1",
+            "true",
+            "self",
+            "name",
+            "other::name",
+            "-1",
+            "!x",
+            "- - x",
+            "1 + 2",
+            "1 + 2 * 3",
+            "(1 + 2) * 3",
+            "1 < 2",
+            "a & b | c",
+            "f()",
+            "f(to: 1, 2)",
+            "(1)",
+            "()",
+            "(x: 1, y: 2)",
+            "a.b",
+            "a.b.c",
+            "a.f(to: 1).b",
+            "-a.b",
+            "Point { x: 1 }",
+            "Box<Int>.none",
+        ] {
+            assert_eq!(spanned_value(value), value);
+        }
+    }
+
+    #[test]
+    fn nested_expressions_span_their_own_source() {
+        let src = "let x = (1 + 2) * -a.b";
+        let mut program = parse_spanned(src);
+        let StmtKind::Decl { value, .. } = program.remove(0).kind else {
+            panic!("expected a declaration");
+        };
+        let ExprKind::Binary(lhs, _, rhs) = value.kind else {
+            panic!("expected a binary operator");
+        };
+        assert_eq!(text(src, lhs.span), "(1 + 2)");
+        assert_eq!(text(src, rhs.span), "-a.b");
+        let ExprKind::Paren(inner) = lhs.kind else {
+            panic!("expected brackets");
+        };
+        assert_eq!(text(src, inner.span), "1 + 2");
+        let ExprKind::Unary(_, operand) = rhs.kind else {
+            panic!("expected a unary operator");
+        };
+        assert_eq!(text(src, operand.span), "a.b");
+        let ExprKind::Field { receiver, .. } = operand.kind else {
+            panic!("expected a field");
+        };
+        assert_eq!(text(src, receiver.span), "a");
+    }
+
+    #[test]
+    fn arguments_and_field_values_span_their_labels() {
+        let src = "let x = f(to: 1 + 2, 3)";
+        let mut program = parse_spanned(src);
+        let StmtKind::Decl { value, .. } = program.remove(0).kind else {
+            panic!("expected a declaration");
+        };
+        let ExprKind::Call { callee, args } = value.kind else {
+            panic!("expected a call");
+        };
+        assert_eq!(text(src, callee.span), "f");
+        assert_eq!(text(src, args[0].span), "to: 1 + 2");
+        assert_eq!(text(src, args[0].value.span), "1 + 2");
+        assert_eq!(text(src, args[1].span), "3");
+
+        let src = "let x = Point { x: 1, y: 2 }";
+        let mut program = parse_spanned(src);
+        let StmtKind::Decl { value, .. } = program.remove(0).kind else {
+            panic!("expected a declaration");
+        };
+        let ExprKind::Construct { fields, .. } = value.kind else {
+            panic!("expected a group being constructed");
+        };
+        assert_eq!(text(src, fields[1].span), "y: 2");
+        assert_eq!(text(src, fields[1].value.span), "2");
+    }
+
+    #[test]
+    fn statements_without_blocks_span_all_of_their_source() {
+        for stmt in [
+            "let x = 1",
+            "var x: Int = 1",
+            "x = 1",
+            "(let a, let b) = (1, 2)",
+            "alias Number = Int",
+            "return",
+            "return 1",
+            "f(to: 1)",
+            "a.f()",
+        ] {
+            let src = format!("fn body() {{\n{stmt}\n}}");
+            let program = parse_spanned(&src);
+            let StmtKind::Fn(function) = &program[0].kind else {
+                panic!("expected a function");
+            };
+            assert_eq!(text(&src, function.body[0].span), stmt);
+        }
+        for stmt in [
+            "use /dir/other",
+            "use ./*",
+            "primitive Int",
+            "primitive Fn<T, U>",
+        ] {
+            let program = parse_spanned(stmt);
+            assert_eq!(text(stmt, program[0].span), stmt);
+        }
+    }
+
+    #[test]
+    fn statements_with_blocks_span_up_to_their_blocks() {
+        for (stmt, head) in [
+            ("if a + b {}", "if a + b"),
+            ("if a {} else {}", "if a"),
+            ("match a {}", "match a"),
+            ("fn f() {}", "fn f()"),
+            (
+                "fn f(to value: Int) -> Int {}",
+                "fn f(to value: Int) -> Int",
+            ),
+            ("group Point {}", "group Point"),
+            ("group Box<T> {}", "group Box<T>"),
+            ("choice Answer {}", "choice Answer"),
+            ("choice Optional<T> {}", "choice Optional<T>"),
+        ] {
+            let src = format!("fn body() {{\n{stmt}\n}}");
+            let program = parse_spanned(&src);
+            let StmtKind::Fn(function) = &program[0].kind else {
+                panic!("expected a function");
+            };
+            assert_eq!(text(&src, function.body[0].span), head);
+        }
+        for (stmt, head) in [
+            ("impl Point {}", "impl Point"),
+            ("impl Point with Named {}", "impl Point with Named"),
+            ("trait Named {}", "trait Named"),
+        ] {
+            let program = parse_spanned(stmt);
+            assert_eq!(text(stmt, program[0].span), head);
+        }
+    }
+
+    #[test]
+    fn else_if_spans_up_to_its_own_block() {
+        let src = "fn body() {\nif a {} else if b {}\n}";
+        let program = parse_spanned(src);
+        let StmtKind::Fn(function) = &program[0].kind else {
+            panic!("expected a function");
+        };
+        let StmtKind::If {
+            else_block: Some(else_block),
+            ..
+        } = &function.body[0].kind
+        else {
+            panic!("expected an `if` with an `else`");
+        };
+        assert_eq!(text(src, else_block[0].span), "if b");
+    }
+
+    #[test]
+    fn parts_of_declarations_span_their_own_source() {
+        let src = "
+            fn f(to value: Int, other: Bool) {}
+            group Point {
+                let x: Int
+                var y: other::Number
+            }
+            choice Answer {
+                yes
+                no: Int
+            }
+        ";
+        let program = parse_spanned(src);
+        let StmtKind::Fn(function) = &program[0].kind else {
+            panic!("expected a function");
+        };
+        assert_eq!(text(src, function.params[0].span), "to value: Int");
+        assert_eq!(text(src, function.params[1].span), "other: Bool");
+        let StmtKind::Group { fields, .. } = &program[1].kind else {
+            panic!("expected a group");
+        };
+        assert_eq!(text(src, fields[0].span), "let x: Int");
+        assert_eq!(text(src, fields[1].span), "var y: other::Number");
+        let TypeName::Named(name) = &fields[1].ty else {
+            panic!("expected a named type");
+        };
+        assert_eq!(text(src, name.span), "other::Number");
+        let StmtKind::Choice { options, .. } = &program[2].kind else {
+            panic!("expected a choice");
+        };
+        assert_eq!(text(src, options[0].span), "yes");
+        assert_eq!(text(src, options[1].span), "no: Int");
+    }
+
+    #[test]
+    fn parts_of_impls_and_traits_span_their_own_source() {
+        let src = "
+            impl Point with Named {
+                alias Rhs = Int
+                static fn f() -> Int {}
+            }
+            trait Named {
+                fn name() -> Int
+                fn other() {}
+            }
+        ";
+        let program = parse_spanned(src);
+        let StmtKind::Impl {
+            ty,
+            with,
+            aliases,
+            functions,
+        } = &program[0].kind
+        else {
+            panic!("expected an `impl`");
+        };
+        assert_eq!(text(src, ty.span), "Point");
+        assert_eq!(text(src, with.as_ref().expect("has a trait").span), "Named");
+        assert_eq!(text(src, aliases[0].span), "alias Rhs = Int");
+        assert_eq!(text(src, functions[0].function.span), "fn f() -> Int");
+        let StmtKind::Trait { functions, .. } = &program[1].kind else {
+            panic!("expected a trait");
+        };
+        assert_eq!(text(src, functions[0].span), "fn name() -> Int");
+        assert_eq!(text(src, functions[1].span), "fn other()");
+    }
+
+    #[test]
+    fn types_that_are_not_written_span_what_they_belong_to() {
+        let src = "
+            fn f() {}
+            choice Answer {
+                yes
+            }
+        ";
+        let program = parse_spanned(src);
+        let StmtKind::Fn(function) = &program[0].kind else {
+            panic!("expected a function");
+        };
+        let TypeName::Named(name) = &function.ret else {
+            panic!("expected a named type");
+        };
+        assert_eq!(text(src, name.span), "fn f()");
+        let StmtKind::Choice { options, .. } = &program[1].kind else {
+            panic!("expected a choice");
+        };
+        let TypeName::Named(name) = &options[0].ty else {
+            panic!("expected a named type");
+        };
+        assert_eq!(text(src, name.span), "yes");
+    }
+
+    #[test]
+    fn self_type_names_and_params_span_their_source() {
+        let src = "
+            impl Box {
+                fn f(other: Self) -> Self.T {}
+            }
+        ";
+        let program = parse_spanned(src);
+        let StmtKind::Impl { functions, .. } = &program[0].kind else {
+            panic!("expected an `impl`");
+        };
+        let function = &functions[0].function;
+        let TypeName::Named(name) = &function.params[0].ty else {
+            panic!("expected a named type");
+        };
+        assert!(name.is_self());
+        assert_eq!(text(src, name.span), "Self");
+        let TypeName::SelfParam(_, span) = &function.ret else {
+            panic!("expected `Self.T`");
+        };
+        assert_eq!(text(src, *span), "Self.T");
+    }
+
+    #[test]
+    fn patterns_span_their_own_source() {
+        let src = "
+            fn f() {
+                match a {
+                    (x: let b, y: Shape.circle(1)) => {}
+                }
+            }
+        ";
+        let program = parse_spanned(src);
+        let StmtKind::Fn(function) = &program[0].kind else {
+            panic!("expected a function");
+        };
+        let StmtKind::Match { arms, .. } = &function.body[0].kind else {
+            panic!("expected a match");
+        };
+        let pattern = &arms[0].pattern;
+        assert_eq!(text(src, pattern.span), "(x: let b, y: Shape.circle(1))");
+        let PatternKind::Tuple(elements) = &pattern.kind else {
+            panic!("expected a tuple");
+        };
+        assert_eq!(text(src, elements[0].pattern.span), "let b");
+        let option = &elements[1].pattern;
+        assert_eq!(text(src, option.span), "Shape.circle(1)");
+        let PatternKind::Option {
+            value: Some(value), ..
+        } = &option.kind
+        else {
+            panic!("expected an option with a value");
+        };
+        assert_eq!(text(src, value.span), "1");
+    }
+
+    #[test]
+    fn spans_count_bytes() {
+        let src = "/* é 日本語 */ let x = 1";
+        let program = parse_spanned(src);
+        assert_eq!(text(src, program[0].span), "let x = 1");
     }
 
     #[test]
@@ -2179,7 +2545,7 @@ mod tests {
 
     #[test]
     fn rejects_unbalanced_block_comments() {
-        let errs = parse("let x = 1 /* /* */").unwrap_err();
+        let errs = super::parse("let x = 1 /* /* */").unwrap_err();
         assert_eq!(errs[0].span().into_range(), 10..18);
         assert!(parse("let x = 1 /* */ */").is_err());
     }
@@ -2235,7 +2601,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_token() {
-        let errs = parse("let x = 1 $ 2").unwrap_err();
+        let errs = super::parse("let x = 1 $ 2").unwrap_err();
         assert_eq!(errs[0].span().into_range(), 10..11);
     }
 

@@ -1837,7 +1837,7 @@ impl<'a> Checker<'a> {
     fn lookup(&mut self, name: &Name) -> Result<Binding, LookupError> {
         // `Self` is a keyword, so it's never declared, and always refers to
         // the type of the `impl` it's in.
-        if *name == Name::new("Self") {
+        if name.is_self() {
             return match &self.impl_type {
                 Some(Some(ty)) => Ok(Binding::Type(ty.clone())),
                 Some(None) => Err(LookupError::Reported),
@@ -2792,7 +2792,7 @@ impl<'a> Checker<'a> {
             }
             return self.resolve_type(ty).map(TraitType::Type);
         };
-        if *name == Name::new("Self") {
+        if name.is_self() {
             return Some(TraitType::SelfType);
         }
         if name.module.is_none()
@@ -5524,7 +5524,7 @@ fn signature_text(function: &TraitFunction) -> String {
         })
         .collect();
     let static_ = if function.is_static { "static " } else { "" };
-    let returns = if function.ret == TypeName::new("Void") {
+    let returns = if function.ret.is_void() {
         String::new()
     } else {
         format!(" -> {}", function.ret)
