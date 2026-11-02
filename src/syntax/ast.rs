@@ -130,7 +130,8 @@ impl fmt::Display for Name {
 }
 
 /// A type as it's written, such as `Int`, `other::User`, the tuple
-/// `(x: Int, y: Int)`, or the generic type `Optional<Int>`.
+/// `(x: Int, y: Int)`, the generic type `Optional<Int>`, or the type `Tag` of
+/// the choice `Shape`, as in `Shape.Tag`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeName {
     Named(Name),
@@ -143,6 +144,12 @@ pub enum TypeName {
     /// `Self.T`: what the generic parameter `T` of the `impl`'s type stands
     /// for.
     SelfParam(String, Span),
+    /// `Shape.Tag`: a type that belongs to another type.
+    Member {
+        ty: Box<TypeName>,
+        member: String,
+        span: Span,
+    },
 }
 
 impl TypeName {
@@ -171,6 +178,7 @@ impl fmt::Display for TypeName {
                 write!(f, "{name}<{}>", args.join(", "))
             }
             Self::SelfParam(param, _) => write!(f, "Self.{param}"),
+            Self::Member { ty, member, .. } => write!(f, "{ty}.{member}"),
         }
     }
 }

@@ -232,6 +232,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 TypeDef::Primitive(Primitive::Fn) => {
                     self.context.ptr_type(AddressSpace::default()).into()
                 }
+                TypeDef::Primitive(Primitive::Tag) => self.tag_type().into(),
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
                     self.context.opaque_struct_type(name).into()
                 }
@@ -352,12 +353,30 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .expect("every function returns a value, even if it's `Void`");
                 self.builder.build_return(Some(&result))?;
             }
+            // Only a choice's options can be created, so a `ChoiceOption` of
+            // anything else has no values to call this on.
+            Body::Primitive(PrimitiveFn::CallOption)
+                if !matches!(self.program.types[function.returns], TypeDef::Choice { .. }) =>
+            {
+                self.builder.build_unreachable()?;
+            }
+            Body::Primitive(PrimitiveFn::CallOption) => {
+                let ty = self.types[function.returns].into_struct_type();
+                let option = value
+                    .get_nth_param(0)
+                    .expect("`self` is the first parameter");
+                let input = value
+                    .get_nth_param(1)
+                    .expect("the input is the second parameter");
+                let result = self.choose(ty, option.into_int_value(), input)?;
+                self.builder.build_return(Some(&result))?;
+            }
             // Calls are built as the instruction itself, but the function
             // is still defined like any other.
             &Body::Primitive(primitive) => {
                 let result = self
                     .primitive_instruction(primitive, &value.get_params())?
-                    .expect("only `exit` and `Fn.call` aren't a single instruction");
+                    .expect("only `exit` and `call`s aren't a single instruction");
                 self.builder.build_return(Some(&result))?;
             }
         }
@@ -374,12 +393,17 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ) -> Result<Option<IntValue<'ctx>>, BuilderError> {
         let int = |index: usize| args[index].into_int_value();
         Ok(Some(match primitive {
-            PrimitiveFn::Exit | PrimitiveFn::CallFn => return Ok(None),
+            PrimitiveFn::Exit | PrimitiveFn::CallFn | PrimitiveFn::CallOption => return Ok(None),
             PrimitiveFn::BoolAnd => self.builder.build_and(int(0), int(1), "")?,
             PrimitiveFn::BoolOr => self.builder.build_or(int(0), int(1), "")?,
             PrimitiveFn::BoolNot => self.builder.build_not(int(0), "")?,
             PrimitiveFn::Equal => self.builder.build_int_compare(EQ, int(0), int(1), "")?,
             PrimitiveFn::NotEqual => self.builder.build_int_compare(NE, int(0), int(1), "")?,
+            PrimitiveFn::ChoiceTag => self
+                .builder
+                .build_extract_value(args[0].into_struct_value(), 0, "")?
+                .into_int_value(),
+            PrimitiveFn::OptionTag => int(0),
         }))
     }
 
@@ -608,8 +632,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             } => {
                 let value = self.expr(value)?;
                 let ty = self.types[*choice].into_struct_type();
-                self.choose(ty, *option, value)?
+                let option = self.tag_type().const_int(*option as u64, false);
+                self.choose(ty, option, value)?
             }
+            Expr::Tag(option) => self
+                .tag_type()
+                .const_int(*option as u64, false)
+                .as_basic_value_enum(),
             Expr::Field { receiver, index } => {
                 let receiver = self.expr(receiver)?.into_struct_value();
                 self.builder
@@ -624,13 +653,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn choose(
         &self,
         ty: StructType<'ctx>,
-        option: usize,
+        option: IntValue<'ctx>,
         value: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
         let slot = self.entry_alloca(ty)?;
         let tag = self.builder.build_struct_gep(ty, slot, 0, "")?;
-        let tag_value = self.tag_type().const_int(option as u64, false);
-        self.builder.build_store(tag, tag_value)?;
+        self.builder.build_store(tag, option)?;
         let payload = self.builder.build_struct_gep(ty, slot, 1, "")?;
         self.builder.build_store(payload, value)?;
         self.builder.build_load(ty, slot, "")
@@ -1473,7 +1501,7 @@ mod tests {
             {SHAPE}
             let circle = Shape.circle(3)
             let flag = Shape.flag(true)
-            let empty = Shape.empty
+            let empty = Shape.empty()
             let emptyWithValue = Shape.empty(Void.new())
             fn main() -> Int {{
                 return 0
@@ -1484,6 +1512,249 @@ mod tests {
         assert_eq!(read_choice(&src, "flag", "Shape", 8), (2, 1));
         assert_eq!(read_choice(&src, "empty", "Shape", 8).0, 1);
         assert_eq!(read_choice(&src, "emptyWithValue", "Shape", 8).0, 1);
+    }
+
+    /// Returns which of `SHAPE`'s options `shape` is, and its value, for
+    /// tests.
+    const DESCRIBE_SHAPE: &str = "
+        fn describe(shape: Shape) -> Int {
+            match shape {
+                Shape.circle(let radius) => {
+                    return radius
+                }
+                Shape.empty => {
+                    return 100
+                }
+                Shape.flag(let flag) => {
+                    if flag {
+                        return 200
+                    }
+                    return 300
+                }
+            }
+        }
+        ";
+
+    #[test]
+    fn options_create_their_choice_when_called() {
+        let src = format!(
+            "
+            {SHAPE}
+            {DESCRIBE_SHAPE}
+            group Maker {{
+                let make: ChoiceOption<Shape, Int>
+            }}
+
+            impl Maker {{
+                static fn new() -> Maker {{
+                    return Maker {{ make: Shape.circle }}
+                }}
+            }}
+
+            fn make(from option: ChoiceOption<Shape, Int>) -> Shape {{
+                return option(4)
+            }}
+
+            fn main() -> Int {{
+                let circle = Shape.circle
+                let empty = Shape.empty
+                let a = describe(shape: circle(1))
+                let b = describe(shape: circle.call(input: 2))
+                let c = describe(shape: make(from: Shape.circle))
+                let d = describe(shape: Maker.new().make(8))
+                let e = describe(shape: empty())
+                let f = describe(shape: empty(Void.new()))
+                let stored = Shape.flag
+                let g = describe(shape: stored(true))
+                return a + b + c + d + e + f + g
+            }}
+            "
+        );
+        assert_eq!(run(&src), 415);
+    }
+
+    #[test]
+    fn stored_options_can_be_chosen_while_running() {
+        let src = "
+            choice Number {
+                small: Int
+                large: Int
+            }
+
+            fn read(number: Number) -> Int {
+                match number {
+                    Number.small(let value) => {
+                        return value
+                    }
+                    Number.large(let value) => {
+                        return value * 100
+                    }
+                }
+            }
+
+            fn pick(large: Bool) -> ChoiceOption<Number, Int> {
+                if large {
+                    return Number.large
+                }
+                return Number.small
+            }
+
+            fn main() -> Int {
+                let large = pick(large: true)
+                let small = pick(large: false)
+                return read(number: large(2)) + read(number: small(3))
+            }
+            ";
+        assert_eq!(run(src), 203);
+    }
+
+    #[test]
+    fn options_can_be_top_level_values() {
+        let src = format!(
+            "
+            {SHAPE}
+            let option = Shape.flag
+            let flag = option(true)
+            fn main() -> Int {{
+                return 0
+            }}
+            "
+        );
+        assert_eq!(read_choice(&src, "flag", "Shape", 8), (2, 1));
+    }
+
+    #[test]
+    fn options_can_hold_tuples_when_stored() {
+        let src = "
+            choice Shape {
+                empty
+                pair: (a: Int, b: Int)
+            }
+
+            fn main() -> Int {
+                let direct = Shape.pair((a: 1, b: 2))
+                let pair = Shape.pair
+                let stored = pair((a: 3, b: 4))
+                var total = 0
+                match direct {
+                    Shape.pair((a: let a, b: let b)) => {
+                        total = total + a * 10 + b
+                    }
+                    Shape.empty => {}
+                }
+                match stored {
+                    Shape.pair((a: let a, b: let b)) => {
+                        total = total + a * 1000 + b * 100
+                    }
+                    Shape.empty => {}
+                }
+                return total
+            }
+            ";
+        assert_eq!(run(src), 3412);
+    }
+
+    #[test]
+    fn tags_tell_options_apart() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn score(matched: Bool, worth: Int) -> Int {{
+                if matched {{
+                    return worth
+                }}
+                return 0
+            }}
+
+            fn main() -> Int {{
+                let shape = Shape.flag(true)
+                let tag: Shape.Tag = shape.tag()
+                let option = Shape.flag
+                let a = score(matched: tag == Shape.flag.tag(), worth: 1)
+                let b = score(matched: tag == Shape.circle.tag(), worth: 2)
+                let c = score(matched: tag != Shape.circle.tag(), worth: 4)
+                let d = score(matched: tag != option.tag(), worth: 8)
+                let e = score(matched: tag == option(false).tag(), worth: 16)
+                let f = score(matched: Shape.empty().tag() == Shape.empty.tag(), worth: 32)
+                return a + b + c + d + e + f
+            }}
+            "
+        );
+        assert_eq!(run(&src), 53);
+    }
+
+    #[test]
+    fn generic_choices_have_options_and_tags() {
+        let src = "
+            choice Optional<T> {
+                none
+                some: T
+            }
+
+            fn unwrap(_ value: Optional<Int>, or fallback: Int) -> Int {
+                match value {
+                    Optional.some(let found) => {
+                        return found
+                    }
+                    Optional.none => {
+                        return fallback
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let some: ChoiceOption<Optional<Int>, Int> = Optional.some
+                let none: ChoiceOption<Optional<Int>, Void> = Optional.none
+                let a = unwrap(some(5), or: 0)
+                let b = unwrap(none(), or: 7)
+                if some(1).tag() == Optional<Int>.some.tag() {
+                    return a * 10 + b
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 57);
+    }
+
+    #[test]
+    fn options_and_tags_work_as_top_level_values() {
+        let src = "
+            choice Shape {
+                square: Int
+                circle: Bool
+                other
+            }
+
+            let a: ChoiceOption<Shape, Int> = Shape.square
+            let b: Shape.Tag = Shape.square.tag()
+            let c: Shape = Shape.square(5)
+            let d: Shape.Tag = Shape.square(5).tag()
+
+            let n: ChoiceOption<Shape, Void> = Shape.other
+            let o: Shape.Tag = Shape.other.tag()
+            let p: Shape = Shape.other()
+            let q: Shape.Tag = Shape.other(Void.new()).tag()
+
+            fn main() -> Int {
+                return 0
+            }
+            ";
+        assert_eq!(read_choice(src, "c", "Shape", 64), (0, 5));
+        assert_eq!(read_choice(src, "p", "Shape", 8).0, 2);
+    }
+
+    #[test]
+    fn options_of_types_that_are_not_choices_still_compile() {
+        let src = "
+            fn never(option: ChoiceOption<Int, Bool>) -> Int {
+                return option(true)
+            }
+
+            fn main() -> Int {
+                return 9
+            }
+            ";
+        assert_eq!(run(src), 9);
     }
 
     #[test]
@@ -1556,9 +1827,9 @@ mod tests {
                 choice Local {{
                     only
                 }}
-                let local = Local.only
+                let local = Local.only()
                 let canvas = Canvas.of(keep(Shape.unit()))
-                return canvas.shape.sides() * 10 + Shape.empty.sides()
+                return canvas.shape.sides() * 10 + Shape.empty().sides()
             }}
             "
         );
@@ -1592,7 +1863,7 @@ mod tests {
 
             fn main() -> Int {{
                 let a = describe(Shape.circle(5))
-                let b = describe(Shape.empty)
+                let b = describe(Shape.empty())
                 let c = describe(Shape.flag(true))
                 let d = describe(Shape.flag(false))
                 return a * 1000 + b * 100 + c * 10 + d
@@ -2291,7 +2562,7 @@ mod tests {
                 // 100 + 9 + 30 + 7 + 0 = 146
                 let c = size(of: Shape.circle(0)) + size(of: Shape.circle(9))
                 let d = size(of: Shape.pair((left: Inner.circle(6), right: 5)))
-                let e = size(of: Shape.pair((left: Inner.empty, right: 5))) + size(of: Shape.empty)
+                let e = size(of: Shape.pair((left: Inner.empty(), right: 5))) + size(of: Shape.empty())
                 // 1 + 2 + 3 = 6
                 let f = count(255) + count(0) + count(9)
                 return a + b + c + d + e + f
@@ -2370,7 +2641,7 @@ mod tests {
 
             fn main() -> Int {
                 let a: Optional<Int> = Optional.some(40)
-                let b = Optional<Int>.none
+                let b = Optional<Int>.none()
                 let boxed: Box<Bool> = Box.of(true)
                 let count = Box<Int>.of(1).get()
                 let pair = Pair<Int, Box<Bool>>.of(100, boxed)

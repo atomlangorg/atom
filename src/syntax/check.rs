@@ -271,12 +271,6 @@ pub enum CheckError {
     NoStaticFunction { ty: Type, function: String },
     /// An option or static function was used that the choice doesn't have.
     NoOption { ty: Type, option: String },
-    /// An option holding a value other than `Void` was used without one.
-    OptionNeedsValue {
-        ty: Type,
-        option: String,
-        expected: Type,
-    },
     /// A choice was constructed like a group, rather than from an option.
     ConstructedChoice(Type),
     /// A pattern can't match the type of value it's matched against.
@@ -371,6 +365,8 @@ pub enum CheckError {
     /// A generic type's name was used without arguments where they can't be
     /// inferred.
     CannotInferGeneric(String),
+    /// `ty.member` was used as a type, which `ty` doesn't have.
+    NoMemberType { ty: Type, member: String },
     /// `Self.T` was used outside the `impl` of a generic type.
     SelfParamOutsideGeneric(String),
     /// `Self.T` names a parameter the `impl`'s generic type doesn't have.
@@ -678,14 +674,6 @@ impl fmt::Display for CheckError {
                 };
                 write!(f, "`match` is missing the pattern{s} {patterns}")
             }
-            Self::OptionNeedsValue {
-                ty,
-                option,
-                expected,
-            } => write!(
-                f,
-                "`{ty}.{option}` holds a value of type `{expected}`, so it must be given one, as in `{ty}.{option}(value)`"
-            ),
             Self::ConstructedChoice(ty) => write!(
                 f,
                 "`{ty}` is a choice, so it can only be created from one of its options"
@@ -775,6 +763,7 @@ impl fmt::Display for CheckError {
                 f,
                 "the arguments of `{name}` can't be inferred here, so they must be given, as in `{name}<...>`"
             ),
+            Self::NoMemberType { ty, member } => write!(f, "`{ty}` has no type `{member}`"),
             Self::SelfParamOutsideGeneric(param) => write!(
                 f,
                 "`Self.{param}` can only be used in the `impl` of a generic type"
@@ -1397,7 +1386,13 @@ impl<'a> Checker<'a> {
                     StmtKind::Group { name, .. }
                     | StmtKind::Choice { name, .. }
                     | StmtKind::Primitive { name, .. } => {
-                        types.push((module, self.declare_type(name, stmt.span), stmt));
+                        let id = self.declare_type(name, stmt.span);
+                        // Its `Tag` can be used before its options are
+                        // defined.
+                        if matches!(stmt.kind, StmtKind::Choice { .. }) {
+                            self.choice_options.insert(id, vec![]);
+                        }
+                        types.push((module, id, stmt));
                     }
                     StmtKind::Alias { name, ty } => {
                         self.declare_alias(name, stmt.span, ty, LazyType::Unchecked);
@@ -1812,6 +1807,15 @@ impl<'a> Checker<'a> {
                 .any(|module| self.modules[module].scope.contains_key(name))
     }
 
+    /// A generic type from `stdlib/core`, such as `Fn`, as an index into
+    /// `templates`.
+    fn std_template(&self, name: &str) -> usize {
+        match self.modules[self.core].scope.get(name) {
+            Some(Binding::Generic(template)) => *template,
+            _ => panic!("the standard library should declare `{name}`"),
+        }
+    }
+
     /// A type from `stdlib/core`, such as `Int` for integer literals. Found in
     /// the standard library itself, so it can't be shadowed.
     fn std_type(&self, name: &str) -> Type {
@@ -1994,6 +1998,7 @@ impl<'a> Checker<'a> {
             TypeName::Named(name) => self.find_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args, false),
             TypeName::SelfParam(param, span) => self.self_param(param, *span, false),
+            TypeName::Member { ty, member, span } => self.member_type(ty, member, *span, false),
             TypeName::Tuple(elements) => {
                 let elements = elements
                     .iter()
@@ -2025,6 +2030,7 @@ impl<'a> Checker<'a> {
             TypeName::Named(name) => self.resolve_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args, true),
             TypeName::SelfParam(param, span) => self.self_param(param, *span, true),
+            TypeName::Member { ty, member, span } => self.member_type(ty, member, *span, true),
             TypeName::Tuple(elements) => {
                 // Every element is resolved, so each one's errors are found.
                 let elements: Vec<_> = elements
@@ -2152,6 +2158,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The type called `member` belonging to `ty`, reporting errors if
+    /// `report` is set. Only a choice has one, which is its `Tag`.
+    fn member_type(
+        &mut self,
+        ty: &TypeName,
+        member: &str,
+        span: Span,
+        report: bool,
+    ) -> Option<Type> {
+        let ty = if report {
+            self.resolve_type(ty)?
+        } else {
+            self.find_type(ty)?
+        };
+        if member == "Tag" && self.choice_options.contains_key(&ty.id) {
+            return self.tag_type(ty, span);
+        }
+        if report {
+            let member = member.to_string();
+            self.error(span, CheckError::NoMemberType { ty, member });
+        }
+        None
+    }
+
+    /// The type of the tags of the choice `ty`, used by the code at `span`.
+    fn tag_type(&mut self, ty: Type, span: Span) -> Option<Type> {
+        let template = self.std_template("ChoiceTag");
+        self.instance(template, vec![ty], span, true)
+    }
+
     /// The type `type_name` refers to where a value of one of `contexts` is
     /// expected or matched, reporting errors if `report` is set. A generic
     /// type's name without arguments refers to the first of `contexts` that's
@@ -2275,7 +2311,9 @@ impl<'a> Checker<'a> {
         let errors = self.errors.len();
         self.at_top_level(module, Some((template, args)), |checker| match &stmt.kind {
             StmtKind::Group { fields, .. } => checker.define_group(id, &name, fields),
-            StmtKind::Choice { options, .. } => checker.define_choice(id, &name, options),
+            StmtKind::Choice { options, .. } => {
+                checker.define_choice(id, &name, options, stmt.span);
+            }
             StmtKind::Primitive { name, .. } => checker.define_primitive(id, name, stmt.span),
             _ => unreachable!("only groups, choices and primitives are generic"),
         });
@@ -3143,8 +3181,20 @@ impl<'a> Checker<'a> {
             | "IntS32.isNotEqual" | "IntS64.isNotEqual" | "Bool.isNotEqual" => {
                 ir::PrimitiveFn::NotEqual
             }
-            // Every type made from `Fn` has its own `call`.
+            // Every type made from a generic type has its own functions.
             _ if name.starts_with("Fn<") && name.ends_with(">.call") => ir::PrimitiveFn::CallFn,
+            _ if name.starts_with("ChoiceTag<") && name.ends_with(">.isEqual") => {
+                ir::PrimitiveFn::Equal
+            }
+            _ if name.starts_with("ChoiceTag<") && name.ends_with(">.isNotEqual") => {
+                ir::PrimitiveFn::NotEqual
+            }
+            _ if name.starts_with("ChoiceOption<") && name.ends_with(">.tag") => {
+                ir::PrimitiveFn::OptionTag
+            }
+            _ if name.starts_with("ChoiceOption<") && name.ends_with(">.call") => {
+                ir::PrimitiveFn::CallOption
+            }
             _ => panic!("the compiler doesn't know how to implement `{name}`"),
         };
         let Signature {
@@ -3239,7 +3289,9 @@ impl<'a> Checker<'a> {
     fn define_type(&mut self, id: usize, stmt: &'a Stmt) {
         match &stmt.kind {
             StmtKind::Group { name, fields, .. } => self.define_group(id, name, fields),
-            StmtKind::Choice { name, options, .. } => self.define_choice(id, name, options),
+            StmtKind::Choice { name, options, .. } => {
+                self.define_choice(id, name, options, stmt.span);
+            }
             StmtKind::Primitive { name, .. } => self.define_primitive(id, name, stmt.span),
             _ => unreachable!("only groups, choices and primitives declare types"),
         }
@@ -3264,13 +3316,16 @@ impl<'a> Checker<'a> {
             "IntS64" => int(64, true),
             "Bool" => ir::Primitive::Bool,
             "Fn" => ir::Primitive::Fn,
+            "ChoiceTag" | "ChoiceOption" => ir::Primitive::Tag,
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
         };
         self.primitives.insert(id, primitive);
     }
 
     /// Resolves the options of the choice called `name` with `id`.
-    fn define_choice(&mut self, id: usize, name: &str, options: &'a [ChoiceOption]) {
+    fn define_choice(&mut self, id: usize, name: &str, options: &'a [ChoiceOption], span: Span) {
+        // Its `Tag` can be used by its options.
+        self.choice_options.insert(id, vec![]);
         // Option names only need to be unique within their choice.
         let mut option_names = HashSet::new();
         let mut signatures = vec![];
@@ -3294,6 +3349,43 @@ impl<'a> Checker<'a> {
             });
         }
         self.choice_options.insert(id, signatures);
+        self.implement_choice(id, name, span);
+    }
+
+    /// Makes the choice called `name` with `id` implement the standard
+    /// library's `Choice` trait, which it does without an `impl`.
+    fn implement_choice(&mut self, id: usize, name: &str, span: Span) {
+        let ty = Type {
+            id,
+            name: name.to_string(),
+        };
+        let Some(returns) = self.tag_type(ty, span) else {
+            return;
+        };
+        let full_name = self.full_name(&format!("{name}.tag"));
+        let function = self.functions.len();
+        self.functions.push(Signature {
+            name: full_name.clone(),
+            params: vec![],
+            returns: Some(returns.clone()),
+        });
+        self.lowered_functions.push(Some(ir::Function {
+            name: full_name,
+            locals: vec![id],
+            params: 1,
+            returns: returns.id,
+            body: ir::Body::Primitive(ir::PrimitiveFn::ChoiceTag),
+        }));
+        let method = Method {
+            module: self.core,
+            function,
+        };
+        self.methods.entry(id).or_default().insert("tag", method);
+        let choice_trait = match self.modules[self.core].scope.get("Choice") {
+            Some(Binding::Trait(index)) => *index,
+            _ => panic!("the standard library should declare `Choice`"),
+        };
+        self.implementations.insert((id, choice_trait));
     }
 
     /// Resolves the fields of the group called `name` with `id`.
@@ -4696,6 +4788,17 @@ impl<'a> Checker<'a> {
         Some((index, options[index].ty.clone()))
     }
 
+    /// The `Base` and `Value` of `ty`, if it's made from `ChoiceOption`.
+    fn option_args(&self, ty: &Type) -> Option<(Type, Type)> {
+        let (template, args) = self.instances.get(&ty.id)?;
+        match &args[..] {
+            [base, value] if *template == self.std_template("ChoiceOption") => {
+                Some((base.clone(), value.clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// The error for `name` not being a field or method of `ty`, which points
     /// out an option or static function with that name.
     fn no_member(&self, ty: Type, name: &str) -> CheckError {
@@ -4745,6 +4848,10 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<&Type>,
     ) -> Typed {
+        // A generic type's name can leave out its arguments when one of its
+        // options is used as `expected`, as in `Optional.none`.
+        let base = expected.and_then(|expected| self.option_args(expected));
+        let expected = base.as_ref().map(|(base, _)| base).or(expected);
         let Some(receiver) = self.receiver(receiver, field, expected) else {
             return Typed::UNKNOWN;
         };
@@ -4766,32 +4873,15 @@ impl<'a> Checker<'a> {
                 },
                 None => self.no_member(ty, field),
             },
-            // An option holding `Void` can be created by naming it.
+            // Naming an option doesn't create the choice, but gives its
+            // `ChoiceOption`.
             Receiver::Type(ty) if let Some((option, value_ty)) = self.option(&ty, field) => {
-                let void = self.std_type("Void");
-                match value_ty {
-                    Some(value_ty) if value_ty == void => {
-                        return Typed {
-                            expr: Some(ir::Expr::Choose {
-                                choice: ty.id,
-                                option,
-                                value: Box::new(self.void()),
-                            }),
-                            ty: Some(ty),
-                        };
-                    }
-                    Some(expected) => CheckError::OptionNeedsValue {
-                        ty: ty.clone(),
-                        option: field.to_string(),
-                        expected,
-                    },
-                    None => {
-                        return Typed {
-                            ty: Some(ty),
-                            expr: None,
-                        };
-                    }
-                }
+                let template = self.std_template("ChoiceOption");
+                return Typed {
+                    ty: value_ty
+                        .and_then(|value| self.instance(template, vec![ty, value], span, true)),
+                    expr: Some(ir::Expr::Tag(option)),
+                };
             }
             Receiver::Type(ty) => match self.static_function(&ty, field) {
                 Some(found) => {
@@ -4818,6 +4908,12 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         span: Span,
     ) -> Typed {
+        if let Some(option_ty) = ty.as_ref()
+            && let Some((base, value_ty)) = self.option_args(option_ty)
+            && let Callee::Value(value) = callee
+        {
+            return self.call_option(option_ty, value, (base, value_ty), name, args, span);
+        }
         // Like a function's arguments, the input is checked first, so its
         // errors come before the call's, and it's used as `Input`, which is
         // found without reporting errors.
@@ -4886,6 +4982,74 @@ impl<'a> Checker<'a> {
             Callee::Function(index) => Some(self.call_function(index, input)),
         });
         Typed { ty: returns, expr }
+    }
+
+    /// Checks calling `value`, whose type `ty` is a `ChoiceOption` with
+    /// `base` and `value_ty`, called `name`, with `args`, at `span`.
+    fn call_option(
+        &mut self,
+        ty: &Type,
+        value: Option<ir::Expr>,
+        (base, value_ty): (Type, Type),
+        name: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> Typed {
+        let not_callable = CheckError::NotCallable {
+            name: name.to_string(),
+            ty: ty.clone(),
+        };
+        let function = self.trait_method("Call", "call", ty, span, not_callable);
+        let Typed { ty: returns, expr } =
+            self.option_value(name.to_string(), base, Some(value_ty), args, span);
+        Typed {
+            ty: returns,
+            expr: function
+                .zip(value)
+                .zip(expr)
+                .map(|((function, value), input)| ir::Expr::Call {
+                    function,
+                    args: vec![value, input],
+                }),
+        }
+    }
+
+    /// Checks `args` as the value for an option of the choice `base`, called
+    /// `name`, which holds a `value_ty`. Creating an option is like calling a
+    /// function with one unlabelled parameter, so a tuple is always one
+    /// argument, except that a `Void` can be left out. Returns the choice's
+    /// type, along with what the value compiles to.
+    fn option_value(
+        &mut self,
+        name: String,
+        base: Type,
+        value_ty: Option<Type>,
+        args: &[Arg],
+        span: Span,
+    ) -> Typed {
+        if args.is_empty() && value_ty == Some(self.std_type("Void")) {
+            return Typed {
+                ty: Some(base),
+                expr: Some(self.void()),
+            };
+        }
+        let (found, lowered) = self.args(args, std::slice::from_ref(&value_ty));
+        let signature = Signature {
+            name: name.clone(),
+            params: vec![ParamSignature {
+                label: None,
+                name: "value",
+                span,
+                ty: value_ty,
+            }],
+            returns: Some(base),
+        };
+        Typed {
+            ty: self.check_args(name, args, found, signature, span),
+            expr: lowered
+                .and_then(|args| <[_; 1]>::try_from(args).ok())
+                .map(|[value]| value),
+        }
     }
 
     /// Reports what's wrong with each of `args`, which don't make the `Input`
@@ -4971,29 +5135,34 @@ impl<'a> Checker<'a> {
                 let callee = Callee::Function(found.function);
                 return self.call_value(fn_type, callee, &name, args, span);
             }
+            // An option is called directly, since it's known which one it is.
+            Some(Receiver::Type(ty)) if let Some((option, value_ty)) = self.option(&ty, method) => {
+                let choice = ty.id;
+                let name = format!("{ty}.{method}");
+                let Typed { ty, expr } = self.option_value(name, ty, value_ty, args, span);
+                return Typed {
+                    ty,
+                    expr: expr.map(|value| ir::Expr::Choose {
+                        choice,
+                        option,
+                        value: Box::new(value),
+                    }),
+                };
+            }
             receiver => receiver,
         };
         let params = match &receiver {
-            Some(Receiver::Type(ty)) => self
-                .option(ty, method)
-                .map(|(_, value_ty)| vec![value_ty])
-                .unwrap_or_default(),
             Some(Receiver::Value(ty, _)) => match self.member(ty, method) {
                 Some(Member::Method(found)) => self.param_types(found.function),
                 _ => vec![],
             },
-            None => vec![],
+            Some(Receiver::Type(_)) | None => vec![],
         };
         let (found, lowered_args) = self.args(args, &params);
 
         let Some(receiver) = receiver else {
             return Typed::UNKNOWN;
         };
-        if let Receiver::Type(ty) = &receiver
-            && let Some(option) = self.option(ty, method)
-        {
-            return self.choose(ty, method, option, args, found, lowered_args, span);
-        }
         let (ty, found_method, lowered_receiver) = match receiver {
             Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
                 Some(Member::Method(found_method)) => (ty, found_method, lowered_receiver),
@@ -5027,45 +5196,6 @@ impl<'a> Checker<'a> {
                 function: found_method.function,
                 args,
             }),
-        }
-    }
-
-    /// Checks the creation of the choice `ty` as the option called `name`,
-    /// given its index and the type of its value, as found by `option`.
-    /// Creating an option is like calling a function with one unlabelled
-    /// parameter. The argument has the type `found`, and compiles to
-    /// `lowered`.
-    #[allow(clippy::too_many_arguments)]
-    fn choose(
-        &mut self,
-        ty: &Type,
-        name: &str,
-        (option, value_ty): (usize, Option<Type>),
-        args: &[Arg],
-        found: Vec<Option<Type>>,
-        lowered: Option<Vec<ir::Expr>>,
-        span: Span,
-    ) -> Typed {
-        let signature = Signature {
-            name: format!("{ty}.{name}"),
-            params: vec![ParamSignature {
-                label: None,
-                name: "value",
-                span,
-                ty: value_ty,
-            }],
-            returns: Some(ty.clone()),
-        };
-        let returns = self.check_args(signature.name.clone(), args, found, signature, span);
-        Typed {
-            ty: returns,
-            expr: lowered
-                .and_then(|args| <[_; 1]>::try_from(args).ok())
-                .map(|[value]| ir::Expr::Choose {
-                    choice: ty.id,
-                    option,
-                    value: Box::new(value),
-                }),
         }
     }
 
@@ -5248,10 +5378,7 @@ impl<'a> Checker<'a> {
                 self.tuple_type(elements)
             }
         };
-        let template = match self.modules[self.core].scope.get("Fn") {
-            Some(Binding::Generic(template)) => *template,
-            _ => panic!("the standard library should declare `Fn`"),
-        };
+        let template = self.std_template("Fn");
         self.instance(template, vec![input, returns?], span, true)
     }
 
@@ -5508,6 +5635,7 @@ fn trait_names<'b>(
         TypeName::Generic { args, .. } => {
             Box::new(args.iter().flat_map(move |arg| trait_names(arg, aliases)))
         }
+        TypeName::Member { ty, .. } => trait_names(ty, aliases),
     }
 }
 
@@ -10714,14 +10842,14 @@ primitive Float"
             "
             {SHAPE}
             let a: Shape = Shape.circle(3)
-            let b: Shape = Shape.empty
+            let b: Shape = Shape.empty()
             let c: Shape = Shape.empty(Void.new())
-            let d: Shape = Shape.nothing
+            let d: Shape = Shape.nothing()
             fn f() -> Shape {{
                 choice Inner {{
                     only
                 }}
-                let inner: Inner = Inner.only
+                let inner: Inner = Inner.only()
                 return Shape.circle(1 + 2)
             }}
             "
@@ -10741,7 +10869,7 @@ primitive Float"
                     use /shapes
                     let a = Shape.circle(1)
                     fn f() -> Shape {
-                        return Shape.empty
+                        return Shape.empty()
                     }
                     ",
                 ),
@@ -10784,7 +10912,6 @@ primitive Float"
                 let c = Shape.circle()
                 let d = Shape.circle(1, 2)
                 let e = Shape.empty(1)
-                let f = Shape.empty()
                 "
             )),
             [
@@ -10793,26 +10920,383 @@ primitive Float"
                 "`Shape.circle` takes 1 argument, found 0",
                 "`Shape.circle` takes 1 argument, found 2",
                 "argument `value` of `Shape.empty` expects `Void`, found `Int`",
-                "`Shape.empty` takes 1 argument, found 0",
             ]
         );
     }
 
     #[test]
-    fn options_holding_values_need_them() {
+    fn naming_an_option_does_not_create_the_choice() {
         assert_eq!(
             messages_top(&format!(
                 "
                 {SHAPE}
                 let a: Shape = Shape.circle
-                let b: Int = a
+                let b: Shape = Shape.empty
+                let c: ChoiceOption<Shape, Bool> = Shape.circle
                 "
             )),
             [
-                "`Shape.circle` holds a value of type `Int`, so it must be given one, as in `Shape.circle(value)`",
-                // The value still has the choice's type.
-                "cannot assign `Shape` to `b`, which has type `Int`",
+                "cannot assign `ChoiceOption<Shape, Int>` to `a`, which has type `Shape`",
+                "cannot assign `ChoiceOption<Shape, Void>` to `b`, which has type `Shape`",
+                "cannot assign `ChoiceOption<Shape, Int>` to `c`, which has type `ChoiceOption<Shape, Bool>`",
             ]
+        );
+    }
+
+    #[test]
+    fn options_are_values_with_tags() {
+        let src = "
+            choice Shape {
+                square: Int
+                circle: Bool
+                other
+            }
+
+            let a: ChoiceOption<Shape, Int> = Shape.square
+            let b: Shape.Tag = Shape.square.tag()
+            let c: Shape = Shape.square(5)
+            let d: Shape.Tag = Shape.square(5).tag()
+
+            let n: ChoiceOption<Shape, Void> = Shape.other
+            let o: Shape.Tag = Shape.other.tag()
+            let p: Shape = Shape.other()
+            let q: Shape.Tag = Shape.other(Void.new()).tag()
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn options_can_be_called_like_other_values() {
+        let src = format!(
+            "
+            {SHAPE}
+            group Maker {{
+                let make: ChoiceOption<Shape, Int>
+            }}
+
+            fn make(with option: ChoiceOption<Shape, Int>) -> Shape {{
+                return option(1)
+            }}
+
+            fn f(maker: Maker) {{
+                let circle = Shape.circle
+                let a: Shape = circle(1)
+                let b: Shape = circle.call(input: 1)
+                let c: Shape = Shape.circle.call(input: 1)
+                let d: Shape = make(with: Shape.circle)
+                let e: Shape = maker.make(1)
+                let empty = Shape.empty
+                let g: Shape = empty()
+                let h: Shape = empty(Void.new())
+                let i: Shape = empty.call(input: Void.new())
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+    }
+
+    #[test]
+    fn rejects_wrong_values_for_stored_options() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f() {{
+                    let circle = Shape.circle
+                    let a = circle(true)
+                    let b = circle(value: 1)
+                    let c = circle()
+                    let d = circle(1, 2)
+                    let empty = Shape.empty
+                    let e = empty(1)
+                }}
+                "
+            )),
+            [
+                "argument `value` of `circle` expects `Int`, found `Bool`",
+                "argument to `circle` should not have a label, found `value`",
+                "`circle` takes 1 argument, found 0",
+                "`circle` takes 1 argument, found 2",
+                "argument `value` of `empty` expects `Void`, found `Int`",
+            ]
+        );
+    }
+
+    #[test]
+    fn options_take_tuples_as_one_argument() {
+        let pair = "
+            choice Shape {
+                pair: (a: Int, b: Int)
+            }
+            ";
+        let src = format!(
+            "
+            {pair}
+            fn f() {{
+                let a: Shape = Shape.pair((a: 1, b: 2))
+                let pair = Shape.pair
+                let b: Shape = pair((a: 1, b: 2))
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {pair}
+                fn f() {{
+                    let a = Shape.pair(a: 1, b: 2)
+                    let pair = Shape.pair
+                    let b = pair(a: 1, b: 2)
+                }}
+                "
+            )),
+            [
+                "`Shape.pair` takes 1 argument, found 2",
+                "`pair` takes 1 argument, found 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_options_can_leave_out_void() {
+        assert_eq!(
+            messages_top(
+                "
+                group Runner {}
+
+                impl Runner with Call {
+                    fn call(input: Void) -> Int {
+                        return 1
+                    }
+                }
+
+                fn f(runner: Runner) -> Int {
+                    return runner()
+                }
+                "
+            ),
+            ["`runner` is called with `Void`, but was given `()`"]
+        );
+    }
+
+    #[test]
+    fn options_of_generic_choices_infer_their_arguments() {
+        let src = format!(
+            "
+            {GENERICS}
+            let a: ChoiceOption<Optional<Int>, Void> = Optional.none
+            let b: ChoiceOption<Optional<Int>, Int> = Optional.some
+            let c: Optional<Int> = Optional.none()
+            let d: Optional<Int> = Optional<Int>.some(1)
+            let e: Optional<Int>.Tag = Optional<Int>.none.tag()
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {GENERICS}
+                let a: Optional<Int> = Optional.none
+                let b = Optional.none.tag()
+                "
+            )),
+            [
+                "cannot assign `ChoiceOption<Optional<Int>, Void>` to `a`, which has type `Optional<Int>`",
+                "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
+            ]
+        );
+    }
+
+    #[test]
+    fn tags_can_be_compared() {
+        let src = format!(
+            "
+            {SHAPE}
+            fn isEmpty(shape: Shape) -> Bool {{
+                return shape.tag() == Shape.empty.tag()
+            }}
+
+            fn isNotEmpty(shape: Shape) -> Bool {{
+                return shape.tag() != Shape.empty.tag()
+            }}
+            "
+        );
+        assert_eq!(check_top(&src), Ok(()));
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                choice Other {{
+                    only
+                }}
+                let a = Shape.empty.tag() == Other.only.tag()
+                let b = Shape.empty.tag() == Shape.empty
+                let c: Shape.Tag = 0
+                let d: Shape.Tag = Other.only.tag()
+                "
+            )),
+            [
+                "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceTag<Other>`",
+                "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceOption<Shape, Void>`",
+                "cannot assign `Int` to `c`, which has type `ChoiceTag<Shape>`",
+                "cannot assign `ChoiceTag<Other>` to `d`, which has type `ChoiceTag<Shape>`",
+            ]
+        );
+    }
+
+    #[test]
+    fn options_and_tags_cannot_be_matched() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                fn f() {{
+                    match Shape.empty.tag() {{
+                        Shape.empty => {{}}
+                        _ => {{}}
+                    }}
+                    match Shape.empty {{
+                        Shape.empty => {{}}
+                        _ => {{}}
+                    }}
+                }}
+                "
+            )),
+            [
+                "`match` is on `ChoiceTag<Shape>`, so it can't match an option of `Shape`",
+                "`match` is on `ChoiceOption<Shape, Void>`, so it can't match an option of `Shape`",
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_types_can_be_used_anywhere() {
+        let src = "
+            alias ShapeTag = Shape.Tag
+
+            group Holder {
+                let tag: Later.Tag
+            }
+
+            choice Nested {
+                tag: Nested.Tag
+                other: Later.Tag
+            }
+
+            choice Generic<T> {
+                value: T
+                tag: Generic<T>.Tag
+            }
+
+            let a: ShapeTag = Shape.empty.tag()
+
+            fn f() {
+                choice Local {
+                    only
+                    tag: Local.Tag
+                }
+                let tag: Local.Tag = Local.only.tag()
+                let b: Generic<Int>.Tag = Generic<Int>.value.tag()
+            }
+
+            choice Shape {
+                empty
+            }
+
+            choice Later {
+                empty
+            }
+            ";
+        assert_eq!(check_top(src), Ok(()));
+    }
+
+    #[test]
+    fn only_choices_have_tag_types() {
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                alias ID = Int.zero
+                let a: Int.Tag = 1
+                let b: Shape.Kind = 1
+                let c: Missing.Tag = 1
+                let d: missing.Tag = 1
+
+                group Holder<T> {{
+                    let tag: T.Tag
+                }}
+                "
+            )),
+            [
+                "`Int` has no type `zero`",
+                // Generic types are checked before top-level values.
+                "`T` has no type `Tag`",
+                "`Int` has no type `Tag`",
+                "`Shape` has no type `Kind`",
+                "unknown type `Missing`",
+                "unknown type `missing`",
+            ]
+        );
+    }
+
+    #[test]
+    fn tags_are_available_from_any_module() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/main",
+                    "
+                    use /shapes
+                    let a: Shape.Tag = Shape.empty.tag()
+                    let b: Shape.Tag = Shape.empty().tag()
+                    ",
+                ),
+                ("/shapes", SHAPE),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn choices_implement_choice_implicitly() {
+        // Methods are used on values, so an option can be called `tag`.
+        let src = "
+            choice Shape {
+                tag: Int
+            }
+
+            let a: Shape.Tag = Shape.tag.tag()
+            let b: Shape.Tag = Shape.tag(1).tag()
+            ";
+        assert_eq!(check_top(src), Ok(()));
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                impl Shape {{
+                    fn tag() -> Int {{
+                        return 1
+                    }}
+                }}
+                "
+            )),
+            ["`Shape` already has a method `tag`"]
+        );
+        assert_eq!(
+            messages_top(&format!(
+                "
+                {SHAPE}
+                impl Shape with Choice {{
+                    alias Tag = Int
+
+                    fn tag() -> Int {{
+                        return 1
+                    }}
+                }}
+                "
+            )),
+            ["`Shape` already has a method `tag`"]
         );
     }
 
@@ -10839,7 +11323,7 @@ primitive Float"
             messages_top(&format!(
                 "
                 {SHAPE}
-                let shape = Shape.empty
+                let shape = Shape.empty()
                 let a = shape.empty
                 let b = shape.circle(1)
                 "
@@ -10938,7 +11422,7 @@ primitive Float"
             messages_top(&format!(
                 "
                 {SHAPE}
-                let a = Shape.empty == Shape.empty
+                let a = Shape.empty() == Shape.empty()
                 "
             )),
             ["operator `==` expects a type that implements `Equal`, found `Shape`"]
@@ -11821,7 +12305,7 @@ primitive Float"
             }}
 
             fn none() -> Optional<Int> {{
-                return Optional.none
+                return Optional.none()
             }}
 
             fn f(_ value: Optional<Box<Bool>>) -> Box<Int> {{
@@ -12268,7 +12752,7 @@ primitive Float"
                 }}
             }}
             let a = size(of: Figure.circle(2))
-            let b = size(of: Shape.empty)
+            let b = size(of: Shape.empty())
             "
         );
         assert_eq!(check_top(&src), Ok(()));

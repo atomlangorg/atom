@@ -60,6 +60,9 @@ pub enum Primitive {
     /// `Fn`, which is a pointer to a function that takes its `Input` as a
     /// single parameter.
     Fn,
+    /// `ChoiceOption` and `ChoiceTag`, which are the index of an option of a
+    /// choice, in the order they're declared.
+    Tag,
 }
 
 #[derive(Debug)]
@@ -104,6 +107,13 @@ pub enum PrimitiveFn {
     /// `Fn.call`, which calls the function that the `Fn` points to with the
     /// input.
     CallFn,
+    /// `tag` on a choice, which is the option it is.
+    ChoiceTag,
+    /// `ChoiceOption.tag`, which is the option it already is.
+    OptionTag,
+    /// `ChoiceOption.call`, which creates the choice as that option, holding
+    /// the input.
+    CallOption,
 }
 
 #[derive(Debug)]
@@ -216,6 +226,9 @@ pub enum Expr {
         option: usize,
         value: Box<Expr>,
     },
+    /// The option of a choice at this index, in the order they're declared,
+    /// which is a value of the primitive type `ChoiceOption`.
+    Tag(usize),
     /// Reads the field at `index` in the order its group declares them.
     Field {
         receiver: Box<Expr>,

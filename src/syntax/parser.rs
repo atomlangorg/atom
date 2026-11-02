@@ -232,7 +232,8 @@ where
     // tuple type is written like parameters, as in `(at x: Int, y: Int)`,
     // except that `_: Int` has neither a label nor a name. A generic type is
     // given its arguments, as in `Optional<Int>`, and in a generic type's
-    // `impl`, `Self.T` is what its parameter `T` stands for.
+    // `impl`, `Self.T` is what its parameter `T` stands for. A type can belong
+    // to a named type, as in `Shape.Tag`.
     let type_name = recursive(|type_name| {
         let args = type_name
             .clone()
@@ -254,6 +255,10 @@ where
             .ignore_then(just(Token::Dot))
             .ignore_then(ident)
             .map_with(|param, e| TypeName::SelfParam(param, Span::from(e.span())));
+        let member = just(Token::Dot).ignore_then(ident).map_with(|member, e| {
+            let span = Span::from(e.span());
+            (member, span)
+        });
         self_param
             .or(name
                 .clone()
@@ -261,6 +266,15 @@ where
                 .map(|(name, args)| match args {
                     Some(args) => TypeName::Generic { name, args },
                     None => TypeName::Named(name),
+                })
+                .then(member.or_not())
+                .map(|(ty, member)| match member {
+                    Some((member, span)) => TypeName::Member {
+                        ty: Box::new(ty),
+                        member,
+                        span,
+                    },
+                    None => ty,
                 }))
             .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
             .labelled("type")
@@ -3334,6 +3348,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_types_belonging_to_types() {
+        let member = |ty, member: &str| TypeName::Member {
+            ty: Box::new(ty),
+            member: member.to_string(),
+            span: Span::default(),
+        };
+        assert_eq!(
+            decl_type("let t: Shape.Tag = t"),
+            member(TypeName::new("Shape"), "Tag")
+        );
+        assert_eq!(
+            decl_type("let t: Optional<Int>.Tag = t"),
+            member(
+                TypeName::Generic {
+                    name: Name::new("Optional"),
+                    args: vec![TypeName::new("Int")],
+                },
+                "Tag"
+            )
+        );
+        for src in [
+            "let t: Shape. = t",
+            "let t: .Tag = t",
+            "let t: Shape.Tag.Tag = t",
+            "let t: (x: Int).Tag = t",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
     fn rejects_malformed_aliases() {
         for src in [
             "alias",
@@ -3343,7 +3388,6 @@ mod tests {
             "alias ID: Int",
             "alias ID = 1",
             "alias ID = Int Bool",
-            "alias ID = Int.zero",
             "alias other::ID = Int",
             "alias alias = Int",
             "alias ID = alias",
@@ -3510,7 +3554,6 @@ mod tests {
             "let x = ./a/::b",
             // `.` doesn't qualify names.
             "let x = /a.b",
-            "let x: a.B = 1",
             // Assignments can't be qualified.
             "fn f() {\na::x = 1\n}",
         ] {
