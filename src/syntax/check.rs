@@ -1907,15 +1907,16 @@ impl<'a> Checker<'a> {
     }
 
     /// The package and path within it that `path` leads to. A path starting
-    /// with `/` is from the root of the project, one starting with `./` is
-    /// from the current file's directory, one starting with `../` is from above
-    /// that, and one starting with a package's name is from the root of that
-    /// package. Files can't be found by name alone, or above the root of their
-    /// own package or the project, so these paths never leave it.
+    /// with `/` is from the root of the current file's package or the project,
+    /// one starting with `./` is from the current file's directory, one starting
+    /// with `../` is from above that, and one starting with a package's name is
+    /// from the root of that package. Files can't be found by name alone, or
+    /// above the root of their own package or the project, so only a package's
+    /// name can leave it.
     fn full_path(&self, path: &'a ImportPath) -> Option<(Option<&'a str>, Vec<&'a String>)> {
         let current = &self.files[self.file];
         Some(match path {
-            ImportPath::Absolute(segments) => (None, segments.iter().collect()),
+            ImportPath::Absolute(segments) => (current.package, segments.iter().collect()),
             ImportPath::Relative(segments) => (
                 current.package,
                 self.current_dir().iter().chain(segments).collect(),
@@ -8206,33 +8207,47 @@ mod tests {
 
     #[test]
     fn parent_paths_can_not_leave_the_stdlib() {
-        let check = |path: &[&str], src: &str| {
-            let stdlib = File {
-                path: path.iter().map(|s| s.to_string()).collect(),
-                program: parse(src).expect("source should parse"),
-            };
-            let project = parsed_files(&[("/secret", "let hidden = 1")]);
-            let mut checker = Checker::default();
-            checker.add_stdlib();
-            checker.add_file(Some(STDLIB_PACKAGE), &stdlib);
-            checker.add_file(None, &project[0]);
-            checker.check_files();
-            checker
-                .errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        };
         assert_eq!(
-            check(&["extra"], "use ../secret"),
+            messages_in_stdlib(&["extra"], "use ../secret"),
             ["stdlib/extra: `../secret` goes above the root directory"]
         );
         // Going up inside it stays inside it.
         assert_eq!(
-            check(&["sub", "extra"], "use ../secret"),
+            messages_in_stdlib(&["sub", "extra"], "use ../secret"),
             ["stdlib/sub/extra: cannot find file `../secret`"]
         );
-        assert!(check(&["sub", "extra"], "use ../core").is_empty());
+        assert!(messages_in_stdlib(&["sub", "extra"], "use ../core").is_empty());
+    }
+
+    #[test]
+    fn absolute_paths_in_the_stdlib_start_from_its_root() {
+        assert!(messages_in_stdlib(&["sub", "extra"], "use /core").is_empty());
+        assert!(messages_in_stdlib(&["sub", "extra"], "use /\nlet a: core::Int = 1").is_empty());
+        // Which means they can't reach the project's files.
+        assert_eq!(
+            messages_in_stdlib(&["extra"], "use /secret"),
+            ["stdlib/extra: cannot find file `/secret`"]
+        );
+        assert_eq!(
+            messages_in_stdlib(&["extra"], "use /\nlet a = hidden"),
+            ["stdlib/extra: `hidden` is not declared"]
+        );
+    }
+
+    /// The errors from checking `src` as a file of the standard library at
+    /// `path`, in a project that has a file called `/secret`.
+    fn messages_in_stdlib(path: &[&str], src: &str) -> Vec<String> {
+        let stdlib = File {
+            path: path.iter().map(|s| s.to_string()).collect(),
+            program: parse(src).expect("source should parse"),
+        };
+        let project = parsed_files(&[("/secret", "let hidden = 1")]);
+        let mut checker = Checker::default();
+        checker.add_stdlib();
+        checker.add_file(Some(STDLIB_PACKAGE), &stdlib);
+        checker.add_file(None, &project[0]);
+        checker.check_files();
+        checker.errors.iter().map(ToString::to_string).collect()
     }
 
     #[test]

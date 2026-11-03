@@ -37,7 +37,8 @@ impl Span {
 /// only appear in `use`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportPath {
-    /// `/dir/other`: from the root of the project.
+    /// `/dir/other`: from the root of the project, or of its package if the
+    /// current file is in one.
     Absolute(Vec<String>),
     /// `./dir/other`: from the directory of the current file, within its
     /// package if it's in one.
