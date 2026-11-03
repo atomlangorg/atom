@@ -26,13 +26,16 @@ use syntax::File;
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
-    let files = match read_atom_files(&root) {
-        Ok(files) => files,
+    let AtomFiles { files, symlinks } = match read_atom_files(&root) {
+        Ok(found) => found,
         Err(err) => {
             eprintln!("error reading {}: {err}", root.display());
             return;
         }
     };
+    for symlink in &symlinks {
+        eprintln!("warning: `{symlink}` is a symlink, so it won't be read");
+    }
 
     let mut parsed_files = vec![];
     let mut parsed = true;
@@ -155,11 +158,29 @@ fn print_report(report: &Report<(&str, Range<usize>)>, file: &str, src: &str) {
         .expect("can write to stderr");
 }
 
-/// Reads every `.atom` file under `root`, without following symlinks, returning
-/// each one's path from `root` without `.atom`, such as `["dir", "other"]`, along
-/// with its source.
-fn read_atom_files(root: &Path) -> io::Result<Vec<(Vec<String>, String)>> {
+/// What's found by reading a project's root.
+#[derive(Debug, PartialEq, Eq)]
+struct AtomFiles {
+    /// Each `.atom` file's path from the root without `.atom`, such as
+    /// `["dir", "other"]`, along with its source.
+    files: Vec<(Vec<String>, String)>,
+    /// The path of each symlink that wasn't followed, such as `/dir/link`, if it
+    /// looks like it could have led to `.atom` files.
+    symlinks: Vec<String>,
+}
+
+/// Reads every `.atom` file under `root`, without following symlinks.
+fn read_atom_files(root: &Path) -> io::Result<AtomFiles> {
+    let segments = |path: &Path| -> Vec<String> {
+        path.strip_prefix(root)
+            .expect("found under `root`")
+            .iter()
+            .map(|segment| segment.to_string_lossy().into_owned())
+            .collect()
+    };
+    let is_atom = |path: &Path| path.extension().is_some_and(|ext| ext == "atom");
     let mut files = vec![];
+    let mut symlinks = vec![];
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         for entry in fs::read_dir(&dir)? {
@@ -168,27 +189,22 @@ fn read_atom_files(root: &Path) -> io::Result<Vec<(Vec<String>, String)>> {
             let file_type = entry.file_type()?;
             // A symlink could lead outside `root`, or back into it forever.
             if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
+                if path.is_dir() || is_atom(&path) {
+                    symlinks.push(file_name(&segments(&path)));
+                }
+            } else if file_type.is_dir() {
                 dirs.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "atom") {
-                let relative = path
-                    .strip_prefix(root)
-                    .expect("found under `root`")
-                    .with_extension("");
-                let segments = relative
-                    .iter()
-                    .map(|segment| segment.to_string_lossy().into_owned())
-                    .collect();
-                files.push((segments, fs::read_to_string(&path)?));
+            } else if is_atom(&path) {
+                let src = fs::read_to_string(&path)?;
+                files.push((segments(&path.with_extension("")), src));
             }
         }
     }
 
     // Sorted so that errors are always reported in the same order.
     files.sort();
-    Ok(files)
+    symlinks.sort();
+    Ok(AtomFiles { files, symlinks })
 }
 
 #[cfg(test)]
@@ -250,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn reading_files_skips_symlinks() {
+    fn reading_files_skips_symlinks_and_reports_them() {
         let temp = std::env::temp_dir().join(format!("atom-symlinks-{}", std::process::id()));
         let root = temp.join("root");
         let outside = temp.join("outside");
@@ -259,21 +275,31 @@ mod tests {
         fs::write(root.join("main.atom"), "main").unwrap();
         fs::write(root.join("dir/other.atom"), "other").unwrap();
         fs::write(outside.join("secret.atom"), "secret").unwrap();
+        fs::write(outside.join("notes.txt"), "notes").unwrap();
         // A directory and a file that lead outside the root, and a directory
         // that leads back into it, which would never finish if it was followed.
         symlink(&outside, root.join("linked")).unwrap();
         symlink(outside.join("secret.atom"), root.join("linked.atom")).unwrap();
         symlink(&root, root.join("dir/loop")).unwrap();
+        // A `.atom` file that no longer exists is still worth reporting.
+        symlink(outside.join("gone.atom"), root.join("gone.atom")).unwrap();
+        // These couldn't have led to any `.atom` files.
+        symlink(outside.join("notes.txt"), root.join("notes.txt")).unwrap();
+        symlink(outside.join("gone.txt"), root.join("gone.txt")).unwrap();
 
-        let files = read_atom_files(&root);
+        let found = read_atom_files(&root);
         fs::remove_dir_all(&temp).unwrap();
 
-        let expected =
-            [(vec!["dir", "other"], "other"), (vec!["main"], "main")].map(|(path, src)| {
+        let files = [(vec!["dir", "other"], "other"), (vec!["main"], "main")]
+            .map(|(path, src)| {
                 let path = path.into_iter().map(str::to_string).collect::<Vec<_>>();
                 (path, src.to_string())
-            });
-        assert_eq!(files.unwrap(), expected);
+            })
+            .to_vec();
+        let symlinks = ["/dir/loop", "/gone.atom", "/linked", "/linked.atom"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(found.unwrap(), AtomFiles { files, symlinks });
     }
 
     #[test]
