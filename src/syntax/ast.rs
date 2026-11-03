@@ -33,7 +33,8 @@ impl Span {
     }
 }
 
-/// The path to a module, as in `use /dir/other`. Paths only appear in `use`s.
+/// The path to a file or a module, as in `use /dir/other` or `use /dir/`. Paths
+/// only appear in `use`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModulePath {
     /// `/dir/other`: from the root of the project.
@@ -44,8 +45,8 @@ pub enum ModulePath {
     /// `stdlib/core`: from the root of a package, whose name comes first. Only
     /// a directory can have just the one segment, as in `stdlib/`.
     Package(Vec<String>),
-    /// `other`: by name alone, which never leads to a module, but is parsed so
-    /// that the checker can explain why.
+    /// `other`: by name alone, which never leads to a file, but is parsed so that
+    /// the checker can explain why.
     Named(String),
 }
 
@@ -63,14 +64,14 @@ impl fmt::Display for ModulePath {
 /// What a `use` imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Import {
-    /// `use /dir/other` or `use /dir/other as renamed`: one module, whose names
+    /// `use /dir/other` or `use /dir/other as renamed`: one file, whose names
     /// are qualified by its alias if it has one, and otherwise by its own name.
     Module {
         path: ModulePath,
         alias: Option<String>,
     },
-    /// `use /dir/`: every module in a directory, including those in its
-    /// subdirectories, given the directory's path.
+    /// `use /dir/`: a module, which is every file in a directory, including
+    /// those in its subdirectories, given the directory's path.
     /// The path can be empty, as in `use ./`, or just a package's name, as in
     /// `use stdlib/`.
     Directory(ModulePath),
@@ -371,7 +372,7 @@ pub struct Stmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtKind {
     /// `use /dir/other` or `use /dir/`: makes the names declared at the top
-    /// level of other modules visible. Only allowed at the top level.
+    /// level of other files visible. Only allowed at the top level.
     Use(Import),
     /// `let name = value` or `var name = value`
     ///

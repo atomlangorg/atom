@@ -18,8 +18,10 @@
 //! reassigned, that functions are called and return correctly, that groups
 //! are well formed, and that every expression is well typed.
 //!
-//! Every file is a module, named by its path from the project root, so
-//! `dir/other.atom` is `/dir/other`. The top level of a module can only hold
+//! Every file is named by its path from the project root, so `dir/other.atom`
+//! is `/dir/other`, and a directory of files and other directories is a module,
+//! so `dir` is `/dir/`. Internally, a `Module` is a file, which is what's
+//! checked. The top level of a file can only hold
 //! declarations, which are hoisted so they can be used in any order, even
 //! across modules. This is safe because functions can't capture values from
 //! outside them, so calling one early never reads a value that hasn't been set
@@ -143,16 +145,23 @@ pub enum CheckError {
     /// A name without a module was declared in more than one of the modules
     /// it could come from.
     Ambiguous { name: String, modules: Vec<String> },
-    /// A `use` named a module that doesn't exist.
-    UnknownModule(String),
+    /// A `use` named a file that doesn't exist.
+    UnknownFile(String),
+    /// A `use` named a module without the slash that imports its files.
+    ModuleNotFile { path: String, aliased: bool },
+    /// A `use` named a file with the slash that imports a module's files.
+    FileNotModule(String),
+    /// A `use` named something that exists, but without the `./` or `/` that
+    /// every path in the project starts with, given what it could have meant.
+    PathWithoutStart(Vec<String>),
     /// A qualified name's module isn't the current module or one it imports.
     NotImported(String),
     /// A `use` gave a module an alias when it already has a different one.
-    ModuleAliasedTwice { module: String, alias: String },
-    /// A `use` of a directory found no modules that could be imported.
-    EmptyDirectory(String),
-    /// A package was used where one of its modules was needed.
-    PackageNotModule(String),
+    FileAliasedTwice { module: String, alias: String },
+    /// A `use` of a module found no files that could be imported.
+    EmptyModule(String),
+    /// A package was used where one of its files was needed.
+    PackageNotFile(String),
     /// A primitive type was constructed, such as `Int`, whose values come
     /// from literals.
     ConstructedPrimitive(Type),
@@ -161,12 +170,12 @@ pub enum CheckError {
     /// A group was constructed outside the `impl`s of its type.
     ConstructedOutsideImpl(Type),
     /// A group was constructed outside the module that declares it.
-    ConstructedOutsideModule { ty: Type, module: String },
+    ConstructedOutsideFile { ty: Type, module: String },
     /// `::` was used after a name that's declared, but isn't a module.
-    NotAModule(String),
+    NotAFile(String),
     /// An alias is the name of another module too, or a qualified name's module
     /// is the name of more than one module.
-    ModuleNameClash { name: String, modules: Vec<String> },
+    FileNameClash { name: String, modules: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
     /// An alias is an alias of itself, directly or through other aliases.
@@ -320,7 +329,7 @@ pub enum CheckError {
         kind: MemberKind,
     },
     /// `.` was used after a module's name, where `::` was probably meant.
-    ModuleNotValue { module: String, member: String },
+    FileNotValue { module: String, member: String },
     /// A member was declared with the same name as another member of its
     /// type that it shares names with. Fields share names with methods, and
     /// options share names with static functions.
@@ -464,22 +473,47 @@ impl fmt::Display for CheckError {
                 "`{name}` is declared in {}, so it must be qualified",
                 quoted_list(modules, "and")
             ),
-            Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
-            Self::NotImported(path) => write!(f, "`{path}` is not an imported module"),
-            Self::ModuleAliasedTwice { module, alias } => {
-                write!(f, "`{module}` is already imported as `{alias}`")
-            }
-            Self::EmptyDirectory(import) => {
+            Self::UnknownFile(path) => write!(f, "cannot find file `{path}`"),
+            Self::ModuleNotFile {
+                path,
+                aliased: false,
+            } => write!(
+                f,
+                "`{path}` is a module, so use `{path}/` to import every file in it"
+            ),
+            Self::ModuleNotFile {
+                path,
+                aliased: true,
+            } => write!(
+                f,
+                "`{path}` is a module, so it can't have an alias, but `{path}/` imports every file in it"
+            ),
+            Self::FileNotModule(path) => {
                 write!(
                     f,
-                    "`{import}` doesn't match any modules that can be imported"
+                    "`{path}` is a file, so use it without the trailing slash"
                 )
             }
-            Self::PackageNotModule(package) => write!(
+            Self::PathWithoutStart(paths) => write!(
                 f,
-                "`{package}` is a package, so use one of its modules, such as `{package}/core`"
+                "paths start with `./` or `/`, so use {}",
+                quoted_list(paths, "or")
             ),
-            Self::ConstructedOutsideModule { ty, module } => write!(
+            Self::NotImported(path) => write!(f, "`{path}` is not an imported file"),
+            Self::FileAliasedTwice { module, alias } => {
+                write!(f, "`{module}` is already imported as `{alias}`")
+            }
+            Self::EmptyModule(import) => {
+                write!(
+                    f,
+                    "`{import}` doesn't contain any files that can be imported"
+                )
+            }
+            Self::PackageNotFile(package) => write!(
+                f,
+                "`{package}` is a package, so use one of its files, such as `{package}/core`"
+            ),
+            Self::ConstructedOutsideFile { ty, module } => write!(
                 f,
                 "`{ty}` can only be constructed in `{module}`, which declares it"
             ),
@@ -494,11 +528,10 @@ impl fmt::Display for CheckError {
                 f,
                 "`{name}` can't be a primitive, since only the standard library can declare them"
             ),
-            Self::NotAModule(name) => write!(
-                f,
-                "`{name}` is not a module, so it can't be followed by `::`"
-            ),
-            Self::ModuleNameClash { name, modules } => write!(
+            Self::NotAFile(name) => {
+                write!(f, "`{name}` is not a file, so it can't be followed by `::`")
+            }
+            Self::FileNameClash { name, modules } => write!(
                 f,
                 "`{name}` is the name of {}, so use `as` to give them different names",
                 quoted_list(modules, "and")
@@ -706,9 +739,9 @@ impl fmt::Display for CheckError {
                 "`{ty}.{member}` is {}, so it must be used on a value of `{ty}` rather than `{ty}` itself",
                 kind.with_article()
             ),
-            Self::ModuleNotValue { module, member } => write!(
+            Self::FileNotValue { module, member } => write!(
                 f,
-                "`{module}` is a module, not a value, so use `{module}::{member}` to refer to a name in it"
+                "`{module}` is a file, not a value, so use `{module}::{member}` to refer to a name in it"
             ),
             Self::MemberRedeclared {
                 ty,
@@ -1706,12 +1739,13 @@ impl<'a> Checker<'a> {
             match import {
                 Import::Module { path, alias } => match self.resolve_path(path) {
                     Some(module) => uses.push((module, alias.as_deref(), stmt.span)),
-                    None => self.error(stmt.span, self.unknown_module(path)),
+                    None => self.error(stmt.span, self.unknown_module(path, alias.is_some())),
                 },
                 Import::Directory(dir) => {
                     let found = self.resolve_directory(dir);
                     if found.is_empty() {
-                        self.error(stmt.span, CheckError::EmptyDirectory(import.to_string()));
+                        let error = self.empty_module(dir, import);
+                        self.error(stmt.span, error);
                     }
                     uses.extend(found.into_iter().map(|module| (module, None, stmt.span)));
                 }
@@ -1738,7 +1772,7 @@ impl<'a> Checker<'a> {
                 (Some(import), Some(alias)) if import.name != alias => {
                     let module = self.modules[module].display.clone();
                     let alias = import.name.to_string();
-                    self.error(span, CheckError::ModuleAliasedTwice { module, alias });
+                    self.error(span, CheckError::FileAliasedTwice { module, alias });
                 }
                 // Importing a module twice, or importing itself, is harmless.
                 (Some(_), _) => {}
@@ -1760,21 +1794,68 @@ impl<'a> Checker<'a> {
                     .map(|import| self.modules[import.module].display.clone())
                     .to_vec();
                 let name = import.name.to_string();
-                self.error(span, CheckError::ModuleNameClash { name, modules });
+                self.error(span, CheckError::FileNameClash { name, modules });
             }
         }
 
         self.modules[self.module].imports = imports;
     }
 
-    /// The error for a module path that doesn't lead to a module.
-    fn unknown_module(&self, path: &ModulePath) -> CheckError {
+    /// The error for a path that doesn't lead to a file.
+    fn unknown_module(&self, path: &ModulePath, aliased: bool) -> CheckError {
+        let suggestions = self.paths_with_start(path, false);
         match path {
             ModulePath::Named(name) if name == STDLIB_PACKAGE => {
-                CheckError::PackageNotModule(name.clone())
+                CheckError::PackageNotFile(name.clone())
             }
-            _ => CheckError::UnknownModule(path.to_string()),
+            _ if !self.resolve_directory(path).is_empty() => CheckError::ModuleNotFile {
+                path: path.to_string(),
+                aliased,
+            },
+            _ if !suggestions.is_empty() => CheckError::PathWithoutStart(suggestions),
+            _ => CheckError::UnknownFile(path.to_string()),
         }
+    }
+
+    /// The error for `import`, whose path `dir` doesn't lead to any files that
+    /// can be imported.
+    fn empty_module(&self, dir: &ModulePath, import: &Import) -> CheckError {
+        let suggestions = self.paths_with_start(dir, true);
+        match dir {
+            ModulePath::Absolute(segments) | ModulePath::Relative(segments)
+                if segments.is_empty() =>
+            {
+                CheckError::EmptyModule(import.to_string())
+            }
+            _ if self.resolve_path(dir).is_some() => CheckError::FileNotModule(dir.to_string()),
+            _ if !suggestions.is_empty() => CheckError::PathWithoutStart(suggestions),
+            _ => CheckError::EmptyModule(import.to_string()),
+        }
+    }
+
+    /// What `path` could have meant, if it's missing the `./` or `/` that every
+    /// path in the project starts with. A path could be to both a file and a
+    /// module, so `prefer_module` says which it looks like.
+    fn paths_with_start(&self, path: &ModulePath, prefer_module: bool) -> Vec<String> {
+        let segments = match path {
+            ModulePath::Named(name) if name != STDLIB_PACKAGE => std::slice::from_ref(name),
+            ModulePath::Package(segments) if segments[0] != STDLIB_PACKAGE => &segments[..],
+            _ => return vec![],
+        };
+        [ModulePath::Relative, ModulePath::Absolute]
+            .into_iter()
+            .filter_map(|start| {
+                let path = start(segments.to_vec());
+                let file = self.resolve_path(&path).map(|_| path.to_string());
+                let module =
+                    (!self.resolve_directory(&path).is_empty()).then(|| format!("{path}/"));
+                if prefer_module {
+                    module.or(file)
+                } else {
+                    file.or(module)
+                }
+            })
+            .collect()
     }
 
     /// Finds the module at `path`.
@@ -1837,14 +1918,14 @@ impl<'a> Checker<'a> {
             [import] => return Ok(import.module),
             // Modules aren't identifiers, so a name can be both. If it's only
             // an identifier, that's probably the mistake.
-            [] if self.is_declared(name) => CheckError::NotAModule(name.to_string()),
-            [] if name == STDLIB_PACKAGE => CheckError::PackageNotModule(name.to_string()),
+            [] if self.is_declared(name) => CheckError::NotAFile(name.to_string()),
+            [] if name == STDLIB_PACKAGE => CheckError::PackageNotFile(name.to_string()),
             [] => CheckError::NotImported(name.to_string()),
             // An alias's clash is reported at its `use`.
             _ if matches.iter().any(|import| import.span.is_some()) => {
                 return Err(LookupError::Reported);
             }
-            _ => CheckError::ModuleNameClash {
+            _ => CheckError::FileNameClash {
                 name: name.to_string(),
                 modules: matches
                     .iter()
@@ -4752,7 +4833,7 @@ impl<'a> Checker<'a> {
                 {
                     self.error(
                         receiver.span,
-                        CheckError::ModuleNotValue {
+                        CheckError::FileNotValue {
                             module: name.name.clone(),
                             member: member.to_string(),
                         },
@@ -5429,7 +5510,7 @@ impl<'a> Checker<'a> {
         if declared_in != self.module {
             self.error(
                 span,
-                CheckError::ConstructedOutsideModule {
+                CheckError::ConstructedOutsideFile {
                     ty: ty.clone(),
                     module: self.modules[declared_in].display.clone(),
                 },
@@ -7994,7 +8075,7 @@ mod tests {
         );
         assert_eq!(
             file_messages(&[("/dir/a", "use ./dir/b"), ("/dir/b", "")]),
-            ["/dir/a: cannot find module `./dir/b`"]
+            ["/dir/a: cannot find file `./dir/b`"]
         );
     }
 
@@ -8003,9 +8084,9 @@ mod tests {
         assert_eq!(
             file_messages(&[("/main", "use /missing\nuse ./missing\nuse other")]),
             [
-                "/main: cannot find module `/missing`",
-                "/main: cannot find module `./missing`",
-                "/main: cannot find module `other`",
+                "/main: cannot find file `/missing`",
+                "/main: cannot find file `./missing`",
+                "/main: cannot find file `other`",
             ]
         );
     }
@@ -8019,7 +8100,7 @@ mod tests {
             ]),
             [
                 "/main: `x` is not declared",
-                "/main: `lib` is not an imported module",
+                "/main: `lib` is not an imported file",
             ]
         );
     }
@@ -8245,7 +8326,7 @@ mod tests {
                 ),
                 ("/lib", "let y = 1"),
             ]),
-            ["/main: `lib` is not an imported module"]
+            ["/main: `lib` is not an imported file"]
         );
     }
 
@@ -8311,7 +8392,7 @@ mod tests {
                 ("/a", "use /lib as renamed"),
                 ("/lib", "let y = 1"),
             ]),
-            ["/main: `renamed` is not an imported module"]
+            ["/main: `renamed` is not an imported file"]
         );
     }
 
@@ -8323,7 +8404,7 @@ mod tests {
         ] {
             assert_eq!(
                 file_messages(&[("/main", main), ("/lib", "let z = 1")]),
-                ["/main: `lib` is not an imported module"]
+                ["/main: `lib` is not an imported file"]
             );
         }
     }
@@ -8355,7 +8436,7 @@ mod tests {
         );
         assert_eq!(
             file_messages(&[("/main", "use /main as me\nlet a = 1\nlet b = main::a")]),
-            ["/main: `main` is not an imported module"]
+            ["/main: `main` is not an imported file"]
         );
     }
 
@@ -8493,8 +8574,8 @@ mod tests {
         assert_eq!(
             file_messages(&[("/main", "use /missing as x\nlet y = x::z")]),
             [
-                "/main: cannot find module `/missing`",
-                "/main: `x` is not an imported module",
+                "/main: cannot find file `/missing`",
+                "/main: `x` is not an imported file",
             ]
         );
     }
@@ -8507,7 +8588,7 @@ mod tests {
                 ("/lib", "let y = 1"),
             ]),
             [
-                "/main: `renamed` is a module, not a value, so use `renamed::y` to refer to a name in it"
+                "/main: `renamed` is a file, not a value, so use `renamed::y` to refer to a name in it"
             ]
         );
     }
@@ -9202,14 +9283,14 @@ mod tests {
                 ("/lib", "fn helper() {}"),
             ]),
             [
-                "/main: `x` is not a module, so it can't be followed by `::`",
-                "/main: `Point` is not a module, so it can't be followed by `::`",
-                "/main: `helper` is not a module, so it can't be followed by `::`",
-                "/main: `missing` is not an imported module",
-                "/main: `local` is not a module, so it can't be followed by `::`",
-                "/main: `user` is not a module, so it can't be followed by `::`",
+                "/main: `x` is not a file, so it can't be followed by `::`",
+                "/main: `Point` is not a file, so it can't be followed by `::`",
+                "/main: `helper` is not a file, so it can't be followed by `::`",
+                "/main: `missing` is not an imported file",
+                "/main: `local` is not a file, so it can't be followed by `::`",
+                "/main: `user` is not a file, so it can't be followed by `::`",
                 // Even though functions can't use `x`, it's still declared.
-                "/main: `x` is not a module, so it can't be followed by `::`",
+                "/main: `x` is not a file, so it can't be followed by `::`",
             ]
         );
     }
@@ -9604,7 +9685,7 @@ mod tests {
             ]),
             [
                 "/main: `f` is not declared",
-                "/main: `b` is not an imported module",
+                "/main: `b` is not an imported file",
             ]
         );
     }
@@ -9919,8 +10000,8 @@ mod tests {
                 ("/user", "group User {}\nfn make() {}"),
             ]),
             [
-                "/main: `user` is a module, not a value, so use `user::User` to refer to a name in it",
-                "/main: `user` is a module, not a value, so use `user::make` to refer to a name in it",
+                "/main: `user` is a file, not a value, so use `user::User` to refer to a name in it",
+                "/main: `user` is a file, not a value, so use `user::make` to refer to a name in it",
                 "/main: `Int` has no field or method `age`",
             ]
         );
@@ -10202,9 +10283,9 @@ mod tests {
                 ",
             )]),
             [
-                "/main: `stdlib` is a package, so use one of its modules, such as `stdlib/core`",
-                "/main: cannot find module `stdlib/missing`",
-                "/main: `stdlib` is a package, so use one of its modules, such as `stdlib/core`",
+                "/main: `stdlib` is a package, so use one of its files, such as `stdlib/core`",
+                "/main: cannot find file `stdlib/missing`",
+                "/main: `stdlib` is a package, so use one of its files, such as `stdlib/core`",
             ]
         );
     }
@@ -11226,7 +11307,7 @@ primitive Float"
         // library.
         assert_eq!(
             file_messages(&[("/main", "use ./core")]),
-            ["/main: cannot find module `./core`"]
+            ["/main: cannot find file `./core`"]
         );
         assert_eq!(
             check_files(&[("/main", "use ./core"), ("/core", "group Int {}")]),
@@ -11333,6 +11414,157 @@ primitive Float"
     }
 
     #[test]
+    fn modules_need_a_slash_to_be_imported() {
+        // Whichever way the path is written, including when its modules are
+        // only in its subdirectories.
+        for (main, path) in [
+            ("use ./dir", "./dir"),
+            ("use /dir", "/dir"),
+            ("use ./dir/sub", "./dir/sub"),
+            ("use /dir/sub", "/dir/sub"),
+        ] {
+            let files = [("/main", main), ("/dir/sub/other", "let x = 1")];
+            assert_eq!(
+                file_messages(&files),
+                [format!(
+                    "/main: `{path}` is a module, so use `{path}/` to import every file in it"
+                )]
+            );
+            let errs = check_files(&files).expect_err("the slash is missing");
+            assert_eq!(pointed_at(&files, &errs[0]), main);
+
+            // Following the advice works.
+            let fixed = format!("{main}/\nlet y = x");
+            assert_eq!(
+                check_files(&[("/main", &fixed), ("/dir/sub/other", "let x = 1")]),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn files_can_not_be_imported_with_a_slash() {
+        for (main, path) in [
+            ("use ./lib/", "./lib"),
+            ("use /lib/", "/lib"),
+            ("use stdlib/core/", "stdlib/core"),
+        ] {
+            let files = [("/main", main), ("/lib", "let x = 1")];
+            assert_eq!(
+                file_messages(&files),
+                [format!(
+                    "/main: `{path}` is a file, so use it without the trailing slash"
+                )]
+            );
+            let errs = check_files(&files).expect_err("the slash shouldn't be there");
+            assert_eq!(pointed_at(&files, &errs[0]), main);
+        }
+        // Without any segments, it's not a file's path, even if `./` is
+        // `/dir/`, which has the same path as the file `/dir`.
+        assert_eq!(
+            file_messages(&[("/dir/main", "use ./"), ("/dir", "")]),
+            ["/dir/main: `./` doesn't contain any files that can be imported"]
+        );
+    }
+
+    #[test]
+    fn paths_without_a_start_suggest_what_exists() {
+        let message = |paths: &str| format!("/main: paths start with `./` or `/`, so use {paths}");
+        let files = |main| [("/main", main), ("/dir/sub/other", ""), ("/lib", "")];
+        assert_eq!(
+            file_messages(&files("use dir")),
+            [message("`./dir/` or `/dir/`")]
+        );
+        assert_eq!(
+            file_messages(&files("use dir/")),
+            [message("`./dir/` or `/dir/`")]
+        );
+        assert_eq!(
+            file_messages(&files("use dir/sub")),
+            [message("`./dir/sub/` or `/dir/sub/`")]
+        );
+        assert_eq!(
+            file_messages(&files("use dir/sub/other")),
+            [message("`./dir/sub/other` or `/dir/sub/other`")]
+        );
+        assert_eq!(
+            file_messages(&files("use lib")),
+            [message("`./lib` or `/lib`")]
+        );
+        assert_eq!(
+            file_messages(&files("use lib/")),
+            [message("`./lib` or `/lib`")]
+        );
+        // Only `/` leads to it from `/a/main`.
+        assert_eq!(
+            file_messages(&[("/a/main", "use lib"), ("/lib", "")]),
+            ["/a/main: paths start with `./` or `/`, so use `/lib`"]
+        );
+        // Each is what it looks like when it could be either.
+        let both = |main| [("/main", main), ("/dir", ""), ("/dir/other", "")];
+        assert_eq!(
+            file_messages(&both("use dir")),
+            [message("`./dir` or `/dir`")]
+        );
+        assert_eq!(
+            file_messages(&both("use dir/")),
+            [message("`./dir/` or `/dir/`")]
+        );
+    }
+
+    #[test]
+    fn paths_without_a_start_are_unknown_if_nothing_exists() {
+        assert_eq!(
+            file_messages(&[("/main", "use missing\nuse missing/\nuse missing/file")]),
+            [
+                "/main: cannot find file `missing`",
+                "/main: `missing/` doesn't contain any files that can be imported",
+                "/main: cannot find file `missing/file`",
+            ]
+        );
+    }
+
+    #[test]
+    fn modules_with_aliases_are_told_they_can_not_have_one() {
+        assert_eq!(
+            file_messages(&[("/main", "use ./dir as x"), ("/dir/other", "let y = 1")]),
+            [
+                "/main: `./dir` is a module, so it can't have an alias, but `./dir/` imports every file in it"
+            ]
+        );
+    }
+
+    #[test]
+    fn modules_are_only_suggested_if_they_have_files_to_import() {
+        // `/dir/main` itself is the only module in `/dir`.
+        assert_eq!(
+            file_messages(&[("/dir/main", "use /dir")]),
+            ["/dir/main: cannot find file `/dir`"]
+        );
+        assert_eq!(
+            file_messages(&[("/main", "use ./missing"), ("/dir/other", "")]),
+            ["/main: cannot find file `./missing`"]
+        );
+        // `/dir/other` is in the module `/dir/`, but `/di/` doesn't exist.
+        assert_eq!(
+            file_messages(&[("/main", "use /di"), ("/dir/other", "")]),
+            ["/main: cannot find file `/di`"]
+        );
+    }
+
+    #[test]
+    fn files_with_the_same_name_as_a_module_are_imported_as_files() {
+        assert_eq!(
+            check_files(&[
+                ("/main", "use /dir\nlet a: Int = x"),
+                ("/dir", "let x = 1"),
+                ("/dir/other", "let y = true"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn imports_every_module_in_a_directory() {
         assert_eq!(
             check_files(&[
@@ -11434,8 +11666,8 @@ primitive Float"
         assert_eq!(
             file_messages(&[("/main", "use ./\nuse /missing/")]),
             [
-                "/main: `./` doesn't match any modules that can be imported",
-                "/main: `/missing/` doesn't match any modules that can be imported",
+                "/main: `./` doesn't contain any files that can be imported",
+                "/main: `/missing/` doesn't contain any files that can be imported",
             ]
         );
     }
@@ -13020,7 +13252,7 @@ primitive Float"
                 ("/other", other),
                 ("/main", "fn f() -> Fn<(), Int> {\nreturn other::one\n}"),
             ]),
-            ["/main: `other` is not an imported module"]
+            ["/main: `other` is not an imported file"]
         );
     }
 

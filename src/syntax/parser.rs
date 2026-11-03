@@ -834,10 +834,25 @@ where
     // `as` only means this here, so it can still be used as a name or label, as
     // in `isSame(as: other)`.
     let alias = just(Token::Ident("as")).ignore_then(ident).or_not();
-    // `/dir/other`, `./dir/other`, `stdlib/core` or `other` is a module, which
-    // can have an alias, as in `/dir/other as renamed`. Ending in a slash, as in
-    // `/dir/`, `./dir/`, `stdlib/`, `./` or `/`, is every module in a directory
-    // and its subdirectories.
+    // A name after a final slash would be part of the path, so a module with an
+    // alias would look like a file with a space in its path, followed by a name.
+    let aliased_module = start
+        .clone()
+        .map(|(path, segments)| Import::Directory(path(segments)))
+        .then_ignore(just(Token::Ident("as")))
+        .then_ignore(ident)
+        .then_ignore(just(Token::Newline).ignored().or(end()).rewind())
+        .validate(|import, e, emitter| {
+            emitter.emit(Rich::custom(
+                e.span(),
+                format!("`{import}` is a module, so it can't have an alias"),
+            ));
+            import
+        });
+    // `/dir/other`, `./dir/other`, `stdlib/core` or `other` is a file, which can
+    // have an alias, as in `/dir/other as renamed`. Ending in a slash, as in
+    // `/dir/`, `./dir/`, `stdlib/`, `./` or `/`, is a module: every file in a
+    // directory and its subdirectories.
     let import = start
         .then(ident.or_not())
         .map(|((path, mut segments), name)| match name {
@@ -859,23 +874,20 @@ where
         .validate(|import, e, emitter| {
             let span: SimpleSpan = e.span();
             if span.into_range().len() > import.to_string().len() {
-                emitter.emit(Rich::custom(
-                    span,
-                    "module paths can't contain spaces or comments",
-                ));
+                emitter.emit(Rich::custom(span, "paths can't contain spaces or comments"));
             }
             import
         })
-        .labelled("module path")
+        .labelled("path")
         .then(alias)
-        // A directory never has an alias, since any name after its final slash
-        // is part of the path instead.
+        // A module never has an alias here, since any name after its final
+        // slash is part of the path instead.
         .map(|(import, alias)| match import {
             Import::Module { path, .. } => Import::Module { path, alias },
             directory => directory,
         });
     let use_ = just(Token::Use)
-        .ignore_then(import)
+        .ignore_then(aliased_module.or(import))
         .map_with(|import, e| Stmt {
             kind: StmtKind::Use(import),
             span: Span::from(e.span()),
@@ -4847,9 +4859,6 @@ mod tests {
             "use a /",
             "use . /",
             "use ./users/ as",
-            "use ./users/ as x",
-            "use ./ as x",
-            "use / as x",
             "use /a/ b as c",
             "use /a/*c*//b",
             "use /a/*c*//",
@@ -4858,10 +4867,37 @@ mod tests {
             assert!(
                 errs.iter().any(|err| err
                     .to_string()
-                    .contains("module paths can't contain spaces or comments")),
+                    .contains("paths can't contain spaces or comments")),
                 "{src:?}: {errs:?}"
             );
         }
+    }
+
+    #[test]
+    fn modules_can_not_have_aliases() {
+        for (src, module) in [
+            ("use ./users/ as x", "./users/"),
+            ("use /users/admins/ as x", "/users/admins/"),
+            ("use ./ as x", "./"),
+            ("use / as x", "/"),
+            ("use stdlib/ as x", "stdlib/"),
+            ("use ./users/ as x // Note.", "./users/"),
+            ("use ./users/ as x\nlet y = 1", "./users/"),
+        ] {
+            let errs: Vec<_> = super::parse(src)
+                .expect_err(src)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(
+                errs,
+                [format!("`{module}` is a module, so it can't have an alias")],
+                "{src:?}"
+            );
+        }
+        // A file called `as` can still have one.
+        assert!(super::parse("use ./users/as as x").is_ok());
+        assert!(super::parse("use ./users/as").is_ok());
     }
 
     #[test]
