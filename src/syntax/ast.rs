@@ -36,7 +36,7 @@ impl Span {
 /// The path to a file or a module, as in `use /dir/other` or `use /dir/`. Paths
 /// only appear in `use`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModulePath {
+pub enum ImportPath {
     /// `/dir/other`: from the root of the project.
     Absolute(Vec<String>),
     /// `./dir/other`: from the directory of the current file, within its
@@ -50,7 +50,7 @@ pub enum ModulePath {
     Named(String),
 }
 
-impl fmt::Display for ModulePath {
+impl fmt::Display for ImportPath {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Absolute(segments) => write!(f, "/{}", segments.join("/")),
@@ -66,50 +66,50 @@ impl fmt::Display for ModulePath {
 pub enum Import {
     /// `use /dir/other` or `use /dir/other as renamed`: one file, whose names
     /// are qualified by its alias if it has one, and otherwise by its own name.
-    Module {
-        path: ModulePath,
+    File {
+        path: ImportPath,
         alias: Option<String>,
     },
     /// `use /dir/`: a module, which is every file in a directory, including
     /// those in its subdirectories, given the directory's path.
     /// The path can be empty, as in `use ./`, or just a package's name, as in
     /// `use stdlib/`.
-    Directory(ModulePath),
+    Module(ImportPath),
 }
 
 impl fmt::Display for Import {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Module { path, alias: None } => write!(f, "{path}"),
-            Self::Module {
+            Self::File { path, alias: None } => write!(f, "{path}"),
+            Self::File {
                 path,
                 alias: Some(alias),
             } => write!(f, "{path} as {alias}"),
             // An empty path already ends in a `/`.
-            Self::Directory(
-                path @ (ModulePath::Absolute(segments) | ModulePath::Relative(segments)),
+            Self::Module(
+                path @ (ImportPath::Absolute(segments) | ImportPath::Relative(segments)),
             ) if segments.is_empty() => {
                 write!(f, "{path}")
             }
-            Self::Directory(path) => write!(f, "{path}/"),
+            Self::Module(path) => write!(f, "{path}/"),
         }
     }
 }
 
-/// A name, optionally qualified by the name of the module it's declared in, as
+/// A name, optionally qualified by the name of the file it's declared in, as
 /// in `f` or `other::f`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Name {
-    pub module: Option<String>,
+    pub file: Option<String>,
     pub name: String,
     pub span: Span,
 }
 
 impl Name {
-    /// A name without a module.
+    /// A name without a file.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            module: None,
+            file: None,
             name: name.into(),
             span: Span::default(),
         }
@@ -117,14 +117,14 @@ impl Name {
 
     /// Whether this is the keyword `Self`.
     pub fn is_self(&self) -> bool {
-        self.module.is_none() && self.name == "Self"
+        self.file.is_none() && self.name == "Self"
     }
 }
 
 impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self.module {
-            Some(module) => write!(f, "{module}::{}", self.name),
+        match &self.file {
+            Some(file) => write!(f, "{file}::{}", self.name),
             None => write!(f, "{}", self.name),
         }
     }
@@ -147,7 +147,7 @@ pub enum TypeName {
 }
 
 impl TypeName {
-    /// The type called `name`, without a module.
+    /// The type called `name`, without a file.
     pub fn new(name: impl Into<String>) -> Self {
         Self::Named(Name::new(name))
     }
@@ -155,7 +155,7 @@ impl TypeName {
     /// Whether this is written `Void`, which is what's meant where no type is
     /// written.
     pub fn is_void(&self) -> bool {
-        matches!(self, Self::Named(name) if name.module.is_none() && name.name == "Void")
+        matches!(self, Self::Named(name) if name.file.is_none() && name.name == "Void")
     }
 }
 

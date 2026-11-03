@@ -20,22 +20,21 @@
 //!
 //! Every file is named by its path from the project root, so `dir/other.atom`
 //! is `/dir/other`, and a directory of files and other directories is a module,
-//! so `dir` is `/dir/`. Internally, a `Module` is a file, which is what's
-//! checked. The top level of a file can only hold
+//! so `dir` is `/dir/`. The top level of a file can only hold
 //! declarations, which are hoisted so they can be used in any order, even
-//! across modules. This is safe because functions can't capture values from
+//! across files. This is safe because functions can't capture values from
 //! outside them, so calling one early never reads a value that hasn't been set
 //! yet, and top-level values whose initialisers depend on themselves are
 //! rejected.
 //!
-//! A module's own top-level names come before the names it imports, which
+//! A file's own top-level names come before the names it imports, which
 //! only clash if they're used. When they do, a name is qualified by the last
-//! part of its module's path, as in `other::f`, or by the alias given in the
-//! module's `use`, as in `use /dir/other as renamed`. Modules can share these
+//! part of its file's path, as in `other::f`, or by the alias given in the
+//! file's `use`, as in `use /dir/other as renamed`. Files can share these
 //! names, as long as it isn't an alias and the name isn't used. Only a `use` can
 //! contain a path.
 //!
-//! The standard library is a package called `stdlib`, whose files are modules
+//! The standard library is a package called `stdlib`, whose files are files
 //! named from the package, such as `stdlib/core`. Every program imports all of
 //! them without needing a `use`. Only the standard library can declare
 //! primitive types, such as `Int`, which the compiler represents itself, and
@@ -54,7 +53,7 @@ use std::{
 use super::{
     ast::{
         self as ast, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, ImplAlias,
-        ImplFunction, Import, MatchArm, ModulePath, Mutability, Name, Param, Pattern, PatternKind,
+        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Param, Pattern, PatternKind,
         Program, Span, Stmt, StmtKind, TraitFunction, TypeName, UnOp,
     },
     parser::parse,
@@ -67,19 +66,19 @@ const STDLIB_PACKAGE: &str = "stdlib";
 /// The source of each file of the standard library, by its path within it.
 const STDLIB_FILES: [(&str, &str); 1] = [("core", include_str!("../stdlib/core.atom"))];
 
-/// The source of the standard library's module shown as `module`, such as
+/// The source of the standard library's file shown as `file`, such as
 /// `stdlib/core`, for showing where its errors are.
-pub fn stdlib_source(module: &str) -> Option<&'static str> {
-    let path = module.strip_prefix(STDLIB_PACKAGE)?.strip_prefix('/')?;
+pub fn stdlib_source(file: &str) -> Option<&'static str> {
+    let path = file.strip_prefix(STDLIB_PACKAGE)?.strip_prefix('/')?;
     let (_, src) = STDLIB_FILES.iter().find(|(name, _)| *name == path)?;
     Some(src)
 }
 
 /// The files of the standard library, by their paths within it.
-static STDLIB: LazyLock<Vec<Module>> = LazyLock::new(|| {
+static STDLIB: LazyLock<Vec<File>> = LazyLock::new(|| {
     STDLIB_FILES
         .into_iter()
-        .map(|(name, src)| Module {
+        .map(|(name, src)| File {
             path: vec![name.to_string()],
             program: parse(src)
                 .unwrap_or_else(|errs| panic!("`stdlib/{name}` should parse: {errs:?}")),
@@ -89,7 +88,7 @@ static STDLIB: LazyLock<Vec<Module>> = LazyLock::new(|| {
 
 /// A parsed `.atom` file.
 #[derive(Debug, Clone)]
-pub struct Module {
+pub struct File {
     /// The file's path from the project root without `.atom`, such as
     /// `["dir", "other"]` for `dir/other.atom`.
     pub path: Vec<String>,
@@ -120,19 +119,19 @@ impl fmt::Display for Type {
     }
 }
 
-/// An error, along with the module it's in.
+/// An error, along with the file it's in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleError {
-    /// The module's path, such as `/dir/other`, or `stdlib`.
-    pub module: String,
-    /// Where it is in the module's source.
+pub struct FileError {
+    /// The file's path, such as `/dir/other`, or `stdlib`.
+    pub file: String,
+    /// Where it is in the file's source.
     pub span: Span,
     pub error: CheckError,
 }
 
-impl fmt::Display for ModuleError {
+impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}: {}", self.module, self.error)
+        write!(f, "{}: {}", self.file, self.error)
     }
 }
 
@@ -142,9 +141,9 @@ pub enum CheckError {
     Undeclared(String),
     /// A function used a value declared outside it.
     Captured(String),
-    /// A name without a module was declared in more than one of the modules
+    /// A name without a file was declared in more than one of the files
     /// it could come from.
-    Ambiguous { name: String, modules: Vec<String> },
+    Ambiguous { name: String, files: Vec<String> },
     /// A `use` named a file that doesn't exist.
     UnknownFile(String),
     /// A `use` named a module without the slash that imports its files.
@@ -154,10 +153,10 @@ pub enum CheckError {
     /// A `use` named something that exists, but without the `./` or `/` that
     /// every path in the project starts with, given what it could have meant.
     PathWithoutStart(Vec<String>),
-    /// A qualified name's module isn't the current module or one it imports.
+    /// A qualified name's file isn't the current file or one it imports.
     NotImported(String),
-    /// A `use` gave a module an alias when it already has a different one.
-    FileAliasedTwice { module: String, alias: String },
+    /// A `use` gave a file an alias when it already has a different one.
+    FileAliasedTwice { file: String, alias: String },
     /// A `use` of a module found no files that could be imported.
     EmptyModule(String),
     /// A package was used where one of its files was needed.
@@ -169,13 +168,13 @@ pub enum CheckError {
     PrimitiveOutsideStdlib(String),
     /// A group was constructed outside the `impl`s of its type.
     ConstructedOutsideImpl(Type),
-    /// A group was constructed outside the module that declares it.
-    ConstructedOutsideFile { ty: Type, module: String },
-    /// `::` was used after a name that's declared, but isn't a module.
+    /// A group was constructed outside the file that declares it.
+    ConstructedOutsideFile { ty: Type, file: String },
+    /// `::` was used after a name that's declared, but isn't a file.
     NotAFile(String),
-    /// An alias is the name of another module too, or a qualified name's module
-    /// is the name of more than one module.
-    FileNameClash { name: String, modules: Vec<String> },
+    /// An alias is the name of another file too, or a qualified name's file
+    /// is the name of more than one file.
+    FileNameClash { name: String, files: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
     /// An alias is an alias of itself, directly or through other aliases.
@@ -328,8 +327,8 @@ pub enum CheckError {
         member: String,
         kind: MemberKind,
     },
-    /// `.` was used after a module's name, where `::` was probably meant.
-    FileNotValue { module: String, member: String },
+    /// `.` was used after a file's name, where `::` was probably meant.
+    FileNotValue { file: String, member: String },
     /// A member was declared with the same name as another member of its
     /// type that it shares names with. Fields share names with methods, and
     /// options share names with static functions.
@@ -468,10 +467,10 @@ impl fmt::Display for CheckError {
                 f,
                 "functions can't use `{name}`, because it is declared outside the function"
             ),
-            Self::Ambiguous { name, modules } => write!(
+            Self::Ambiguous { name, files } => write!(
                 f,
                 "`{name}` is declared in {}, so it must be qualified",
-                quoted_list(modules, "and")
+                quoted_list(files, "and")
             ),
             Self::UnknownFile(path) => write!(f, "cannot find file `{path}`"),
             Self::ModuleNotFile {
@@ -500,8 +499,8 @@ impl fmt::Display for CheckError {
                 quoted_list(paths, "or")
             ),
             Self::NotImported(path) => write!(f, "`{path}` is not an imported file"),
-            Self::FileAliasedTwice { module, alias } => {
-                write!(f, "`{module}` is already imported as `{alias}`")
+            Self::FileAliasedTwice { file, alias } => {
+                write!(f, "`{file}` is already imported as `{alias}`")
             }
             Self::EmptyModule(import) => {
                 write!(
@@ -513,9 +512,9 @@ impl fmt::Display for CheckError {
                 f,
                 "`{package}` is a package, so use one of its files, such as `{package}/core`"
             ),
-            Self::ConstructedOutsideFile { ty, module } => write!(
+            Self::ConstructedOutsideFile { ty, file } => write!(
                 f,
-                "`{ty}` can only be constructed in `{module}`, which declares it"
+                "`{ty}` can only be constructed in `{file}`, which declares it"
             ),
             Self::ConstructedOutsideImpl(ty) => {
                 write!(f, "`{ty}` can only be constructed inside an `impl {ty}`")
@@ -531,10 +530,10 @@ impl fmt::Display for CheckError {
             Self::NotAFile(name) => {
                 write!(f, "`{name}` is not a file, so it can't be followed by `::`")
             }
-            Self::FileNameClash { name, modules } => write!(
+            Self::FileNameClash { name, files } => write!(
                 f,
                 "`{name}` is the name of {}, so use `as` to give them different names",
-                quoted_list(modules, "and")
+                quoted_list(files, "and")
             ),
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
             Self::CyclicAlias(name) => write!(f, "`{name}` is an alias of itself"),
@@ -739,9 +738,9 @@ impl fmt::Display for CheckError {
                 "`{ty}.{member}` is {}, so it must be used on a value of `{ty}` rather than `{ty}` itself",
                 kind.with_article()
             ),
-            Self::FileNotValue { module, member } => write!(
+            Self::FileNotValue { file, member } => write!(
                 f,
-                "`{module}` is a file, not a value, so use `{module}::{member}` to refer to a name in it"
+                "`{file}` is a file, not a value, so use `{file}::{member}` to refer to a name in it"
             ),
             Self::MemberRedeclared {
                 ty,
@@ -853,15 +852,15 @@ impl fmt::Display for CheckError {
     }
 }
 
-/// Checks every module in a project, along with the standard library,
+/// Checks every file in a project, along with the standard library,
 /// returning the program they make up.
-pub fn check(modules: &[Module]) -> Result<ir::Program, Vec<ModuleError>> {
+pub fn check(files: &[File]) -> Result<ir::Program, Vec<FileError>> {
     let mut checker = Checker::default();
     checker.add_stdlib();
-    for module in modules {
-        checker.add_module(None, module);
+    for file in files {
+        checker.add_file(None, file);
     }
-    checker.check_modules();
+    checker.check_files();
     // Each generic type is checked once on its own, so the types made from it
     // shouldn't have errors of their own. If one does anyway, it's reported,
     // rather than being lost.
@@ -964,11 +963,11 @@ enum Binding {
 /// its parameters arguments, as in `Optional<Int>`.
 struct Template<'a> {
     name: &'a str,
-    module: usize,
+    file: usize,
     params: &'a [String],
     /// The group, choice or primitive declaring it.
     stmt: &'a Stmt,
-    /// Its `impl`s, with the modules they're in, whose functions are
+    /// Its `impl`s, with the files they're in, whose functions are
     /// declared for each type made from it.
     impls: Vec<(usize, &'a Stmt)>,
 }
@@ -977,7 +976,7 @@ struct Template<'a> {
 struct TraitInfo<'a> {
     name: &'a str,
     span: Span,
-    module: usize,
+    file: usize,
     /// The names of its aliases, such as `Rhs`, whose types each
     /// implementation gives.
     aliases: &'a [String],
@@ -1041,8 +1040,8 @@ fn bindings(pattern: &Pattern) -> Vec<(&str, Span)> {
 /// The parameters of a static function or option of a generic type, as they're
 /// written, for working out the type's arguments from a call's.
 struct DeclaredParams<'a> {
-    /// The index in `Checker::modules` of the module they're written in.
-    module: usize,
+    /// The index in `Checker::files` of the file they're written in.
+    file: usize,
     types: Vec<&'a TypeName>,
     /// Whether they're in an `impl`, where a generic parameter is written
     /// `Self.T`, rather than a choice's options, where it's written `T`.
@@ -1084,10 +1083,10 @@ enum TraitType {
     Type(Type),
 }
 
-/// A value declared at the top level of a module. Its type is worked out when
+/// A value declared at the top level of a file. Its type is worked out when
 /// it's first needed, since top-level values can be used in any order.
 struct Global<'a> {
-    module: usize,
+    file: usize,
     name: &'a str,
     span: Span,
     ty: Option<&'a TypeName>,
@@ -1110,7 +1109,7 @@ enum LazyType {
 /// A type alias, as in `alias ID = Int`. Top-level aliases are worked out
 /// when they're first needed, since they can be used in any order.
 struct Alias<'a> {
-    module: usize,
+    file: usize,
     name: &'a str,
     span: Span,
     /// The type it's an alias of.
@@ -1162,30 +1161,30 @@ enum Callee {
     Function(usize),
 }
 
-struct ModuleInfo<'a> {
-    /// The module's path, such as `/dir/other` or `stdlib/core`.
+struct FileInfo<'a> {
+    /// The file's path, such as `/dir/other` or `stdlib/core`.
     display: String,
-    /// The package the module is in, or `None` if it's in the project.
+    /// The package the file is in, or `None` if it's in the project.
     package: Option<&'a str>,
-    /// The module's path from the root of its package or the project.
+    /// The file's path from the root of its package or the project.
     path: &'a [String],
-    /// The name used to qualify the module's names, such as `other` in
+    /// The name used to qualify the file's names, such as `other` in
     /// `other::f`, unless a `use` gives it an alias.
     name: &'a str,
     program: &'a Program,
-    /// The names declared at the module's top level.
+    /// The names declared at the file's top level.
     scope: HashMap<&'a str, Binding>,
-    /// The modules whose top-level names this one can use, starting with this
-    /// module itself.
-    imports: Vec<ImportedModule<'a>>,
+    /// The files whose top-level names this one can use, starting with this
+    /// file itself.
+    imports: Vec<ImportedFile<'a>>,
 }
 
-/// A module whose top-level names another module can use.
-struct ImportedModule<'a> {
+/// A file whose top-level names another file can use.
+struct ImportedFile<'a> {
     /// The name that qualifies its names, such as `other` in `other::f`.
     name: &'a str,
-    /// Its index in `Checker::modules`.
-    module: usize,
+    /// Its index in `Checker::files`.
+    file: usize,
     /// The `use` that gave it an alias, if it has one.
     span: Option<Span>,
 }
@@ -1194,10 +1193,10 @@ struct ImportedModule<'a> {
 enum LookupError {
     Undeclared,
     Captured,
-    /// The name was found in each of these modules.
+    /// The name was found in each of these files.
     Ambiguous(Vec<String>),
-    /// The name's module couldn't be found.
-    Module(Box<CheckError>),
+    /// The name's file couldn't be found.
+    File(Box<CheckError>),
     /// The name is an alias whose type couldn't be worked out, or `Self` in
     /// an `impl` whose type is unknown, which has already been reported.
     Reported,
@@ -1242,7 +1241,7 @@ fn split(typed: Vec<Typed>) -> (Vec<Option<Type>>, Option<Vec<ir::Expr>>) {
     (types, exprs.into_iter().collect())
 }
 
-/// A top-level declaration that still needs checking once every module's
+/// A top-level declaration that still needs checking once every file's
 /// names have been declared.
 enum Pending<'a> {
     Global(usize),
@@ -1265,9 +1264,9 @@ enum Pending<'a> {
 
 #[derive(Default)]
 struct Checker<'a> {
-    /// The standard library first, then the project's modules.
-    modules: Vec<ModuleInfo<'a>>,
-    /// The index in `modules` of `stdlib/core`, which every project module
+    /// The standard library first, then the project's files.
+    files: Vec<FileInfo<'a>>,
+    /// The index in `files` of `stdlib/core`, which every project file
     /// imports, and which declares the types of literals.
     core: usize,
     /// The primitive types, by `id`.
@@ -1276,10 +1275,10 @@ struct Checker<'a> {
     /// index of the function that a pointer to it really points to, which
     /// takes its `Input` as a single parameter.
     function_values: HashMap<usize, usize>,
-    /// The index in `modules` of the module being checked.
-    module: usize,
+    /// The index in `files` of the file being checked.
+    file: usize,
     /// One scope per enclosing block inside functions, innermost last. Empty
-    /// at the top level, where names are in the module's own scope. Values,
+    /// at the top level, where names are in the file's own scope. Values,
     /// functions and types all share the same names.
     scopes: Vec<HashMap<&'a str, Binding>>,
     /// The index in `scopes` of the current function's outermost scope. Names
@@ -1319,11 +1318,11 @@ struct Checker<'a> {
     /// The types made from generic types before `methods_ready`, whose
     /// functions are declared once it is.
     undeclared_instances: Vec<usize>,
-    /// The values and function bodies still to check, with their modules.
+    /// The values and function bodies still to check, with their files.
     pending: Vec<(usize, Pending<'a>)>,
     /// The errors that weren't reported, from checking the types made from
     /// generic types, which are checked once on their own.
-    quietened: Vec<ModuleError>,
+    quietened: Vec<FileError>,
     /// Which types implement which traits, as a type `id` and an index into
     /// `traits`.
     implementations: HashSet<(usize, usize)>,
@@ -1352,10 +1351,10 @@ struct Checker<'a> {
     /// For each type, indexed by `id`, its fields in the order they're
     /// declared. Choices don't have any.
     group_fields: Vec<Vec<FieldSignature<'a>>>,
-    /// For each type, indexed by `id`, the index in `modules` of the module
+    /// For each type, indexed by `id`, the index in `files` of the file
     /// that declares it, which is the only one that can construct it if it's
     /// a group.
-    group_modules: Vec<usize>,
+    group_files: Vec<usize>,
     /// For each type, indexed by `id`, its full name, such as `/main::Point`.
     type_names: Vec<String>,
     /// For each choice, by `id`, its options in the order they're declared.
@@ -1366,59 +1365,55 @@ struct Checker<'a> {
     /// The `id` of each tuple type, by its elements' labels, names and type
     /// `id`s. Tuples are the same type only if all of those are the same.
     tuple_ids: HashMap<Vec<TupleKey>, usize>,
-    errors: Vec<ModuleError>,
+    errors: Vec<FileError>,
 }
 
 impl<'a> Checker<'a> {
-    /// Adds a module from `package`, or from the project if that's `None`.
-    /// Returns its index in `modules`.
-    fn add_module(&mut self, package: Option<&'a str>, module: &'a Module) -> usize {
-        let path = module.path.join("/");
+    /// Adds a file from `package`, or from the project if that's `None`.
+    /// Returns its index in `files`.
+    fn add_file(&mut self, package: Option<&'a str>, file: &'a File) -> usize {
+        let path = file.path.join("/");
         let display = match package {
             Some(package) => format!("{package}/{path}"),
             None => format!("/{path}"),
         };
-        self.modules.push(ModuleInfo {
+        self.files.push(FileInfo {
             display,
             package,
-            path: &module.path,
-            name: module.path.last().expect("module paths aren't empty"),
-            program: &module.program,
+            path: &file.path,
+            name: file.path.last().expect("file paths aren't empty"),
+            program: &file.program,
             scope: HashMap::new(),
             imports: vec![],
         });
-        self.modules.len() - 1
+        self.files.len() - 1
     }
 
-    /// Adds the standard library's modules.
+    /// Adds the standard library's files.
     fn add_stdlib(&mut self) {
-        for module in STDLIB.iter() {
-            let index = self.add_module(Some(STDLIB_PACKAGE), module);
-            if module.path == ["core"] {
+        for file in STDLIB.iter() {
+            let index = self.add_file(Some(STDLIB_PACKAGE), file);
+            if file.path == ["core"] {
                 self.core = index;
             }
         }
     }
 
     fn error(&mut self, span: Span, error: CheckError) {
-        self.error_in(self.module, span, error);
+        self.error_in(self.file, span, error);
     }
 
-    fn error_in(&mut self, module: usize, span: Span, error: CheckError) {
-        let module = self.modules[module].display.clone();
-        self.errors.push(ModuleError {
-            module,
-            span,
-            error,
-        });
+    fn error_in(&mut self, file: usize, span: Span, error: CheckError) {
+        let file = self.files[file].display.clone();
+        self.errors.push(FileError { file, span, error });
     }
 
-    /// Checks every module. Each kind of top-level declaration is declared in
-    /// every module before the next kind, and before anything is checked, so
+    /// Checks every file. Each kind of top-level declaration is declared in
+    /// every file before the next kind, and before anything is checked, so
     /// top-level names can be used in any order.
-    fn check_modules(&mut self) {
-        for module in 0..self.modules.len() {
-            self.module = module;
+    fn check_files(&mut self) {
+        for file in 0..self.files.len() {
+            self.file = file;
             self.resolve_imports();
         }
 
@@ -1426,9 +1421,9 @@ impl<'a> Checker<'a> {
         // can contain each other, and aliases can refer to each other, in any
         // order.
         let mut types = vec![];
-        for module in 0..self.modules.len() {
-            self.module = module;
-            for stmt in self.modules[module].program {
+        for file in 0..self.files.len() {
+            self.file = file;
+            for stmt in self.files[file].program {
                 match &stmt.kind {
                     StmtKind::Group { name, params, .. }
                     | StmtKind::Choice { name, params, .. }
@@ -1446,7 +1441,7 @@ impl<'a> Checker<'a> {
                         if matches!(stmt.kind, StmtKind::Choice { .. }) {
                             self.choice_options.insert(id, vec![]);
                         }
-                        types.push((module, id, stmt));
+                        types.push((file, id, stmt));
                     }
                     StmtKind::Alias { name, ty } => {
                         self.declare_alias(name, stmt.span, ty, LazyType::Unchecked);
@@ -1463,36 +1458,36 @@ impl<'a> Checker<'a> {
         for index in 0..self.aliases.len() {
             self.alias_type(index);
         }
-        for &(module, id, stmt) in &types {
-            self.module = module;
+        for &(file, id, stmt) in &types {
+            self.file = file;
             self.define_type(id, stmt);
         }
         // Each generic type is checked once, with stand-ins for its
         // parameters, so its errors are reported once.
         let mut checked = vec![];
         for template in 0..self.templates.len() {
-            self.module = self.templates[template].module;
+            self.file = self.templates[template].file;
             checked.extend(self.check_template(template));
         }
         for index in 0..self.traits.len() {
             self.define_trait(index);
         }
-        for &(module, id, stmt) in &types {
-            self.module = module;
+        for &(file, id, stmt) in &types {
+            self.file = file;
             if let StmtKind::Group { name, .. } | StmtKind::Choice { name, .. } = &stmt.kind {
                 self.check_not_recursive(id, name, stmt.span);
             }
         }
-        for (module, ty, span) in checked {
-            self.module = module;
+        for (file, ty, span) in checked {
+            self.file = file;
             self.check_not_recursive(ty.id, &ty.name, span);
         }
 
         // Functions, methods and values come after groups, since their types
         // can be groups.
-        for module in 0..self.modules.len() {
-            self.module = module;
-            for stmt in self.modules[module].program {
+        for file in 0..self.files.len() {
+            self.file = file;
+            for stmt in self.files[file].program {
                 match &stmt.kind {
                     StmtKind::Fn(function) => {
                         let index = self.declare_fn(
@@ -1502,7 +1497,7 @@ impl<'a> Checker<'a> {
                             &function.ret,
                         );
                         self.pending.push((
-                            module,
+                            file,
                             Pending::Fn {
                                 index,
                                 name: &function.name,
@@ -1527,7 +1522,7 @@ impl<'a> Checker<'a> {
                         // A generic type's `impl` is for every type made from
                         // it, so its functions are declared for each of them.
                         if let Ok(Binding::Generic(template)) = self.lookup(ty) {
-                            self.templates[template].impls.push((module, stmt));
+                            self.templates[template].impls.push((file, stmt));
                             continue;
                         }
                         let self_ty = self.resolve_named_type(ty);
@@ -1545,7 +1540,7 @@ impl<'a> Checker<'a> {
                         name, ty, value, ..
                     } => {
                         self.globals.push(Global {
-                            module,
+                            file,
                             name,
                             span: stmt.span,
                             ty: ty.as_ref(),
@@ -1555,7 +1550,7 @@ impl<'a> Checker<'a> {
                         });
                         let index = self.globals.len() - 1;
                         self.declare(name, stmt.span, Binding::Global(index));
-                        self.pending.push((module, Pending::Global(index)));
+                        self.pending.push((file, Pending::Global(index)));
                     }
                     StmtKind::Use(_)
                     | StmtKind::Group { .. }
@@ -1582,8 +1577,8 @@ impl<'a> Checker<'a> {
             if pending.is_empty() {
                 break;
             }
-            for (module, pending) in pending {
-                self.module = module;
+            for (file, pending) in pending {
+                self.file = file;
                 match pending {
                     Pending::Global(index) => {
                         self.global_type(index);
@@ -1609,7 +1604,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Declares the functions of `impl ty`, whose type is `self_ty`, `with`
-    /// a trait if given, returning their bodies to check, with the modules
+    /// a trait if given, returning their bodies to check, with the files
     /// they're written in. Its errors are
     /// reported unless it's `quiet`, which it is for the types made from a
     /// generic type, whose `impl` is checked once on its own.
@@ -1676,7 +1671,7 @@ impl<'a> Checker<'a> {
                 aliases: impl_aliases,
                 quiet,
             };
-            pending.push((self.module, body));
+            pending.push((self.file, body));
         }
         self.impl_type = outer_impl_type;
         self.current_impl_aliases = None;
@@ -1716,53 +1711,50 @@ impl<'a> Checker<'a> {
         pending
     }
 
-    /// Finds the modules imported by the current module. Modules in the
+    /// Finds the files imported by the current file. Files in the
     /// project always import the whole standard library.
     fn resolve_imports(&mut self) {
-        let always_imported = |module: usize| ImportedModule {
-            name: self.modules[module].name,
-            module,
+        let always_imported = |file: usize| ImportedFile {
+            name: self.files[file].name,
+            file,
             span: None,
         };
-        let mut imports = vec![always_imported(self.module)];
-        if self.modules[self.module].package.is_none() {
-            let stdlib = (0..self.modules.len())
-                .filter(|&module| self.modules[module].package == Some(STDLIB_PACKAGE));
+        let mut imports = vec![always_imported(self.file)];
+        if self.files[self.file].package.is_none() {
+            let stdlib = (0..self.files.len())
+                .filter(|&file| self.files[file].package == Some(STDLIB_PACKAGE));
             imports.extend(stdlib.map(always_imported));
         }
 
         let mut uses = vec![];
-        for stmt in self.modules[self.module].program {
+        for stmt in self.files[self.file].program {
             let StmtKind::Use(import) = &stmt.kind else {
                 continue;
             };
             match import {
-                Import::Module { path, alias } => match self.resolve_path(path) {
-                    Some(module) => uses.push((module, alias.as_deref(), stmt.span)),
-                    None => self.error(stmt.span, self.unknown_module(path, alias.is_some())),
+                Import::File { path, alias } => match self.resolve_file(path) {
+                    Some(file) => uses.push((file, alias.as_deref(), stmt.span)),
+                    None => self.error(stmt.span, self.unknown_file(path, alias.is_some())),
                 },
-                Import::Directory(dir) => {
-                    let found = self.resolve_directory(dir);
+                Import::Module(dir) => {
+                    let found = self.resolve_module(dir);
                     if found.is_empty() {
                         let error = self.empty_module(dir, import);
                         self.error(stmt.span, error);
                     }
-                    uses.extend(found.into_iter().map(|module| (module, None, stmt.span)));
+                    uses.extend(found.into_iter().map(|file| (file, None, stmt.span)));
                 }
             }
         }
 
-        // Each module has one name. An alias replaces its own name wherever
+        // Each file has one name. An alias replaces its own name wherever
         // else it's imported.
-        for (module, alias, span) in uses {
-            let name = self.modules[module].name;
-            match (
-                imports.iter_mut().find(|import| import.module == module),
-                alias,
-            ) {
-                (None, _) => imports.push(ImportedModule {
+        for (file, alias, span) in uses {
+            let name = self.files[file].name;
+            match (imports.iter_mut().find(|import| import.file == file), alias) {
+                (None, _) => imports.push(ImportedFile {
                     name: alias.unwrap_or(name),
-                    module,
+                    file,
                     span: alias.map(|_| span),
                 }),
                 (Some(import), Some(alias)) if import.name == name => {
@@ -1770,11 +1762,11 @@ impl<'a> Checker<'a> {
                     import.span = Some(span);
                 }
                 (Some(import), Some(alias)) if import.name != alias => {
-                    let module = self.modules[module].display.clone();
+                    let file = self.files[file].display.clone();
                     let alias = import.name.to_string();
-                    self.error(span, CheckError::FileAliasedTwice { module, alias });
+                    self.error(span, CheckError::FileAliasedTwice { file, alias });
                 }
-                // Importing a module twice, or importing itself, is harmless.
+                // Importing a file twice, or importing itself, is harmless.
                 (Some(_), _) => {}
             }
         }
@@ -1787,28 +1779,28 @@ impl<'a> Checker<'a> {
                 continue;
             };
             // An alias is chosen, so there's no reason for it to clash. Other
-            // modules just happen to share a name, which is fine unless it's
+            // files just happen to share a name, which is fine unless it's
             // used.
             if let Some(span) = import.span.or(first.span) {
-                let modules = [first, import]
-                    .map(|import| self.modules[import.module].display.clone())
+                let files = [first, import]
+                    .map(|import| self.files[import.file].display.clone())
                     .to_vec();
                 let name = import.name.to_string();
-                self.error(span, CheckError::FileNameClash { name, modules });
+                self.error(span, CheckError::FileNameClash { name, files });
             }
         }
 
-        self.modules[self.module].imports = imports;
+        self.files[self.file].imports = imports;
     }
 
     /// The error for a path that doesn't lead to a file.
-    fn unknown_module(&self, path: &ModulePath, aliased: bool) -> CheckError {
+    fn unknown_file(&self, path: &ImportPath, aliased: bool) -> CheckError {
         let suggestions = self.paths_with_start(path, false);
         match path {
-            ModulePath::Named(name) if name == STDLIB_PACKAGE => {
+            ImportPath::Named(name) if name == STDLIB_PACKAGE => {
                 CheckError::PackageNotFile(name.clone())
             }
-            _ if !self.resolve_directory(path).is_empty() => CheckError::ModuleNotFile {
+            _ if !self.resolve_module(path).is_empty() => CheckError::ModuleNotFile {
                 path: path.to_string(),
                 aliased,
             },
@@ -1819,15 +1811,15 @@ impl<'a> Checker<'a> {
 
     /// The error for `import`, whose path `dir` doesn't lead to any files that
     /// can be imported.
-    fn empty_module(&self, dir: &ModulePath, import: &Import) -> CheckError {
+    fn empty_module(&self, dir: &ImportPath, import: &Import) -> CheckError {
         let suggestions = self.paths_with_start(dir, true);
         match dir {
-            ModulePath::Absolute(segments) | ModulePath::Relative(segments)
+            ImportPath::Absolute(segments) | ImportPath::Relative(segments)
                 if segments.is_empty() =>
             {
                 CheckError::EmptyModule(import.to_string())
             }
-            _ if self.resolve_path(dir).is_some() => CheckError::FileNotModule(dir.to_string()),
+            _ if self.resolve_file(dir).is_some() => CheckError::FileNotModule(dir.to_string()),
             _ if !suggestions.is_empty() => CheckError::PathWithoutStart(suggestions),
             _ => CheckError::EmptyModule(import.to_string()),
         }
@@ -1836,19 +1828,18 @@ impl<'a> Checker<'a> {
     /// What `path` could have meant, if it's missing the `./` or `/` that every
     /// path in the project starts with. A path could be to both a file and a
     /// module, so `prefer_module` says which it looks like.
-    fn paths_with_start(&self, path: &ModulePath, prefer_module: bool) -> Vec<String> {
+    fn paths_with_start(&self, path: &ImportPath, prefer_module: bool) -> Vec<String> {
         let segments = match path {
-            ModulePath::Named(name) if name != STDLIB_PACKAGE => std::slice::from_ref(name),
-            ModulePath::Package(segments) if segments[0] != STDLIB_PACKAGE => &segments[..],
+            ImportPath::Named(name) if name != STDLIB_PACKAGE => std::slice::from_ref(name),
+            ImportPath::Package(segments) if segments[0] != STDLIB_PACKAGE => &segments[..],
             _ => return vec![],
         };
-        [ModulePath::Relative, ModulePath::Absolute]
+        [ImportPath::Relative, ImportPath::Absolute]
             .into_iter()
             .filter_map(|start| {
                 let path = start(segments.to_vec());
-                let file = self.resolve_path(&path).map(|_| path.to_string());
-                let module =
-                    (!self.resolve_directory(&path).is_empty()).then(|| format!("{path}/"));
+                let file = self.resolve_file(&path).map(|_| path.to_string());
+                let module = (!self.resolve_module(&path).is_empty()).then(|| format!("{path}/"));
                 if prefer_module {
                     module.or(file)
                 } else {
@@ -1858,65 +1849,65 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
-    /// Finds the module at `path`.
-    fn resolve_path(&self, path: &ModulePath) -> Option<usize> {
+    /// Finds the file at `path`.
+    fn resolve_file(&self, path: &ImportPath) -> Option<usize> {
         let (package, full) = self.full_path(path)?;
-        self.modules.iter().position(|module| {
-            module.package == package && module.path.iter().eq(full.iter().copied())
-        })
+        self.files
+            .iter()
+            .position(|file| file.package == package && file.path.iter().eq(full.iter().copied()))
     }
 
-    /// Finds the modules in the directory at `path`, including in its
-    /// subdirectories, other than the current module.
-    fn resolve_directory(&self, path: &ModulePath) -> Vec<usize> {
+    /// Finds the files in the directory at `path`, including in its
+    /// subdirectories, other than the current file.
+    fn resolve_module(&self, path: &ImportPath) -> Vec<usize> {
         let Some((package, dir)) = self.full_path(path) else {
             return vec![];
         };
-        (0..self.modules.len())
+        (0..self.files.len())
             .filter(|&index| {
-                let module = &self.modules[index];
-                module.package == package
-                    && module.path.len() > dir.len()
-                    && module.path.iter().zip(&dir).all(|(a, b)| a == *b)
-                    && index != self.module
+                let file = &self.files[index];
+                file.package == package
+                    && file.path.len() > dir.len()
+                    && file.path.iter().zip(&dir).all(|(a, b)| a == *b)
+                    && index != self.file
             })
             .collect()
     }
 
     /// The package and path within it that `path` leads to. A path starting
     /// with `/` is from the root of the project, one starting with `./` is
-    /// from the current module's directory, and one starting with a package's
-    /// name is from the root of that package. Modules can't be found by name
+    /// from the current file's directory, and one starting with a package's
+    /// name is from the root of that package. Files can't be found by name
     /// alone.
-    fn full_path(&self, path: &'a ModulePath) -> Option<(Option<&'a str>, Vec<&'a String>)> {
-        let current = &self.modules[self.module];
+    fn full_path(&self, path: &'a ImportPath) -> Option<(Option<&'a str>, Vec<&'a String>)> {
+        let current = &self.files[self.file];
         Some(match path {
-            ModulePath::Absolute(segments) => (None, segments.iter().collect()),
-            ModulePath::Relative(segments) => {
+            ImportPath::Absolute(segments) => (None, segments.iter().collect()),
+            ImportPath::Relative(segments) => {
                 let dir = current
                     .path
                     .split_last()
                     .map_or(current.path, |(_, dir)| dir);
                 (current.package, dir.iter().chain(segments).collect())
             }
-            ModulePath::Package(segments) => {
+            ImportPath::Package(segments) => {
                 (Some(segments[0].as_str()), segments[1..].iter().collect())
             }
-            ModulePath::Named(_) => return None,
+            ImportPath::Named(_) => return None,
         })
     }
 
-    /// Finds the module that the qualifier `name` refers to. It must be the
-    /// current module or one it imports.
+    /// Finds the file that the qualifier `name` refers to. It must be the
+    /// current file or one it imports.
     fn resolve_qualifier(&self, name: &str) -> Result<usize, LookupError> {
-        let matches: Vec<_> = self.modules[self.module]
+        let matches: Vec<_> = self.files[self.file]
             .imports
             .iter()
             .filter(|import| import.name == name)
             .collect();
         let error = match matches[..] {
-            [import] => return Ok(import.module),
-            // Modules aren't identifiers, so a name can be both. If it's only
+            [import] => return Ok(import.file),
+            // Files aren't identifiers, so a name can be both. If it's only
             // an identifier, that's probably the mistake.
             [] if self.is_declared(name) => CheckError::NotAFile(name.to_string()),
             [] if name == STDLIB_PACKAGE => CheckError::PackageNotFile(name.to_string()),
@@ -1927,29 +1918,29 @@ impl<'a> Checker<'a> {
             }
             _ => CheckError::FileNameClash {
                 name: name.to_string(),
-                modules: matches
+                files: matches
                     .iter()
-                    .map(|import| self.modules[import.module].display.clone())
+                    .map(|import| self.files[import.file].display.clone())
                     .collect(),
             },
         };
-        Err(LookupError::Module(Box::new(error)))
+        Err(LookupError::File(Box::new(error)))
     }
 
     /// Whether `name` is declared anywhere the current code could see it,
     /// even if it's a value that a function can't use.
     fn is_declared(&self, name: &str) -> bool {
         self.scopes.iter().any(|scope| scope.contains_key(name))
-            || self.modules[self.module]
+            || self.files[self.file]
                 .imports
                 .iter()
-                .any(|import| self.modules[import.module].scope.contains_key(name))
+                .any(|import| self.files[import.file].scope.contains_key(name))
     }
 
     /// A generic type from `stdlib/core`, such as `Fn`, as an index into
     /// `templates`.
     fn std_template(&self, name: &str) -> usize {
-        match self.modules[self.core].scope.get(name) {
+        match self.files[self.core].scope.get(name) {
             Some(Binding::Generic(template)) => *template,
             _ => panic!("the standard library should declare `{name}`"),
         }
@@ -1958,7 +1949,7 @@ impl<'a> Checker<'a> {
     /// A type from `stdlib/core`, such as `Int` for integer literals. Found in
     /// the standard library itself, so it can't be shadowed.
     fn std_type(&self, name: &str) -> Type {
-        let ty = match self.modules[self.core].scope.get(name) {
+        let ty = match self.files[self.core].scope.get(name) {
             Some(Binding::Type(ty)) => Some(ty),
             // The standard library's aliases are worked out before any code
             // that needs them is checked.
@@ -1999,10 +1990,10 @@ impl<'a> Checker<'a> {
 
     /// Finds what `name` refers to, without working out aliases.
     fn lookup_binding(&self, name: &Name) -> Result<Binding, LookupError> {
-        let binding = match &name.module {
+        let binding = match &name.file {
             Some(path) => {
-                let module = self.resolve_qualifier(path)?;
-                self.modules[module]
+                let file = self.resolve_qualifier(path)?;
+                self.files[file]
                     .scope
                     .get(name.name.as_str())
                     .ok_or(LookupError::Undeclared)?
@@ -2047,28 +2038,28 @@ impl<'a> Checker<'a> {
                     };
                 }
 
-                // The current module's own names come first. Otherwise, a name
+                // The current file's own names come first. Otherwise, a name
                 // that isn't qualified must only be declared in one of the
-                // modules it imports.
-                if let Some(binding) = self.modules[self.module].scope.get(name.name.as_str()) {
+                // files it imports.
+                if let Some(binding) = self.files[self.file].scope.get(name.name.as_str()) {
                     return self.top_level(binding);
                 }
-                let found: Vec<_> = self.modules[self.module].imports[1..]
+                let found: Vec<_> = self.files[self.file].imports[1..]
                     .iter()
                     .filter_map(|import| {
-                        let binding = self.modules[import.module].scope.get(name.name.as_str())?;
-                        Some((import.module, binding))
+                        let binding = self.files[import.file].scope.get(name.name.as_str())?;
+                        Some((import.file, binding))
                     })
                     .collect();
                 match found[..] {
                     [] => return Err(LookupError::Undeclared),
                     [(_, binding)] => binding,
                     _ => {
-                        let modules = found
+                        let files = found
                             .iter()
-                            .map(|&(module, _)| self.modules[module].display.clone())
+                            .map(|&(file, _)| self.files[file].display.clone())
                             .collect();
-                        return Err(LookupError::Ambiguous(modules));
+                        return Err(LookupError::Ambiguous(files));
                     }
                 }
             }
@@ -2077,7 +2068,7 @@ impl<'a> Checker<'a> {
         self.top_level(binding)
     }
 
-    /// Checks that a module's top-level `binding` can be used here. Top-level
+    /// Checks that a file's top-level `binding` can be used here. Top-level
     /// values are outside every function.
     fn top_level(&self, binding: &Binding) -> Result<Binding, LookupError> {
         if matches!(binding, Binding::Global(_)) && self.current_fn.is_some() {
@@ -2092,11 +2083,11 @@ impl<'a> Checker<'a> {
         let error = match error {
             LookupError::Undeclared => CheckError::Undeclared(name_string),
             LookupError::Captured => CheckError::Captured(name_string),
-            LookupError::Ambiguous(modules) => CheckError::Ambiguous {
+            LookupError::Ambiguous(files) => CheckError::Ambiguous {
                 name: name_string,
-                modules,
+                files,
             },
-            LookupError::Module(error) => *error,
+            LookupError::File(error) => *error,
             LookupError::Reported => return,
             LookupError::SelfTypeOutsideImpl => CheckError::SelfTypeOutsideImpl,
             LookupError::InferredAlias => CheckError::InferredAliasUsed(name_string),
@@ -2107,7 +2098,7 @@ impl<'a> Checker<'a> {
     fn declare(&mut self, name: &'a str, span: Span, binding: Binding) {
         // Names can't be redeclared within a function, even to shadow an
         // outer block. A function's own scope can reuse names from outside it.
-        // At the top level, names only need to be unique within their module.
+        // At the top level, names only need to be unique within their file.
         let scope = match self.scopes.last_mut() {
             Some(_) => {
                 if self.scopes[self.fn_scope_start..]
@@ -2119,10 +2110,10 @@ impl<'a> Checker<'a> {
                 self.scopes.last_mut().expect("checked above")
             }
             None => {
-                if self.modules[self.module].scope.contains_key(name) {
+                if self.files[self.file].scope.contains_key(name) {
                     self.error(span, CheckError::Redeclared(name.to_string()));
                 }
-                &mut self.modules[self.module].scope
+                &mut self.files[self.file].scope
             }
         };
         scope.insert(name, binding);
@@ -2197,7 +2188,7 @@ impl<'a> Checker<'a> {
             None => {
                 let id = self.group_fields.len();
                 self.group_fields.push(vec![]);
-                self.group_modules.push(self.module);
+                self.group_files.push(self.file);
                 self.type_names.push(name.clone());
                 self.tuple_ids.insert(key, id);
                 self.tuples.insert(id, elements);
@@ -2368,7 +2359,7 @@ impl<'a> Checker<'a> {
         }
         self.templates.push(Template {
             name,
-            module: self.module,
+            file: self.file,
             params,
             stmt,
             impls: vec![],
@@ -2378,21 +2369,18 @@ impl<'a> Checker<'a> {
 
     /// Checks the generic type at `template` in `templates` once, by making
     /// a type from it with a stand-in for each parameter, which can't be
-    /// used as anything else. Returns that type, with the module it's in and
+    /// used as anything else. Returns that type, with the file it's in and
     /// where it's declared.
     fn check_template(&mut self, template: usize) -> Option<(usize, Type, Span)> {
         let Template {
-            module,
-            params,
-            stmt,
-            ..
+            file, params, stmt, ..
         } = self.templates[template];
         let stand_ins = params
             .iter()
             .map(|param| {
                 let id = self.group_fields.len();
                 self.group_fields.push(vec![]);
-                self.group_modules.push(module);
+                self.group_files.push(file);
                 self.type_names.push(param.clone());
                 Type {
                     id,
@@ -2406,7 +2394,7 @@ impl<'a> Checker<'a> {
         }
         let ty = self.instance(template, stand_ins, stmt.span, false)?;
         self.checked_instances.insert(ty.id);
-        Some((module, ty, stmt.span))
+        Some((file, ty, stmt.span))
     }
 
     /// The type made from the generic type at `template` in `templates` with
@@ -2440,19 +2428,19 @@ impl<'a> Checker<'a> {
             return None;
         }
 
-        let Template { module, stmt, .. } = self.templates[template];
+        let Template { file, stmt, .. } = self.templates[template];
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
-        self.group_modules.push(module);
+        self.group_files.push(file);
         self.type_names
-            .push(format!("{}::{name}", self.modules[module].display));
+            .push(format!("{}::{name}", self.files[file].display));
         self.instance_ids.insert(key, id);
         self.instances.insert(id, (template, args.clone()));
 
-        // Defined like the generic type, in its module, with its parameters
+        // Defined like the generic type, in its file, with its parameters
         // standing for `args`.
         let errors = self.errors.len();
-        self.at_top_level(module, Some((template, args)), |checker| match &stmt.kind {
+        self.at_top_level(file, Some((template, args)), |checker| match &stmt.kind {
             StmtKind::Group { fields, .. } => checker.define_group(id, &name, fields),
             StmtKind::Choice { options, .. } => checker.define_choice(id, &name, options),
             StmtKind::Primitive { name, .. } => checker.define_primitive(id, name, stmt.span),
@@ -2495,7 +2483,7 @@ impl<'a> Checker<'a> {
             name: format!("{}<{}>", self.templates[template].name, shown.join(", ")),
         };
         let quiet = !self.checked_instances.contains(&id);
-        for (module, stmt) in self.templates[template].impls.clone() {
+        for (file, stmt) in self.templates[template].impls.clone() {
             let StmtKind::Impl {
                 ty: type_name,
                 with,
@@ -2505,7 +2493,7 @@ impl<'a> Checker<'a> {
             else {
                 unreachable!("only `impl`s are recorded");
             };
-            let declared = self.at_top_level(module, None, |checker| {
+            let declared = self.at_top_level(file, None, |checker| {
                 checker.declare_impl(
                     type_name,
                     Some(ty.clone()),
@@ -2519,17 +2507,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Runs `check` as if it were at the top level of `module`, outside any
+    /// Runs `check` as if it were at the top level of `file`, outside any
     /// function or `impl`, with `type_params` as `Checker::type_params`.
     /// Types made from generic types are defined like this, wherever they're
     /// first needed.
     fn at_top_level<T>(
         &mut self,
-        module: usize,
+        file: usize,
         type_params: Option<(usize, Vec<Type>)>,
         check: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let module = std::mem::replace(&mut self.module, module);
+        let file = std::mem::replace(&mut self.file, file);
         let scopes = std::mem::take(&mut self.scopes);
         let fn_scope_start = std::mem::replace(&mut self.fn_scope_start, 0);
         let current_fn = self.current_fn.take();
@@ -2537,7 +2525,7 @@ impl<'a> Checker<'a> {
         let impl_aliases = self.current_impl_aliases.take();
         let type_params = std::mem::replace(&mut self.type_params, type_params);
         let checked = check(self);
-        self.module = module;
+        self.file = file;
         self.scopes = scopes;
         self.fn_scope_start = fn_scope_start;
         self.current_fn = current_fn;
@@ -2597,21 +2585,21 @@ impl<'a> Checker<'a> {
             LazyType::Checked(ty) => return ty.clone(),
             LazyType::Checking => {
                 let error = CheckError::CyclicAlias(alias.name.to_string());
-                self.error_in(alias.module, alias.span, error);
+                self.error_in(alias.file, alias.span, error);
                 return None;
             }
             LazyType::Unchecked => {}
         }
 
-        // Worked out in its own module, even when another module needs it
+        // Worked out in its own file, even when another file needs it
         // first. Only top-level aliases are worked out later, and they're all
         // worked out before any functions are checked, so there are no local
         // scopes to set aside.
-        let (module, target) = (alias.module, alias.target);
+        let (file, target) = (alias.file, alias.target);
         self.aliases[index].state = LazyType::Checking;
-        let outer_module = std::mem::replace(&mut self.module, module);
+        let outer_file = std::mem::replace(&mut self.file, file);
         let ty = self.resolve_type(target);
-        self.module = outer_module;
+        self.file = outer_file;
 
         self.aliases[index].state = LazyType::Checked(ty.clone());
         ty
@@ -2625,21 +2613,20 @@ impl<'a> Checker<'a> {
             LazyType::Checked(ty) => return ty.clone(),
             LazyType::Checking => {
                 let error = CheckError::CyclicValue(global.name.to_string());
-                self.error_in(global.module, global.span, error);
+                self.error_in(global.file, global.span, error);
                 return None;
             }
             LazyType::Unchecked => {}
         }
 
-        // Checked as part of its own module, even when another module needs
+        // Checked as part of its own file, even when another file needs
         // it first. Top-level values are only used at the top level, so
         // there are no local scopes to set aside.
-        let (module, name, type_name, value) =
-            (global.module, global.name, global.ty, global.value);
+        let (file, name, type_name, value) = (global.file, global.name, global.ty, global.value);
         self.globals[index].state = LazyType::Checking;
-        let outer_module = std::mem::replace(&mut self.module, module);
+        let outer_file = std::mem::replace(&mut self.file, file);
         let Typed { ty, expr } = self.decl_type(name, type_name, value);
-        self.module = outer_module;
+        self.file = outer_file;
 
         self.globals[index].state = LazyType::Checked(ty.clone());
         self.globals[index].lowered = expr;
@@ -2675,7 +2662,7 @@ impl<'a> Checker<'a> {
     fn full_name(&self, name: &str) -> String {
         let outer = match &self.current_fn {
             Some(function) => &function.full_name,
-            None => &self.modules[self.module].display,
+            None => &self.files[self.file].display,
         };
         format!("{outer}::{name}")
     }
@@ -2706,8 +2693,8 @@ impl<'a> Checker<'a> {
         let (name, params, ret) = method;
         let index = self.signature(params, ret, full_name);
         if let Some(self_ty) = self_ty {
-            // Methods must be unique across every module, since a call can't
-            // say which module's method it means.
+            // Methods must be unique across every file, since a call can't
+            // say which file's method it means.
             let existing = if is_static {
                 match (
                     self.option(self_ty, name),
@@ -2881,7 +2868,7 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Declares the trait called `name` in the current module. Its signatures
+    /// Declares the trait called `name` in the current file. Its signatures
     /// are worked out by `define_trait`, once types are defined.
     fn declare_trait(
         &mut self,
@@ -2893,7 +2880,7 @@ impl<'a> Checker<'a> {
         self.traits.push(TraitInfo {
             name,
             span,
-            module: self.module,
+            file: self.file,
             aliases,
             functions,
             signatures: vec![],
@@ -2908,12 +2895,12 @@ impl<'a> Checker<'a> {
         let TraitInfo {
             name,
             span,
-            module,
+            file,
             aliases,
             functions,
             ..
         } = self.traits[index];
-        self.module = module;
+        self.file = file;
         // Aliases and functions have separate names, like types and methods.
         let mut alias_names = HashSet::new();
         let mut function_names = HashSet::new();
@@ -2966,7 +2953,7 @@ impl<'a> Checker<'a> {
         if name.is_self() {
             return Some(TraitType::SelfType);
         }
-        if name.module.is_none()
+        if name.file.is_none()
             && let Some(index) = aliases.iter().position(|alias| *alias == name.name)
         {
             return Some(TraitType::Alias(index));
@@ -3088,9 +3075,9 @@ impl<'a> Checker<'a> {
 
     /// Declares the default implementations that `impl ty with` the trait at
     /// `trait_index` in `traits` uses, since it doesn't implement them in
-    /// `functions`, returning their bodies to check, with the trait's module.
+    /// `functions`, returning their bodies to check, with the trait's file.
     /// Names mean what they do where they're written, so they're checked in
-    /// that module, but `Self`, which is `self_ty`, and the aliases, at
+    /// that file, but `Self`, which is `self_ty`, and the aliases, at
     /// `aliases` in `impl_aliases`, are the `impl`'s, and they can be used like
     /// its own functions.
     fn declare_defaults(
@@ -3116,7 +3103,7 @@ impl<'a> Checker<'a> {
 
         let outer_impl_type = self.impl_type.replace(self_ty.cloned());
         self.current_impl_aliases = aliases;
-        let trait_module = self.traits[trait_index].module;
+        let trait_file = self.traits[trait_index].file;
         let mut pending = vec![];
         for declared in declared.iter().filter(|declared| !is_implemented(declared)) {
             let Some(body) = &declared.body else {
@@ -3125,7 +3112,7 @@ impl<'a> Checker<'a> {
             let name = format!("{type_name}.{}", declared.name);
             // Named after the `impl`, since each one has its own copy.
             let full_name = self.full_name(&name);
-            let impl_module = std::mem::replace(&mut self.module, trait_module);
+            let impl_file = std::mem::replace(&mut self.file, trait_file);
             let index = self.declare_method(
                 self_ty,
                 (&declared.name, &declared.params, &declared.ret),
@@ -3133,7 +3120,7 @@ impl<'a> Checker<'a> {
                 declared.is_static,
                 full_name,
             );
-            self.module = impl_module;
+            self.file = impl_file;
             let kind = if declared.is_static {
                 FnKind::Static(self_ty.cloned())
             } else {
@@ -3149,7 +3136,7 @@ impl<'a> Checker<'a> {
                     aliases,
                     quiet,
                 };
-                pending.push((trait_module, body));
+                pending.push((trait_file, body));
             }
         }
         self.impl_type = outer_impl_type;
@@ -3300,7 +3287,7 @@ impl<'a> Checker<'a> {
     /// `Bool.and`, at `index` in `functions`, which must be declared in the
     /// standard library.
     fn define_primitive_fn(&mut self, index: usize, name: &str, span: Span, kind: FnKind) {
-        if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
+        if self.files[self.file].package != Some(STDLIB_PACKAGE) {
             self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
@@ -3400,7 +3387,7 @@ impl<'a> Checker<'a> {
     /// type has been worked out if `state` says so.
     fn declare_alias(&mut self, name: &'a str, span: Span, target: &'a TypeName, state: LazyType) {
         self.aliases.push(Alias {
-            module: self.module,
+            file: self.file,
             name,
             span,
             target,
@@ -3413,7 +3400,7 @@ impl<'a> Checker<'a> {
     fn declare_type(&mut self, name: &'a str, span: Span) -> usize {
         let id = self.group_fields.len();
         self.group_fields.push(vec![]);
-        self.group_modules.push(self.module);
+        self.group_files.push(self.file);
         self.type_names.push(self.full_name(name));
         let ty = Type {
             id,
@@ -3437,7 +3424,7 @@ impl<'a> Checker<'a> {
     /// Records the primitive type called `name` with `id`, which must be
     /// declared in the standard library.
     fn define_primitive(&mut self, id: usize, name: &str, span: Span) {
-        if self.modules[self.module].package != Some(STDLIB_PACKAGE) {
+        if self.files[self.file].package != Some(STDLIB_PACKAGE) {
             self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
@@ -4546,7 +4533,7 @@ impl<'a> Checker<'a> {
         span: Span,
         not_implemented: CheckError,
     ) -> Option<usize> {
-        let trait_index = match self.modules[self.core].scope.get(trait_name) {
+        let trait_index = match self.files[self.core].scope.get(trait_name) {
             Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `{trait_name}`"),
         };
@@ -4801,7 +4788,7 @@ impl<'a> Checker<'a> {
 
     /// Checks the receiver of a field access or method call, which is followed
     /// by `.member`. A type's name is the type itself, for its static
-    /// functions. A module's name gets its own error, since `::` was probably
+    /// functions. A file's name gets its own error, since `::` was probably
     /// meant.
     ///
     /// A generic type's name can leave out its arguments when the value is
@@ -4825,8 +4812,8 @@ impl<'a> Checker<'a> {
                     return Some(Receiver::Type(ty));
                 }
                 Err(LookupError::Undeclared)
-                    if name.module.is_none()
-                        && self.modules[self.module]
+                    if name.file.is_none()
+                        && self.files[self.file]
                             .imports
                             .iter()
                             .any(|import| import.name == name.name) =>
@@ -4834,7 +4821,7 @@ impl<'a> Checker<'a> {
                     self.error(
                         receiver.span,
                         CheckError::FileNotValue {
-                            module: name.name.clone(),
+                            file: name.name.clone(),
                             member: member.to_string(),
                         },
                     );
@@ -5015,7 +5002,7 @@ impl<'a> Checker<'a> {
         // Like a function's arguments, the input is checked first, so its
         // errors come before the call's, and it's used as `Input`, which is
         // found without reporting errors.
-        let call_trait = match self.modules[self.core].scope.get("Call") {
+        let call_trait = match self.files[self.core].scope.get("Call") {
             Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `Call`"),
         };
@@ -5170,12 +5157,12 @@ impl<'a> Checker<'a> {
     /// called `method` of the generic type at `template` in `templates`, if
     /// it has one.
     fn declared_params(&self, template: usize, method: &str) -> Option<DeclaredParams<'a>> {
-        let Template { module, stmt, .. } = self.templates[template];
+        let Template { file, stmt, .. } = self.templates[template];
         if let StmtKind::Choice { options, .. } = &stmt.kind
             && let Some(option) = options.iter().find(|option| option.name == method)
         {
             return Some(DeclaredParams {
-                module,
+                file,
                 types: vec![&option.ty],
                 in_impl: false,
             });
@@ -5183,7 +5170,7 @@ impl<'a> Checker<'a> {
         self.templates[template]
             .impls
             .iter()
-            .find_map(|&(module, stmt)| {
+            .find_map(|&(file, stmt)| {
                 let StmtKind::Impl { functions, .. } = &stmt.kind else {
                     return None;
                 };
@@ -5191,7 +5178,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .find(|found| found.is_static && found.function.name == method)?;
                 Some(DeclaredParams {
-                    module,
+                    file,
                     types: found
                         .function
                         .params
@@ -5295,7 +5282,7 @@ impl<'a> Checker<'a> {
         let position = |name: &str| params.iter().position(|param| param == name);
         let index = match param {
             TypeName::SelfParam(param, _) => position(param),
-            TypeName::Named(name) if !declared.in_impl && name.module.is_none() => {
+            TypeName::Named(name) if !declared.in_impl && name.file.is_none() => {
                 position(&name.name)
             }
             TypeName::Named(name) if name.is_self() && self.is_made_from(found, template) => {
@@ -5315,7 +5302,7 @@ impl<'a> Checker<'a> {
             }
             TypeName::Generic { name, args } => {
                 let binding =
-                    self.at_top_level(declared.module, None, |checker| checker.lookup(name));
+                    self.at_top_level(declared.file, None, |checker| checker.lookup(name));
                 if let Ok(Binding::Generic(generic)) = binding
                     && self.is_made_from(found, generic)
                 {
@@ -5503,16 +5490,16 @@ impl<'a> Checker<'a> {
             self.error(span, CheckError::ConstructedPrimitive(ty.clone()));
             return with_error(ty);
         }
-        // Only the type's own module can construct it, and only in the type's
+        // Only the type's own file can construct it, and only in the type's
         // `impl`s. Elsewhere, values come from its functions, such as
         // `Void.new()`. An unknown `impl` type isn't reported again.
-        let declared_in = self.group_modules[ty.id];
-        if declared_in != self.module {
+        let declared_in = self.group_files[ty.id];
+        if declared_in != self.file {
             self.error(
                 span,
                 CheckError::ConstructedOutsideFile {
                     ty: ty.clone(),
-                    module: self.modules[declared_in].display.clone(),
+                    file: self.files[declared_in].display.clone(),
                 },
             );
             return with_error(ty);
@@ -5832,7 +5819,7 @@ impl<'a> Checker<'a> {
             .globals
             .into_iter()
             .map(|global| ir::Global {
-                name: format!("{}::{}", self.modules[global.module].display, global.name),
+                name: format!("{}::{}", self.files[global.file].display, global.name),
                 ty: match global.state {
                     LazyType::Checked(Some(ty)) => ty.id,
                     _ => panic!("{NO_ERRORS}"),
@@ -5856,11 +5843,11 @@ impl<'a> Checker<'a> {
 
     /// Calls `fn main() -> Int` from `/main`, or `None` if there isn't one.
     fn main(&self) -> Option<ir::Expr> {
-        let module = self
-            .modules
+        let file = self
+            .files
             .iter()
-            .find(|module| module.package.is_none() && module.path == ["main"])?;
-        let Some(&Binding::Function(index)) = module.scope.get("main") else {
+            .find(|file| file.package.is_none() && file.path == ["main"])?;
+        let Some(&Binding::Function(index)) = file.scope.get("main") else {
             return None;
         };
         let signature = &self.functions[index];
@@ -5881,7 +5868,7 @@ fn trait_names<'b>(
     aliases: &'b [String],
 ) -> Box<dyn Iterator<Item = &'b Name> + 'b> {
     match ty {
-        TypeName::Named(name) if name.module.is_none() => {
+        TypeName::Named(name) if name.file.is_none() => {
             let is_trait_name = name.name == "Self" || aliases.contains(&name.name);
             Box::new(is_trait_name.then_some(name).into_iter())
         }
@@ -5965,26 +5952,26 @@ mod tests {
     fn ty(name: &str) -> Type {
         let mut checker = Checker::default();
         checker.add_stdlib();
-        checker.check_modules();
+        checker.check_files();
         checker.std_type(name)
     }
 
-    /// Parses each `(path, src)` pair as a module, with paths like
+    /// Parses each `(path, src)` pair as a file, with paths like
     /// `/dir/other`.
-    fn modules(files: &[(&str, &str)]) -> Vec<Module> {
+    fn parsed_files(files: &[(&str, &str)]) -> Vec<File> {
         files
             .iter()
-            .map(|(path, src)| Module {
+            .map(|(path, src)| File {
                 path: path[1..].split('/').map(str::to_string).collect(),
                 program: parse(src).expect("source should parse"),
             })
             .collect()
     }
 
-    /// Checks each `(path, src)` pair as a module, with paths like
+    /// Checks each `(path, src)` pair as a file, with paths like
     /// `/dir/other`.
-    fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<ModuleError>> {
-        let result = check(&modules(files)).map(|_| ());
+    fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<FileError>> {
+        let result = check(&parsed_files(files)).map(|_| ());
         // Every error must point at something in the file it's reported in.
         for err in result.as_ref().err().into_iter().flatten() {
             let found = pointed_at(files, err);
@@ -5994,15 +5981,15 @@ mod tests {
     }
 
     /// The source that `err`, from checking `files`, points at.
-    fn pointed_at<'a>(files: &[(&'a str, &'a str)], err: &ModuleError) -> &'a str {
+    fn pointed_at<'a>(files: &[(&'a str, &'a str)], err: &FileError) -> &'a str {
         let src = files
             .iter()
-            .find(|(path, _)| *path == err.module)
+            .find(|(path, _)| *path == err.file)
             .map(|(_, src)| *src)
-            .or_else(|| stdlib_source(&err.module))
-            .unwrap_or_else(|| panic!("`{}` should be a module", err.module));
+            .or_else(|| stdlib_source(&err.file))
+            .unwrap_or_else(|| panic!("`{}` should be a file", err.file));
         src.get(err.span.start..err.span.end)
-            .unwrap_or_else(|| panic!("`{err}` points outside its module: {err:?}"))
+            .unwrap_or_else(|| panic!("`{err}` points outside its file: {err:?}"))
     }
 
     /// The source that each error from checking `src` as `/main` points at.
@@ -6032,7 +6019,7 @@ mod tests {
         }
     }
 
-    /// Checks `src` as the only module, `/main`.
+    /// Checks `src` as the only file, `/main`.
     fn check_top(src: &str) -> Result<(), Vec<CheckError>> {
         check_files(&[("/main", src)])
             .map_err(|errs| errs.into_iter().map(|err| err.error).collect())
@@ -6699,7 +6686,7 @@ mod tests {
 
     #[test]
     fn own_names_come_before_std_names() {
-        // `/main` and `stdlib/core` are different modules, so both can declare
+        // `/main` and `stdlib/core` are different files, so both can declare
         // `Int`, and in `/main` a bare `Int` means its own.
         assert_eq!(
             messages_top(
@@ -8011,14 +7998,14 @@ mod tests {
 
     /// Whether checking `src` as `path` finds the program's `main`.
     fn has_main(path: &str, src: &str) -> bool {
-        check(&modules(&[(path, src)]))
+        check(&parsed_files(&[(path, src)]))
             .expect("source should check")
             .main
             .is_some()
     }
 
     #[test]
-    fn main_must_return_int_from_the_main_module() {
+    fn main_must_return_int_from_the_main_file() {
         assert!(has_main("/main", "fn main() -> Int { return 0 }"));
         assert!(!has_main("/main", "fn main() {}"));
         assert!(!has_main(
@@ -8080,7 +8067,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_modules() {
+    fn rejects_unknown_files() {
         assert_eq!(
             file_messages(&[("/main", "use /missing\nuse ./missing\nuse other")]),
             [
@@ -8140,7 +8127,7 @@ mod tests {
     }
 
     #[test]
-    fn names_from_several_modules_must_be_qualified() {
+    fn names_from_several_files_must_be_qualified() {
         let a = "fn f() -> Int {\nreturn 1\n}";
         let b = "fn f() -> Bool {\nreturn true\n}";
         assert_eq!(
@@ -8186,7 +8173,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_with_the_same_name_need_aliases() {
+    fn files_with_the_same_name_need_aliases() {
         // Only if the name is used.
         assert_eq!(
             check_files(&[
@@ -8242,7 +8229,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_values_can_be_qualified_by_module_name_or_alias() {
+    fn top_level_values_can_be_qualified_by_file_name_or_alias() {
         assert_eq!(
             check_files(&[
                 (
@@ -8280,7 +8267,7 @@ mod tests {
     }
 
     #[test]
-    fn names_from_modules_with_the_same_name_only_clash_if_they_are_used() {
+    fn names_from_files_with_the_same_name_only_clash_if_they_are_used() {
         let files = |main| {
             [
                 ("/main", main),
@@ -8300,8 +8287,8 @@ mod tests {
             file_messages(&files("use /a/other\nuse /b/other\nlet x = foo()")),
             ["/main: `foo` is declared in `/a/other` and `/b/other`, so it must be qualified"]
         );
-        // A qualifier that could be either module is never allowed, so that
-        // adding a name to a module can't break a module that doesn't use it.
+        // A qualifier that could be either file is never allowed, so that
+        // adding a name to a file can't break a file that doesn't use it.
         assert_eq!(
             file_messages(&files("use /a/other\nuse /b/other\nlet x = other::bar()")),
             [
@@ -8317,7 +8304,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_replace_the_names_of_modules() {
+    fn aliases_replace_the_names_of_files() {
         assert_eq!(
             file_messages(&[
                 (
@@ -8331,7 +8318,7 @@ mod tests {
     }
 
     #[test]
-    fn aliased_modules_are_still_imported() {
+    fn aliased_files_are_still_imported() {
         assert_eq!(
             check_files(&[
                 ("/main", "use /lib as renamed\nlet a: Int = y"),
@@ -8385,7 +8372,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_are_only_visible_in_their_own_module() {
+    fn aliases_are_only_visible_in_their_own_file() {
         assert_eq!(
             file_messages(&[
                 ("/main", "use /a\nlet x = renamed::y"),
@@ -8397,7 +8384,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_replace_a_module_s_name_wherever_it_s_imported() {
+    fn aliases_replace_a_file_s_name_wherever_it_s_imported() {
         for main in [
             "use /lib\nuse /lib as x\nlet a = x::z\nlet b = lib::z",
             "use /lib as x\nuse /lib\nlet a = x::z\nlet b = lib::z",
@@ -8410,7 +8397,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_can_only_have_one_alias() {
+    fn files_can_only_have_one_alias() {
         assert_eq!(
             file_messages(&[
                 ("/main", "use /lib as x\nuse /lib as y"),
@@ -8429,7 +8416,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_can_alias_themselves() {
+    fn files_can_alias_themselves() {
         assert_eq!(
             check_files(&[("/main", "use /main as me\nlet a = 1\nlet b = me::a")]),
             Ok(())
@@ -8441,7 +8428,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_the_same_alias_for_two_modules() {
+    fn rejects_the_same_alias_for_two_files() {
         // Even if it's never used, and only once if it is.
         for main in [
             "use /a as x\nuse /b as x",
@@ -8468,8 +8455,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_aliases_that_match_another_module_s_name() {
-        for (main, modules) in [
+    fn rejects_aliases_that_match_another_file_s_name() {
+        for (main, names) in [
             ("use /a as b\nuse /b", "`/a` and `/b`"),
             ("use /b\nuse /a as b", "`/b` and `/a`"),
         ] {
@@ -8477,13 +8464,13 @@ mod tests {
             assert_eq!(
                 file_messages(&files),
                 [format!(
-                    "/main: `b` is the name of {modules}, so use `as` to give them different names"
+                    "/main: `b` is the name of {names}, so use `as` to give them different names"
                 )]
             );
             let errs = check_files(&files).expect_err("the alias should be rejected");
             assert_eq!(pointed_at(&files, &errs[0]), "use /a as b");
         }
-        // Unless that module has an alias of its own.
+        // Unless that file has an alias of its own.
         assert_eq!(
             check_files(&[
                 (
@@ -8498,7 +8485,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_can_share_their_own_module_s_name_unless_it_s_used() {
+    fn imports_can_share_their_own_file_s_name_unless_it_s_used() {
         assert_eq!(
             check_files(&[
                 ("/main", "use /dir/main\nlet a = b"),
@@ -8534,7 +8521,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_imports_can_import_modules_with_the_same_name() {
+    fn file_imports_can_import_files_with_the_same_name() {
         let files = |main| {
             [
                 ("/main", main),
@@ -8553,7 +8540,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_fix_directory_imports_of_modules_with_the_same_name() {
+    fn aliases_fix_file_imports_of_files_with_the_same_name() {
         for main in [
             "use ./\nuse ./a/other as first\nlet z = first::x + other::y + x + y",
             "use ./a/other as first\nuse ./\nlet z = first::x + other::y + x + y",
@@ -8570,7 +8557,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_modules_can_not_be_aliased() {
+    fn unknown_files_can_not_be_aliased() {
         assert_eq!(
             file_messages(&[("/main", "use /missing as x\nlet y = x::z")]),
             [
@@ -8619,7 +8606,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_can_import_each_other() {
+    fn files_can_import_each_other() {
         assert_eq!(
             check_files(&[
                 (
@@ -8652,7 +8639,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_cannot_contain_themselves_across_modules() {
+    fn groups_cannot_contain_themselves_across_files() {
         assert_eq!(
             file_messages(&[
                 ("/a", "use /b\ngroup A {\nlet b: B\n}"),
@@ -8724,7 +8711,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_redeclaration_within_a_module() {
+    fn rejects_redeclaration_within_a_file() {
         assert_eq!(
             check_top("group a {}\nfn a() {}\nlet a = 1"),
             Err(vec![
@@ -8970,7 +8957,7 @@ mod tests {
             ),
         ];
         let errs = check_files(&files).expect_err("`missing` isn't declared");
-        assert!(errs.iter().all(|err| err.module == "/named"), "{errs:?}");
+        assert!(errs.iter().all(|err| err.file == "/named"), "{errs:?}");
         assert!(
             errs.iter().all(|err| pointed_at(&files, err) == "missing"),
             "{errs:?}"
@@ -8991,14 +8978,14 @@ mod tests {
     }
 
     #[test]
-    fn stdlib_sources_are_found_by_module() {
+    fn stdlib_sources_are_found_by_file() {
         assert!(stdlib_source("stdlib/core").is_some());
         assert_eq!(stdlib_source("stdlib/missing"), None);
         assert_eq!(stdlib_source("/core"), None);
     }
 
     #[test]
-    fn errors_name_their_module() {
+    fn errors_name_their_file() {
         assert_eq!(
             file_messages(&[("/main", "let x = 1"), ("/dir/other", "let y = z"),]),
             ["/dir/other: `z` is not declared"]
@@ -9181,8 +9168,8 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_only_constructed_in_their_own_module() {
-        // Even in an `impl` of the type, another module can't construct it,
+    fn groups_are_only_constructed_in_their_own_file() {
+        // Even in an `impl` of the type, another file can't construct it,
         // but it can use the type's own functions.
         assert_eq!(
             file_messages(&[
@@ -9296,8 +9283,8 @@ mod tests {
     }
 
     #[test]
-    fn modules_and_identifiers_can_share_names() {
-        // `::` always follows a module, so `user::age` is the module even
+    fn files_and_identifiers_can_share_names() {
+        // `::` always follows a file, so `user::age` is the file even
         // where `user` is also a value.
         assert_eq!(
             check_files(&[
@@ -9568,7 +9555,7 @@ mod tests {
     }
 
     #[test]
-    fn impls_work_across_modules() {
+    fn impls_work_across_files() {
         assert_eq!(
             check_files(&[
                 (
@@ -9607,7 +9594,7 @@ mod tests {
     }
 
     #[test]
-    fn methods_do_not_need_their_module_imported() {
+    fn methods_do_not_need_their_file_imported() {
         let score = "
             use /user
             impl User {
@@ -9639,7 +9626,7 @@ mod tests {
     }
 
     #[test]
-    fn methods_on_std_types_do_not_need_their_module_imported() {
+    fn methods_on_std_types_do_not_need_their_file_imported() {
         assert_eq!(
             check_files(&[
                 ("/main", "let a = 1.doubled()"),
@@ -9659,7 +9646,7 @@ mod tests {
     }
 
     #[test]
-    fn methods_are_unique_across_modules_that_do_not_import_each_other() {
+    fn methods_are_unique_across_files_that_do_not_import_each_other() {
         let user = "group User {}";
         let score = "
             use /user
@@ -9676,7 +9663,7 @@ mod tests {
     }
 
     #[test]
-    fn functions_need_their_module_imported() {
+    fn functions_need_their_file_imported() {
         assert_eq!(
             file_messages(&[
                 ("/main", "use /a\nlet x = f()\nlet y = b::f()"),
@@ -9944,7 +9931,7 @@ mod tests {
     #[test]
     fn fields_need_no_import() {
         // Fields are part of their group, so a value's fields can be read
-        // without importing the module that declares it.
+        // without importing the file that declares it.
         assert_eq!(
             check_files(&[
                 (
@@ -9982,7 +9969,7 @@ mod tests {
     }
 
     #[test]
-    fn suggests_colons_after_modules() {
+    fn suggests_colons_after_files() {
         assert_eq!(
             file_messages(&[
                 (
@@ -9991,7 +9978,7 @@ mod tests {
                     use /user
                     let a = user.User
                     let b = user.make()
-                    // A value with the module's name takes precedence.
+                    // A value with the file's name takes precedence.
                     fn f(user: Int) -> Int {
                         return user.age
                     }
@@ -10050,7 +10037,7 @@ mod tests {
     }
 
     #[test]
-    fn static_functions_on_types_from_other_modules() {
+    fn static_functions_on_types_from_other_files() {
         assert_eq!(
             check_files(&[
                 (
@@ -10238,7 +10225,7 @@ mod tests {
     }
 
     #[test]
-    fn static_functions_do_not_need_their_module_imported() {
+    fn static_functions_do_not_need_their_file_imported() {
         let ints = "
             impl Int {
                 static fn zero() -> Int {
@@ -10882,7 +10869,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_use_their_own_module_s_names() {
+    fn default_trait_functions_use_their_own_file_s_names() {
         let greet = "
             trait Greet {
                 fn greet() -> Int {
@@ -10897,7 +10884,7 @@ mod tests {
             check_files(&[("/greet", greet), ("/main", &main_with_greet(""))]),
             Ok(())
         );
-        // A name in the `impl`'s module doesn't take its place.
+        // A name in the `impl`'s file doesn't take its place.
         let helper = "
             fn helper() -> Bool {
                 return true
@@ -10910,7 +10897,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_use_their_own_module_s_imports() {
+    fn default_trait_functions_use_their_own_file_s_imports() {
         let greet = "
             use /helpers
             trait Greet {
@@ -10936,7 +10923,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_use_their_own_module_s_qualifiers() {
+    fn default_trait_functions_use_their_own_file_s_qualifiers() {
         let greet = "
             trait Greet {
                 fn greet() -> Int {
@@ -10956,7 +10943,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_can_not_use_names_from_the_impl_s_module() {
+    fn default_trait_functions_can_not_use_names_from_the_impl_s_file() {
         let greet = "
             trait Greet {
                 fn greet() -> Int {
@@ -10976,7 +10963,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_can_call_methods_from_the_impl_s_module() {
+    fn default_trait_functions_can_call_methods_from_the_impl_s_file() {
         let greet = "
             trait Greet {
                 fn name() -> Int
@@ -11005,7 +10992,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_can_only_construct_groups_from_their_own_module() {
+    fn default_trait_functions_can_only_construct_groups_from_their_own_file() {
         let make = "
             trait Make {
                 static fn make() -> Self {
@@ -11118,7 +11105,7 @@ mod tests {
     }
 
     #[test]
-    fn traits_can_be_implemented_from_other_modules() {
+    fn traits_can_be_implemented_from_other_files() {
         assert_eq!(
             check_files(&[
                 (
@@ -11316,7 +11303,7 @@ primitive Float"
     }
 
     #[test]
-    fn project_modules_can_share_names_with_stdlib_modules() {
+    fn project_files_can_share_names_with_stdlib_files() {
         let clash = "`core` is the name of `stdlib/core` and `/core`, so use `as` to give them different names";
         assert_eq!(
             check_files(&[
@@ -11400,22 +11387,22 @@ primitive Float"
     #[test]
     fn programs_import_the_whole_stdlib_without_a_use() {
         // The standard library only has `core` so far, so this adds to it.
-        let stdlib = modules(&[("/extra", "let fromExtra = 1")]);
-        let project = modules(&[(
+        let stdlib = parsed_files(&[("/extra", "let fromExtra = 1")]);
+        let project = parsed_files(&[(
             "/main",
             "let a: Int = fromExtra\nlet b: Int = extra::fromExtra",
         )]);
         let mut checker = Checker::default();
         checker.add_stdlib();
-        checker.add_module(Some(STDLIB_PACKAGE), &stdlib[0]);
-        checker.add_module(None, &project[0]);
-        checker.check_modules();
+        checker.add_file(Some(STDLIB_PACKAGE), &stdlib[0]);
+        checker.add_file(None, &project[0]);
+        checker.check_files();
         assert_eq!(checker.errors, []);
     }
 
     #[test]
     fn modules_need_a_slash_to_be_imported() {
-        // Whichever way the path is written, including when its modules are
+        // Whichever way the path is written, including when its files are
         // only in its subdirectories.
         for (main, path) in [
             ("use ./dir", "./dir"),
@@ -11536,7 +11523,7 @@ primitive Float"
 
     #[test]
     fn modules_are_only_suggested_if_they_have_files_to_import() {
-        // `/dir/main` itself is the only module in `/dir`.
+        // `/dir/main` itself is the only file in `/dir`.
         assert_eq!(
             file_messages(&[("/dir/main", "use /dir")]),
             ["/dir/main: cannot find file `/dir`"]
@@ -11565,7 +11552,7 @@ primitive Float"
     }
 
     #[test]
-    fn imports_every_module_in_a_directory() {
+    fn imports_every_file_in_a_file() {
         assert_eq!(
             check_files(&[
                 (
@@ -11661,7 +11648,7 @@ primitive Float"
     }
 
     #[test]
-    fn directory_imports_skip_the_importing_module() {
+    fn file_imports_skip_the_importing_file() {
         // Only `/main` is in the root, so `/` has nothing else to import.
         assert_eq!(
             file_messages(&[("/main", "use ./\nuse /missing/")]),
@@ -11673,7 +11660,7 @@ primitive Float"
     }
 
     #[test]
-    fn directory_imports_can_import_the_stdlib() {
+    fn file_imports_can_import_the_stdlib() {
         // The standard library is imported anyway, so this changes nothing.
         assert_eq!(
             check_files(&[("/main", "use stdlib/\nlet a: core::Int = 1")]),
@@ -11682,7 +11669,7 @@ primitive Float"
     }
 
     #[test]
-    fn names_from_directory_imports_can_be_ambiguous() {
+    fn names_from_file_imports_can_be_ambiguous() {
         assert_eq!(
             file_messages(&[
                 (
@@ -11704,7 +11691,7 @@ primitive Float"
     }
 
     #[test]
-    fn importing_a_directory_and_its_modules_is_harmless() {
+    fn importing_a_file_and_its_files_is_harmless() {
         assert_eq!(
             check_files(&[
                 (
@@ -11848,7 +11835,7 @@ primitive Float"
     #[test]
     fn options_can_be_used_anywhere() {
         // Unlike groups, choices can be created outside their `impl` and
-        // their module.
+        // their file.
         assert_eq!(
             check_files(&[
                 (
@@ -12300,7 +12287,7 @@ primitive Float"
     }
 
     #[test]
-    fn tags_are_available_from_any_module() {
+    fn tags_are_available_from_any_file() {
         assert_eq!(
             check_files(&[
                 (
@@ -13203,7 +13190,7 @@ primitive Float"
     }
 
     #[test]
-    fn static_functions_as_values_do_not_need_their_module_imported() {
+    fn static_functions_as_values_do_not_need_their_file_imported() {
         let ints = "
             impl Int {
                 static fn one() -> Int {
@@ -13231,7 +13218,7 @@ primitive Float"
     }
 
     #[test]
-    fn functions_from_other_modules_are_values_once_imported() {
+    fn functions_from_other_files_are_values_once_imported() {
         let other = "
             fn one() -> Int {
                 return 1
@@ -13469,7 +13456,7 @@ primitive Float"
     }
 
     #[test]
-    fn inferred_static_functions_do_not_need_their_module_imported() {
+    fn inferred_static_functions_do_not_need_their_file_imported() {
         let checked = check_files(&[
             (
                 "/main",
@@ -14096,7 +14083,7 @@ primitive Float"
             check_top("group Point {}\nalias Point = Int"),
             Err(vec![CheckError::Redeclared("Point".to_string())])
         );
-        // A module's own names come before the standard library's.
+        // A file's own names come before the standard library's.
         assert_eq!(check_top("alias Int = Bool\nlet flag: Int = true"), Ok(()));
     }
 

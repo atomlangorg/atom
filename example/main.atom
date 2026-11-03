@@ -1,6 +1,6 @@
 // The top level can only declare things. Declarations can be used in any
 // order, even across files.
-// Imports every module in `users`.
+// Imports every file in the `users` module.
 use ./users/
 use ./teams/team
 

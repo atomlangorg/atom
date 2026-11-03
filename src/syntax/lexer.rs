@@ -114,7 +114,7 @@ pub enum Token<'src> {
     DotGt,
     #[token(":")]
     Colon,
-    /// Separates a module from a name declared in it, as in `other::f`.
+    /// Separates a file from a name declared in it, as in `other::f`.
     #[token("::")]
     ColonColon,
     #[token(",")]

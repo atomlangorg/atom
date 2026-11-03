@@ -22,7 +22,7 @@ use std::{fs, io, ops::Range, path::Path};
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use inkwell::context::Context;
-use syntax::Module;
+use syntax::File;
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
@@ -34,10 +34,10 @@ fn main() {
         }
     };
 
-    let mut modules = vec![];
+    let mut parsed_files = vec![];
     let mut parsed = true;
     for (path, src) in &files {
-        let file = module_name(path);
+        let file = file_name(path);
         let (result, warnings) = syntax::parse_with_warnings(src);
         for warning in warnings {
             let report = report(
@@ -49,7 +49,7 @@ fn main() {
             print_report(&report, &file, src);
         }
         match result {
-            Ok(program) => modules.push(Module {
+            Ok(program) => parsed_files.push(File {
                 path: path.clone(),
                 program,
             }),
@@ -71,17 +71,17 @@ fn main() {
         return;
     }
 
-    let program = match syntax::check(&modules) {
+    let program = match syntax::check(&parsed_files) {
         Ok(program) => program,
         Err(errs) => {
             for err in errs {
                 let report = report(
                     ReportKind::Error,
-                    &err.module,
+                    &err.file,
                     err.span.start..err.span.end,
                     &err.error.to_string(),
                 );
-                print_report(&report, &err.module, module_source(&files, &err.module));
+                print_report(&report, &err.file, file_source(&files, &err.file));
             }
             return;
         }
@@ -99,32 +99,32 @@ fn main() {
         }
     };
     let context = Context::create();
-    let module = codegen::compile(&context, &program, &machine);
+    let file = codegen::compile(&context, &program, &machine);
     let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/atom/example");
     if let Err(err) = fs::create_dir_all(output.parent().expect("has a parent directory")) {
         eprintln!("error creating {}: {err}", output.display());
         return;
     }
-    match codegen::write_executable(&module, &machine, &output) {
+    match codegen::write_executable(&file, &machine, &output) {
         Ok(()) => println!("built {}", output.display()),
         Err(err) => eprintln!("error: {err}"),
     }
 }
 
 /// The name that the file at `path` is shown with, such as `/dir/other`.
-fn module_name(path: &[String]) -> String {
+fn file_name(path: &[String]) -> String {
     format!("/{}", path.join("/"))
 }
 
-/// The source of the module shown as `module`, which is one of `files` or part
+/// The source of the file shown as `file`, which is one of `files` or part
 /// of the standard library.
-fn module_source<'a>(files: &'a [(Vec<String>, String)], module: &str) -> &'a str {
+fn file_source<'a>(files: &'a [(Vec<String>, String)], file: &str) -> &'a str {
     files
         .iter()
-        .find(|(path, _)| module_name(path) == module)
+        .find(|(path, _)| file_name(path) == file)
         .map(|(_, src)| src.as_str())
-        .or_else(|| syntax::stdlib_source(module))
-        .expect("errors are in modules that exist")
+        .or_else(|| syntax::stdlib_source(file))
+        .expect("errors are in files that exist")
 }
 
 /// A report of a problem at `span`, a range of bytes in the source of `file`.
@@ -221,19 +221,19 @@ mod tests {
         ";
         let path = vec!["main".to_string()];
         let (program, _) = syntax::parse_with_warnings(src);
-        let modules = [Module {
+        let parsed_files = [File {
             path: path.clone(),
             program: program.expect("source should parse"),
         }];
-        let errs = syntax::check(&modules).expect_err("`true` isn't an `Int`");
+        let errs = syntax::check(&parsed_files).expect_err("`true` isn't an `Int`");
 
         let files = [(path, src.to_string())];
-        let source = module_source(&files, &errs[0].module);
+        let source = file_source(&files, &errs[0].file);
         let span = errs[0].span.start..errs[0].span.end;
-        let report = report(ReportKind::Error, &errs[0].module, span, "wrong type");
+        let report = report(ReportKind::Error, &errs[0].file, span, "wrong type");
         let mut output = vec![];
         report
-            .write((errs[0].module.as_str(), Source::from(source)), &mut output)
+            .write((errs[0].file.as_str(), Source::from(source)), &mut output)
             .expect("can write to a buffer");
         let output = String::from_utf8(output).expect("reports are UTF-8");
         assert!(output.contains("/main:3:24"));
@@ -241,13 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn module_sources_are_found_in_files_and_the_standard_library() {
+    fn file_sources_are_found_in_files_and_the_standard_library() {
         let files = [(
             vec!["dir".to_string(), "other".to_string()],
             "x".to_string(),
         )];
-        assert_eq!(module_source(&files, "/dir/other"), "x");
-        assert!(module_source(&files, "stdlib/core").contains("primitive"));
+        assert_eq!(file_source(&files, "/dir/other"), "x");
+        assert!(file_source(&files, "stdlib/core").contains("primitive"));
     }
 
     #[test]

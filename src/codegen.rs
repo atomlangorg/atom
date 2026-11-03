@@ -912,32 +912,32 @@ mod tests {
     use inkwell::{execution_engine::ExecutionEngine, values::AnyValue};
 
     use super::*;
-    use crate::syntax::{self, Module as AtomModule, parser::parse};
+    use crate::syntax::{self, File as AtomFile, parser::parse};
 
     fn machine() -> TargetMachine {
         host_machine().expect("LLVM should support this computer")
     }
 
-    /// Checks and compiles each `(path, src)` pair as a module, with paths
+    /// Checks and compiles each `(path, src)` pair as a file, with paths
     /// like `/dir/other`.
     fn compile_files<'ctx>(
         context: &'ctx Context,
         machine: &TargetMachine,
         files: &[(&str, &str)],
     ) -> Module<'ctx> {
-        let modules: Vec<_> = files
+        let parsed: Vec<_> = files
             .iter()
-            .map(|(path, src)| AtomModule {
+            .map(|(path, src)| AtomFile {
                 path: path[1..].split('/').map(str::to_string).collect(),
                 program: parse(src).expect("source should parse"),
             })
             .collect();
-        let program = syntax::check(&modules).expect("source should check");
+        let program = syntax::check(&parsed).expect("source should check");
         assert!(program.main.is_some(), "`/main` should declare `main`");
         compile(context, &program, machine)
     }
 
-    /// Compiles the modules, then runs them with LLVM's JIT, returning the
+    /// Compiles the files, then runs them with LLVM's JIT, returning the
     /// exit code. A program that traps would stop the tests, so those use
     /// `traps` instead.
     fn run_files(files: &[(&str, &str)]) -> i32 {
@@ -1366,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn compiles_across_modules() {
+    fn compiles_across_files() {
         let files = [
             (
                 "/main",
@@ -1406,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_functions_call_names_from_their_own_module() {
+    fn default_trait_functions_call_names_from_their_own_file() {
         let files = [
             (
                 "/main",
@@ -1511,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_with_the_same_name_can_be_imported_without_qualifiers() {
+    fn files_with_the_same_name_can_be_imported_without_qualifiers() {
         let files = [
             (
                 "/main",
@@ -1530,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn qualifies_names_by_module_name_and_alias() {
+    fn qualifies_names_by_file_name_and_alias() {
         let names = [
             (
                 "/main",
