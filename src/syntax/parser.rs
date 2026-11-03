@@ -4827,7 +4827,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_file_imports() {
+    fn parses_module_imports() {
         let directory = |path| stmt_node(StmtKind::Use(Import::Module(path)));
         let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -4951,7 +4951,7 @@ mod tests {
     }
 
     #[test]
-    fn displays_file_imports_as_written() {
+    fn displays_module_imports_as_written() {
         for src in ["./users/", "/users/admins/", "./", "/", "stdlib/"] {
             let program = parse(&format!("use {src}")).unwrap();
             let StmtKind::Use(import) = &program[0].kind else {
@@ -4962,7 +4962,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_file_imports() {
+    fn rejects_malformed_module_imports() {
         for src in [
             "use *",
             "use ./users*",

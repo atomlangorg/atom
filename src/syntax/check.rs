@@ -146,6 +146,8 @@ pub enum CheckError {
     Ambiguous { name: String, files: Vec<String> },
     /// A `use` named a file that doesn't exist.
     UnknownFile(String),
+    /// A `use` named a module that doesn't exist.
+    UnknownModule(String),
     /// A `use` named a module without the slash that imports its files.
     ModuleNotFile { path: String, aliased: bool },
     /// A `use` named a file with the slash that imports a module's files.
@@ -157,7 +159,8 @@ pub enum CheckError {
     NotImported(String),
     /// A `use` gave a file an alias when it already has a different one.
     FileAliasedTwice { file: String, alias: String },
-    /// A `use` of a module found no files that could be imported.
+    /// A `use` of a module found no files that could be imported, since the
+    /// only one in it is the file importing it.
     EmptyModule(String),
     /// A package was used where one of its files was needed.
     PackageNotFile(String),
@@ -473,6 +476,7 @@ impl fmt::Display for CheckError {
                 quoted_list(files, "and")
             ),
             Self::UnknownFile(path) => write!(f, "cannot find file `{path}`"),
+            Self::UnknownModule(path) => write!(f, "cannot find module `{path}`"),
             Self::ModuleNotFile {
                 path,
                 aliased: false,
@@ -1813,15 +1817,17 @@ impl<'a> Checker<'a> {
     /// can be imported.
     fn empty_module(&self, dir: &ImportPath, import: &Import) -> CheckError {
         let suggestions = self.paths_with_start(dir, true);
-        match dir {
-            ImportPath::Absolute(segments) | ImportPath::Relative(segments)
-                if segments.is_empty() =>
-            {
-                CheckError::EmptyModule(import.to_string())
-            }
-            _ if self.resolve_file(dir).is_some() => CheckError::FileNotModule(dir.to_string()),
-            _ if !suggestions.is_empty() => CheckError::PathWithoutStart(suggestions),
-            _ => CheckError::EmptyModule(import.to_string()),
+        let exists = self
+            .full_path(dir)
+            .is_some_and(|(package, path)| self.is_in_module(self.file, package, &path));
+        if exists {
+            CheckError::EmptyModule(import.to_string())
+        } else if self.resolve_file(dir).is_some() {
+            CheckError::FileNotModule(dir.to_string())
+        } else if !suggestions.is_empty() {
+            CheckError::PathWithoutStart(suggestions)
+        } else {
+            CheckError::UnknownModule(import.to_string())
         }
     }
 
@@ -1864,14 +1870,17 @@ impl<'a> Checker<'a> {
             return vec![];
         };
         (0..self.files.len())
-            .filter(|&index| {
-                let file = &self.files[index];
-                file.package == package
-                    && file.path.len() > dir.len()
-                    && file.path.iter().zip(&dir).all(|(a, b)| a == *b)
-                    && index != self.file
-            })
+            .filter(|&index| index != self.file && self.is_in_module(index, package, &dir))
             .collect()
+    }
+
+    /// Whether the file at `index` is in the directory `dir` of `package`,
+    /// including in its subdirectories.
+    fn is_in_module(&self, index: usize, package: Option<&str>, dir: &[&String]) -> bool {
+        let file = &self.files[index];
+        file.package == package
+            && file.path.len() > dir.len()
+            && file.path.iter().zip(dir).all(|(a, b)| a == *b)
     }
 
     /// The package and path within it that `path` leads to. A path starting
@@ -8521,7 +8530,7 @@ mod tests {
     }
 
     #[test]
-    fn file_imports_can_import_files_with_the_same_name() {
+    fn module_imports_can_import_files_with_the_same_name() {
         let files = |main| {
             [
                 ("/main", main),
@@ -8540,7 +8549,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_fix_file_imports_of_files_with_the_same_name() {
+    fn aliases_fix_module_imports_of_files_with_the_same_name() {
         for main in [
             "use ./\nuse ./a/other as first\nlet z = first::x + other::y + x + y",
             "use ./a/other as first\nuse ./\nlet z = first::x + other::y + x + y",
@@ -11505,7 +11514,7 @@ primitive Float"
             file_messages(&[("/main", "use missing\nuse missing/\nuse missing/file")]),
             [
                 "/main: cannot find file `missing`",
-                "/main: `missing/` doesn't contain any files that can be imported",
+                "/main: cannot find module `missing/`",
                 "/main: cannot find file `missing/file`",
             ]
         );
@@ -11552,7 +11561,7 @@ primitive Float"
     }
 
     #[test]
-    fn imports_every_file_in_a_file() {
+    fn imports_every_file_in_a_module() {
         assert_eq!(
             check_files(&[
                 (
@@ -11648,19 +11657,64 @@ primitive Float"
     }
 
     #[test]
-    fn file_imports_skip_the_importing_file() {
+    fn modules_that_do_not_exist_can_not_be_found() {
+        for (main, path) in [
+            ("use /missing/", "/missing/"),
+            ("use ./missing/", "./missing/"),
+            ("use /dir/missing/", "/dir/missing/"),
+            ("use ./dir/missing/", "./dir/missing/"),
+            ("use stdlib/missing/", "stdlib/missing/"),
+        ] {
+            let files = [("/main", main), ("/dir/other", "")];
+            assert_eq!(
+                file_messages(&files),
+                [format!("/main: cannot find module `{path}`")]
+            );
+            let errs = check_files(&files).expect_err("the module doesn't exist");
+            assert_eq!(pointed_at(&files, &errs[0]), main);
+        }
+    }
+
+    #[test]
+    fn modules_with_only_the_importing_file_have_nothing_to_import() {
+        let message = "doesn't contain any files that can be imported";
+        assert_eq!(
+            file_messages(&[("/dir/main", "use /dir/")]),
+            [format!("/dir/main: `/dir/` {message}")]
+        );
+        assert_eq!(
+            file_messages(&[("/dir/sub/main", "use /dir/")]),
+            [format!("/dir/sub/main: `/dir/` {message}")]
+        );
+        assert_eq!(
+            file_messages(&[("/dir/main", "use ./")]),
+            [format!("/dir/main: `./` {message}")]
+        );
+        assert_eq!(
+            file_messages(&[("/main", "use /")]),
+            [format!("/main: `/` {message}")]
+        );
+        // It exists even if there's also a file with its path.
+        assert_eq!(
+            file_messages(&[("/dir/main", "use /dir/"), ("/dir", "")]),
+            [format!("/dir/main: `/dir/` {message}")]
+        );
+    }
+
+    #[test]
+    fn module_imports_skip_the_importing_file() {
         // Only `/main` is in the root, so `/` has nothing else to import.
         assert_eq!(
             file_messages(&[("/main", "use ./\nuse /missing/")]),
             [
                 "/main: `./` doesn't contain any files that can be imported",
-                "/main: `/missing/` doesn't contain any files that can be imported",
+                "/main: cannot find module `/missing/`",
             ]
         );
     }
 
     #[test]
-    fn file_imports_can_import_the_stdlib() {
+    fn module_imports_can_import_the_stdlib() {
         // The standard library is imported anyway, so this changes nothing.
         assert_eq!(
             check_files(&[("/main", "use stdlib/\nlet a: core::Int = 1")]),
@@ -11669,7 +11723,7 @@ primitive Float"
     }
 
     #[test]
-    fn names_from_file_imports_can_be_ambiguous() {
+    fn names_from_module_imports_can_be_ambiguous() {
         assert_eq!(
             file_messages(&[
                 (
@@ -11691,7 +11745,7 @@ primitive Float"
     }
 
     #[test]
-    fn importing_a_file_and_its_files_is_harmless() {
+    fn importing_a_module_and_its_files_is_harmless() {
         assert_eq!(
             check_files(&[
                 (
