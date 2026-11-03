@@ -1511,6 +1511,25 @@ mod tests {
     }
 
     #[test]
+    fn modules_with_the_same_name_can_be_imported_without_qualifiers() {
+        let files = [
+            (
+                "/main",
+                "
+                use /a/
+
+                fn main() -> Int {
+                    return p() * 10 + q()
+                }
+                ",
+            ),
+            ("/a/b/x", "fn p() -> Int { return 1 }"),
+            ("/a/x", "fn q() -> Int { return 2 }"),
+        ];
+        assert_eq!(run_files(&files), 12);
+    }
+
+    #[test]
     fn qualifies_names_by_module_name_and_alias() {
         let names = [
             (

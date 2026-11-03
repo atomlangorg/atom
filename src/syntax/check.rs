@@ -27,11 +27,11 @@
 //! rejected.
 //!
 //! A module's own top-level names come before the names it imports, which
-//! must not clash with each other. When they do, a name is qualified by the
-//! last part of its module's path, as in `other::f`, or by the alias given in
-//! the module's `use`, as in `use /dir/other as renamed`. Each module has one
-//! such name, which no other module it's imported with can share. Only a `use`
-//! can contain a path.
+//! only clash if they're used. When they do, a name is qualified by the last
+//! part of its module's path, as in `other::f`, or by the alias given in the
+//! module's `use`, as in `use /dir/other as renamed`. Modules can share these
+//! names, as long as it isn't an alias and the name isn't used. Only a `use` can
+//! contain a path.
 //!
 //! The standard library is a package called `stdlib`, whose files are modules
 //! named from the package, such as `stdlib/core`. Every program imports
@@ -166,7 +166,8 @@ pub enum CheckError {
     ConstructedOutsideModule { ty: Type, module: String },
     /// `::` was used after a name that's declared, but isn't a module.
     NotAModule(String),
-    /// More than one module that a module imports has the same name.
+    /// An alias is the name of another module too, or a qualified name's module
+    /// is the name of more than one module.
     ModuleNameClash { name: String, modules: Vec<String> },
     /// A top-level value's initialiser depends on the value itself.
     CyclicValue(String),
@@ -501,7 +502,7 @@ impl fmt::Display for CheckError {
             ),
             Self::ModuleNameClash { name, modules } => write!(
                 f,
-                "`{name}` is the name of both {}, so use `as` to give one of them a different name",
+                "`{name}` is the name of {}, so use `as` to give them different names",
                 quoted_list(modules, "and")
             ),
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
@@ -1154,7 +1155,7 @@ struct ImportedModule<'a> {
     name: &'a str,
     /// Its index in `Checker::modules`.
     module: usize,
-    /// The `use` that gave it its name, unless it's always imported.
+    /// The `use` that gave it an alias, if it has one.
     span: Option<Span>,
 }
 
@@ -1718,8 +1719,7 @@ impl<'a> Checker<'a> {
         }
 
         // Each module has one name. An alias replaces its own name wherever
-        // else it's imported, so aliases come first.
-        uses.sort_by_key(|&(_, alias, _)| alias.is_none());
+        // else it's imported.
         for (module, alias, span) in uses {
             let name = self.modules[module].name;
             match (
@@ -1729,7 +1729,7 @@ impl<'a> Checker<'a> {
                 (None, _) => imports.push(ImportedModule {
                     name: alias.unwrap_or(name),
                     module,
-                    span: Some(span),
+                    span: alias.map(|_| span),
                 }),
                 (Some(import), Some(alias)) if import.name == name => {
                     import.name = alias;
@@ -1752,8 +1752,9 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
-            // A module called `core` has no `use` to blame for sharing a name
-            // with `stdlib/core`, so its own name just comes first.
+            // An alias is chosen, so there's no reason for it to clash. Other
+            // modules just happen to share a name, which is fine unless it's
+            // used.
             if let Some(span) = import.span.or(first.span) {
                 let modules = [first, import]
                     .map(|import| self.modules[import.module].display.clone())
@@ -1826,16 +1827,32 @@ impl<'a> Checker<'a> {
 
     /// Finds the module that the qualifier `name` refers to. It must be the
     /// current module or one it imports.
-    fn resolve_qualifier(&self, name: &str) -> Result<usize, CheckError> {
-        let imports = &self.modules[self.module].imports;
-        match imports.iter().find(|import| import.name == name) {
-            Some(import) => Ok(import.module),
+    fn resolve_qualifier(&self, name: &str) -> Result<usize, LookupError> {
+        let matches: Vec<_> = self.modules[self.module]
+            .imports
+            .iter()
+            .filter(|import| import.name == name)
+            .collect();
+        let error = match matches[..] {
+            [import] => return Ok(import.module),
             // Modules aren't identifiers, so a name can be both. If it's only
             // an identifier, that's probably the mistake.
-            None if self.is_declared(name) => Err(CheckError::NotAModule(name.to_string())),
-            None if name == STDLIB_PACKAGE => Err(CheckError::PackageNotModule(name.to_string())),
-            None => Err(CheckError::NotImported(name.to_string())),
-        }
+            [] if self.is_declared(name) => CheckError::NotAModule(name.to_string()),
+            [] if name == STDLIB_PACKAGE => CheckError::PackageNotModule(name.to_string()),
+            [] => CheckError::NotImported(name.to_string()),
+            // An alias's clash is reported at its `use`.
+            _ if matches.iter().any(|import| import.span.is_some()) => {
+                return Err(LookupError::Reported);
+            }
+            _ => CheckError::ModuleNameClash {
+                name: name.to_string(),
+                modules: matches
+                    .iter()
+                    .map(|import| self.modules[import.module].display.clone())
+                    .collect(),
+            },
+        };
+        Err(LookupError::Module(Box::new(error)))
     }
 
     /// Whether `name` is declared anywhere the current code could see it,
@@ -1903,9 +1920,7 @@ impl<'a> Checker<'a> {
     fn lookup_binding(&self, name: &Name) -> Result<Binding, LookupError> {
         let binding = match &name.module {
             Some(path) => {
-                let module = self
-                    .resolve_qualifier(path)
-                    .map_err(|error| LookupError::Module(Box::new(error)))?;
+                let module = self.resolve_qualifier(path)?;
                 self.modules[module]
                     .scope
                     .get(name.name.as_str())
@@ -8091,22 +8106,25 @@ mod tests {
 
     #[test]
     fn modules_with_the_same_name_need_aliases() {
-        // Even if the name is never used.
-        for main in [
-            "use /a/other\nuse /b/other",
-            "use /a/other\nuse /b/other\nlet x = other::value",
-        ] {
-            assert_eq!(
-                file_messages(&[
-                    ("/main", main),
-                    ("/a/other", "let value = 1"),
-                    ("/b/other", "let value = true"),
-                ]),
-                [
-                    "/main: `other` is the name of both `/a/other` and `/b/other`, so use `as` to give one of them a different name"
-                ]
-            );
-        }
+        // Only if the name is used.
+        assert_eq!(
+            check_files(&[
+                ("/main", "use /a/other\nuse /b/other"),
+                ("/a/other", "let value = 1"),
+                ("/b/other", "let value = true"),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /a/other\nuse /b/other\nlet x = other::value"),
+                ("/a/other", "let value = 1"),
+                ("/b/other", "let value = true"),
+            ]),
+            [
+                "/main: `other` is the name of `/a/other` and `/b/other`, so use `as` to give them different names"
+            ]
+        );
         assert_eq!(
             check_files(&[
                 (
@@ -8176,6 +8194,43 @@ mod tests {
                 ("/filea", "let temp = 1"),
                 ("/dir/filea", "let temp = true"),
             ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn names_from_modules_with_the_same_name_only_clash_if_they_are_used() {
+        let files = |main| {
+            [
+                ("/main", main),
+                (
+                    "/a/other",
+                    "fn foo() -> Int {\nreturn 1\n}\nfn bar() -> Int {\nreturn 2\n}",
+                ),
+                ("/b/other", "fn foo() -> Bool {\nreturn true\n}"),
+            ]
+        };
+        // `bar` only has one definition, so it doesn't need qualifying.
+        assert_eq!(
+            check_files(&files("use /a/other\nuse /b/other\nlet x: Int = bar()")),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&files("use /a/other\nuse /b/other\nlet x = foo()")),
+            ["/main: `foo` is declared in `/a/other` and `/b/other`, so it must be qualified"]
+        );
+        // A qualifier that could be either module is never allowed, so that
+        // adding a name to a module can't break a module that doesn't use it.
+        assert_eq!(
+            file_messages(&files("use /a/other\nuse /b/other\nlet x = other::bar()")),
+            [
+                "/main: `other` is the name of `/a/other` and `/b/other`, so use `as` to give them different names"
+            ]
+        );
+        assert_eq!(
+            check_files(&files(
+                "use /a/other as first\nuse /b/other\nlet x: Int = first::foo()\nlet y: Bool = other::foo()"
+            )),
             Ok(())
         );
     }
@@ -8306,10 +8361,10 @@ mod tests {
 
     #[test]
     fn rejects_the_same_alias_for_two_modules() {
-        // Even if it's never used.
+        // Even if it's never used, and only once if it is.
         for main in [
             "use /a as x\nuse /b as x",
-            "use /a as x\nuse /b as x\nlet y = x::value",
+            "use /a as x\nuse /b as x\nlet y = x::value\nlet z = x::missing",
         ] {
             assert_eq!(
                 file_messages(&[
@@ -8318,7 +8373,7 @@ mod tests {
                     ("/b", "let value = 2"),
                 ]),
                 [
-                    "/main: `x` is the name of both `/a` and `/b`, so use `as` to give one of them a different name"
+                    "/main: `x` is the name of `/a` and `/b`, so use `as` to give them different names"
                 ]
             );
         }
@@ -8333,13 +8388,19 @@ mod tests {
 
     #[test]
     fn rejects_aliases_that_match_another_module_s_name() {
-        for main in ["use /a as b\nuse /b", "use /b\nuse /a as b"] {
+        for (main, modules) in [
+            ("use /a as b\nuse /b", "`/a` and `/b`"),
+            ("use /b\nuse /a as b", "`/b` and `/a`"),
+        ] {
+            let files = [("/main", main), ("/a", ""), ("/b", "")];
             assert_eq!(
-                file_messages(&[("/main", main), ("/a", ""), ("/b", "")]),
-                [
-                    "/main: `b` is the name of both `/a` and `/b`, so use `as` to give one of them a different name"
-                ]
+                file_messages(&files),
+                [format!(
+                    "/main: `b` is the name of {modules}, so use `as` to give them different names"
+                )]
             );
+            let errs = check_files(&files).expect_err("the alias should be rejected");
+            assert_eq!(pointed_at(&files, &errs[0]), "use /a as b");
         }
         // Unless that module has an alias of its own.
         assert_eq!(
@@ -8356,16 +8417,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_imports_named_the_same_as_their_own_module() {
-        let clash = "/main: `main` is the name of both `/main` and `/dir/main`, so use `as` to give one of them a different name";
+    fn imports_can_share_their_own_module_s_name_unless_it_s_used() {
         assert_eq!(
-            file_messages(&[("/main", "use /dir/main"), ("/dir/main", "")]),
-            [clash]
+            check_files(&[
+                ("/main", "use /dir/main\nlet a = b"),
+                ("/dir/main", "let b = 1")
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /dir/main\nlet a = main::b"),
+                ("/dir/main", "let b = 1")
+            ]),
+            [
+                "/main: `main` is the name of `/main` and `/dir/main`, so use `as` to give them different names"
+            ]
         );
         assert_eq!(
             file_messages(&[("/main", "use /dir as main"), ("/dir", "")]),
             [
-                "/main: `main` is the name of both `/main` and `/dir`, so use `as` to give one of them a different name"
+                "/main: `main` is the name of `/main` and `/dir`, so use `as` to give them different names"
             ]
         );
         assert_eq!(
@@ -8381,20 +8453,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_directory_imports_of_modules_with_the_same_name() {
-        let files = [
-            ("/main", "use ./"),
-            ("/a/other", "let x = 1"),
-            ("/b/other", "let y = 2"),
-        ];
-        assert_eq!(
-            file_messages(&files),
+    fn directory_imports_can_import_modules_with_the_same_name() {
+        let files = |main| {
             [
-                "/main: `other` is the name of both `/a/other` and `/b/other`, so use `as` to give one of them a different name"
+                ("/main", main),
+                ("/a/b/x", "let p = 1"),
+                ("/a/x", "let q = 2"),
+            ]
+        };
+        assert_eq!(check_files(&files("use /a/")), Ok(()));
+        assert_eq!(check_files(&files("use /a/\nlet z = p + q")), Ok(()));
+        assert_eq!(
+            file_messages(&files("use /a/\nlet z = x::p")),
+            [
+                "/main: `x` is the name of `/a/b/x` and `/a/x`, so use `as` to give them different names"
             ]
         );
-        let errs = check_files(&files).expect_err("the names should clash");
-        assert_eq!(pointed_at(&files, &errs[0]), "use ./");
     }
 
     #[test]
@@ -11155,18 +11229,27 @@ primitive Float"
             ["/main: cannot find module `./core`"]
         );
         assert_eq!(
-            check_files(&[("/main", "use ./core as mine"), ("/core", "group Int {}")]),
+            check_files(&[("/main", "use ./core"), ("/core", "group Int {}")]),
             Ok(())
         );
     }
 
     #[test]
     fn project_modules_can_share_names_with_stdlib_modules() {
+        let clash = "`core` is the name of `stdlib/core` and `/core`, so use `as` to give them different names";
         assert_eq!(
-            file_messages(&[("/main", "use /core"), ("/core", "let flag = true")]),
-            [
-                "/main: `core` is the name of both `stdlib/core` and `/core`, so use `as` to give one of them a different name",
-            ]
+            check_files(&[
+                ("/main", "use /core\nlet a: Bool = flag"),
+                ("/core", "let flag = true"),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            file_messages(&[
+                ("/main", "use /core\nlet a = core::flag"),
+                ("/core", "let flag = true"),
+            ]),
+            [format!("/main: {clash}")]
         );
         // Aliasing the standard library's leaves the name for the project's.
         assert_eq!(
@@ -11184,9 +11267,18 @@ primitive Float"
             ]),
             Ok(())
         );
-        // Without a `use` to blame, a module's own name comes first.
+        // It's the same in `/core` itself.
         assert_eq!(
-            check_files(&[("/core", "let a = 1\nlet b: Int = core::a")]),
+            file_messages(&[("/core", "let a = 1\nlet b = core::a")]),
+            [
+                "/core: `core` is the name of `/core` and `stdlib/core`, so use `as` to give them different names"
+            ]
+        );
+        assert_eq!(
+            check_files(&[(
+                "/core",
+                "use stdlib/core as std\nlet a = 1\nlet b: std::Int = core::a"
+            )]),
             Ok(())
         );
         assert_eq!(
