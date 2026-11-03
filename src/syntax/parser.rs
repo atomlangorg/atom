@@ -818,18 +818,23 @@ where
 
     // Where a path starts from, and the directories it goes through.
     let directories = ident.then_ignore(just(Token::Slash)).repeated();
+    let up = just(Token::Dot)
+        .then(just(Token::Dot))
+        .then(just(Token::Slash))
+        .repeated()
+        .at_least(1)
+        .count();
     let start = choice((
         just(Token::Slash)
-            .to(ImportPath::Absolute as fn(_) -> _)
-            .then(directories.clone().collect::<Vec<_>>()),
+            .ignore_then(directories.clone().collect())
+            .map(ImportPath::Absolute),
         just(Token::Dot)
             .then(just(Token::Slash))
-            .to(ImportPath::Relative as fn(_) -> _)
-            .then(directories.clone().collect::<Vec<_>>()),
-        directories
-            .at_least(1)
-            .collect::<Vec<_>>()
-            .map(|segments| (ImportPath::Package as fn(_) -> _, segments)),
+            .ignore_then(directories.clone().collect())
+            .map(ImportPath::Relative),
+        up.then(directories.clone().collect())
+            .map(|(up, segments)| ImportPath::Parent(up, segments)),
+        directories.at_least(1).collect().map(ImportPath::Package),
     ));
     // `as` only means this here, so it can still be used as a name or label, as
     // in `isSame(as: other)`.
@@ -838,7 +843,7 @@ where
     // alias would look like a file with a space in its path, followed by a name.
     let aliased_module = start
         .clone()
-        .map(|(path, segments)| Import::Module(path(segments)))
+        .map(Import::Module)
         .then_ignore(just(Token::Ident("as")))
         .then_ignore(ident)
         .then_ignore(just(Token::Newline).ignored().or(end()).rewind())
@@ -849,21 +854,18 @@ where
             ));
             import
         });
-    // `/dir/other`, `./dir/other`, `stdlib/core` or `other` is a file, which can
-    // have an alias, as in `/dir/other as renamed`. Ending in a slash, as in
-    // `/dir/`, `./dir/`, `stdlib/`, `./` or `/`, is a module: every file in a
-    // directory and its subdirectories.
+    // `/dir/other`, `./dir/other`, `../dir/other`, `stdlib/core` or `other` is a
+    // file, which can have an alias, as in `/dir/other as renamed`. Ending in a
+    // slash, as in `/dir/`, `./dir/`, `../dir/`, `stdlib/`, `./`, `../` or `/`, is
+    // a module: every file in a directory and its subdirectories.
     let import = start
         .then(ident.or_not())
-        .map(|((path, mut segments), name)| match name {
+        .map(|(mut path, name)| match name {
             Some(name) => {
-                segments.push(name);
-                Import::File {
-                    path: path(segments),
-                    alias: None,
-                }
+                path.push(name);
+                Import::File { path, alias: None }
             }
-            None => Import::Module(path(segments)),
+            None => Import::Module(path),
         })
         .or(ident.map(|name| Import::File {
             path: ImportPath::Named(name),
@@ -1275,6 +1277,8 @@ mod tests {
             "use /dir/other as renamed",
             "use ./",
             "use ./users/",
+            "use ../users/other",
+            "use ../../",
             "primitive Int",
             "primitive Fn<T, U>",
         ] {
@@ -3554,7 +3558,6 @@ mod tests {
             "use",
             "use .",
             "use .a",
-            "use ../a",
             "use /a::b",
             "use /a\n/b",
             "use /a use /b",
@@ -4827,6 +4830,73 @@ mod tests {
     }
 
     #[test]
+    fn parses_parent_paths() {
+        let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
+        let file = |path, alias: Option<&str>| {
+            stmt_node(StmtKind::Use(Import::File {
+                path,
+                alias: alias.map(str::to_string),
+            }))
+        };
+        let module = |path| stmt_node(StmtKind::Use(Import::Module(path)));
+        assert_eq!(
+            parse("use ../a\nuse ../../a/b\nuse ../a as c\nuse ../\nuse ../../\nuse ../a/"),
+            Ok(vec![
+                file(ImportPath::Parent(1, segments(&["a"])), None),
+                file(ImportPath::Parent(2, segments(&["a", "b"])), None),
+                file(ImportPath::Parent(1, segments(&["a"])), Some("c")),
+                module(ImportPath::Parent(1, vec![])),
+                module(ImportPath::Parent(2, vec![])),
+                module(ImportPath::Parent(1, segments(&["a"]))),
+            ])
+        );
+        // As a real path, so that spaces inside one would be noticed.
+        for src in ["use ../a", "use ../../a/b as c", "use ../", "use ../../a/"] {
+            assert!(super::parse(src).is_ok(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn parent_directories_are_only_allowed_at_the_start_of_a_path() {
+        for src in [
+            "use ..",
+            "use ...",
+            "use .../a",
+            "use ..a",
+            "use ../..",
+            "use ../.",
+            "use ./../a",
+            "use /../a",
+            "use a/../b",
+            "use ./a/../b",
+            "use /a/../b",
+            "use ../a/../b",
+            "use ../a/..",
+            "use ../a/./b",
+            "let x = ../a::b",
+            "let x: ../a::B = 1",
+            "fn f() {\nuse ../a\n}",
+        ] {
+            assert!(super::parse(src).is_err(), "{src:?} should not parse");
+        }
+        for src in [
+            "use . ./a",
+            "use .. /a",
+            "use ../ a",
+            "use ../ ../a",
+            "use ../.. /a",
+        ] {
+            let errs = super::parse(src).expect_err(src);
+            assert!(
+                errs.iter().any(|err| err
+                    .to_string()
+                    .contains("paths can't contain spaces or comments")),
+                "{src:?}: {errs:?}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_module_imports() {
         let directory = |path| stmt_node(StmtKind::Use(Import::Module(path)));
         let segments = |segments: &[&str]| segments.iter().map(|s| s.to_string()).collect();
@@ -4879,6 +4949,8 @@ mod tests {
             ("use ./users/ as x", "./users/"),
             ("use /users/admins/ as x", "/users/admins/"),
             ("use ./ as x", "./"),
+            ("use ../ as x", "../"),
+            ("use ../../users/ as x", "../../users/"),
             ("use / as x", "/"),
             ("use stdlib/ as x", "stdlib/"),
             ("use ./users/ as x // Note.", "./users/"),
@@ -4952,7 +5024,16 @@ mod tests {
 
     #[test]
     fn displays_module_imports_as_written() {
-        for src in ["./users/", "/users/admins/", "./", "/", "stdlib/"] {
+        for src in [
+            "./users/",
+            "/users/admins/",
+            "./",
+            "/",
+            "stdlib/",
+            "../",
+            "../../",
+            "../users/",
+        ] {
             let program = parse(&format!("use {src}")).unwrap();
             let StmtKind::Use(import) = &program[0].kind else {
                 panic!("expected a `use`");

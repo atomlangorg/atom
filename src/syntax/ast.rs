@@ -42,6 +42,11 @@ pub enum ImportPath {
     /// `./dir/other`: from the directory of the current file, within its
     /// package if it's in one.
     Relative(Vec<String>),
+    /// `../dir/other`: from this many directories above the directory of the
+    /// current file, which can't go above the root of the project or its
+    /// package. `..` can only be at the start of a path, so this is the only way
+    /// a path can go up.
+    Parent(usize, Vec<String>),
     /// `stdlib/core`: from the root of a package, whose name comes first. Only
     /// a directory can have just the one segment, as in `stdlib/`.
     Package(Vec<String>),
@@ -55,8 +60,22 @@ impl fmt::Display for ImportPath {
         match self {
             Self::Absolute(segments) => write!(f, "/{}", segments.join("/")),
             Self::Relative(segments) => write!(f, "./{}", segments.join("/")),
+            Self::Parent(up, segments) => write!(f, "{}{}", "../".repeat(*up), segments.join("/")),
             Self::Package(segments) => write!(f, "{}", segments.join("/")),
             Self::Named(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+impl ImportPath {
+    /// Adds `segment` to the end of a path that starts with a directory.
+    pub fn push(&mut self, segment: String) {
+        match self {
+            Self::Absolute(segments)
+            | Self::Relative(segments)
+            | Self::Parent(_, segments)
+            | Self::Package(segments) => segments.push(segment),
+            Self::Named(_) => unreachable!("a name alone doesn't start with a directory"),
         }
     }
 }
@@ -87,7 +106,9 @@ impl fmt::Display for Import {
             } => write!(f, "{path} as {alias}"),
             // An empty path already ends in a `/`.
             Self::Module(
-                path @ (ImportPath::Absolute(segments) | ImportPath::Relative(segments)),
+                path @ (ImportPath::Absolute(segments)
+                | ImportPath::Relative(segments)
+                | ImportPath::Parent(_, segments)),
             ) if segments.is_empty() => {
                 write!(f, "{path}")
             }

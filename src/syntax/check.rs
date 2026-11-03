@@ -150,6 +150,9 @@ pub enum CheckError {
     UnknownModule(String),
     /// A `use` named a module without the slash that imports its files.
     ModuleNotFile { path: String, aliased: bool },
+    /// A `use` named a path with more `../` than there are directories above
+    /// the current file.
+    PathAboveRoot(String),
     /// A `use` named a file with the slash that imports a module's files.
     FileNotModule(String),
     /// A `use` named something that exists, but without the `./` or `/` that
@@ -491,6 +494,7 @@ impl fmt::Display for CheckError {
                 f,
                 "`{path}` is a module, so it can't have an alias, but `{path}/` imports every file in it"
             ),
+            Self::PathAboveRoot(path) => write!(f, "`{path}` goes above the root directory"),
             Self::FileNotModule(path) => {
                 write!(
                     f,
@@ -1804,6 +1808,7 @@ impl<'a> Checker<'a> {
             ImportPath::Named(name) if name == STDLIB_PACKAGE => {
                 CheckError::PackageNotFile(name.clone())
             }
+            _ if self.goes_above_root(path) => CheckError::PathAboveRoot(path.to_string()),
             _ if !self.resolve_module(path).is_empty() => CheckError::ModuleNotFile {
                 path: path.to_string(),
                 aliased,
@@ -1820,7 +1825,9 @@ impl<'a> Checker<'a> {
         let exists = self
             .full_path(dir)
             .is_some_and(|(package, path)| self.is_in_module(self.file, package, &path));
-        if exists {
+        if self.goes_above_root(dir) {
+            CheckError::PathAboveRoot(import.to_string())
+        } else if exists {
             CheckError::EmptyModule(import.to_string())
         } else if self.resolve_file(dir).is_some() {
             CheckError::FileNotModule(dir.to_string())
@@ -1883,21 +1890,43 @@ impl<'a> Checker<'a> {
             && file.path.iter().zip(dir).all(|(a, b)| a == *b)
     }
 
+    /// The directory of the current file, from the root of its package or the
+    /// project.
+    fn current_dir(&self) -> &'a [String] {
+        let current = &self.files[self.file];
+        current
+            .path
+            .split_last()
+            .map_or(current.path, |(_, dir)| dir)
+    }
+
+    /// Whether `path` has more `../` than there are directories above the
+    /// current file.
+    fn goes_above_root(&self, path: &ImportPath) -> bool {
+        matches!(path, ImportPath::Parent(up, _) if *up > self.current_dir().len())
+    }
+
     /// The package and path within it that `path` leads to. A path starting
     /// with `/` is from the root of the project, one starting with `./` is
-    /// from the current file's directory, and one starting with a package's
-    /// name is from the root of that package. Files can't be found by name
-    /// alone.
+    /// from the current file's directory, one starting with `../` is from above
+    /// that, and one starting with a package's name is from the root of that
+    /// package. Files can't be found by name alone, or above the root of their
+    /// own package or the project, so these paths never leave it.
     fn full_path(&self, path: &'a ImportPath) -> Option<(Option<&'a str>, Vec<&'a String>)> {
         let current = &self.files[self.file];
         Some(match path {
             ImportPath::Absolute(segments) => (None, segments.iter().collect()),
-            ImportPath::Relative(segments) => {
-                let dir = current
-                    .path
-                    .split_last()
-                    .map_or(current.path, |(_, dir)| dir);
-                (current.package, dir.iter().chain(segments).collect())
+            ImportPath::Relative(segments) => (
+                current.package,
+                self.current_dir().iter().chain(segments).collect(),
+            ),
+            ImportPath::Parent(up, segments) => {
+                let dir = self.current_dir();
+                let kept = dir.len().checked_sub(*up)?;
+                (
+                    current.package,
+                    dir[..kept].iter().chain(segments).collect(),
+                )
             }
             ImportPath::Package(segments) => {
                 (Some(segments[0].as_str()), segments[1..].iter().collect())
@@ -8072,6 +8101,158 @@ mod tests {
         assert_eq!(
             file_messages(&[("/dir/a", "use ./dir/b"), ("/dir/b", "")]),
             ["/dir/a: cannot find file `./dir/b`"]
+        );
+    }
+
+    #[test]
+    fn parent_paths_start_above_the_current_directory() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/a/b/main",
+                    "
+                    use ../sibling
+                    use ../../root
+                    use ../other/nested
+                    let x: Int = sibling::s + root::r + nested::n
+                    ",
+                ),
+                ("/a/sibling", "let s = 1"),
+                ("/root", "let r = 2"),
+                ("/a/other/nested", "let n = 3"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn parent_paths_can_have_aliases() {
+        assert_eq!(
+            check_files(&[
+                (
+                    "/dir/main",
+                    "use ../lib as renamed\nuse ./lib\nlet a: Int = renamed::x\nlet b: Bool = lib::x"
+                ),
+                ("/lib", "let x = 1"),
+                ("/dir/lib", "let x = true"),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn parent_paths_can_import_modules() {
+        let files = |main| {
+            [
+                ("/a/b/main", main),
+                ("/a/b/own", "let o = 1"),
+                ("/a/sibling", "let s = 2"),
+                ("/a/other/nested", "let n = 3"),
+                ("/outside", "let t = 4"),
+            ]
+        };
+        // `../` is everything in `/a/`, including the current directory.
+        assert_eq!(check_files(&files("use ../\nlet x = o + s + n")), Ok(()));
+        assert_eq!(
+            file_messages(&files("use ../\nlet x = t")),
+            ["/a/b/main: `t` is not declared"]
+        );
+        // The root of the project is still in the project.
+        assert_eq!(
+            check_files(&files("use ../../\nlet x = o + s + n + t")),
+            Ok(())
+        );
+        assert_eq!(check_files(&files("use ../other/\nlet x = n")), Ok(()));
+    }
+
+    #[test]
+    fn parent_paths_can_not_go_above_the_root() {
+        // Even if what they name exists, so they aren't stopped at the root.
+        for (file, main, path) in [
+            ("/main", "use ../lib", "../lib"),
+            ("/main", "use ../", "../"),
+            ("/main", "use ../dir/", "../dir/"),
+            ("/main", "use ../../lib as x", "../../lib"),
+            ("/dir/main", "use ../../lib", "../../lib"),
+            ("/dir/main", "use ../../", "../../"),
+            (
+                "/dir/main",
+                "use ../../../../../../lib",
+                "../../../../../../lib",
+            ),
+            ("/dir/main", "use ../../dir/lib", "../../dir/lib"),
+        ] {
+            let files = [(file, main), ("/lib", ""), ("/dir/lib", "")];
+            assert_eq!(
+                file_messages(&files),
+                [format!("{file}: `{path}` goes above the root directory")]
+            );
+            let errs = check_files(&files).expect_err("the path goes above the root");
+            assert_eq!(pointed_at(&files, &errs[0]), main);
+        }
+    }
+
+    #[test]
+    fn parent_paths_can_not_reach_the_stdlib_from_the_project() {
+        assert_eq!(
+            file_messages(&[("/main", "use ../stdlib/core")]),
+            ["/main: `../stdlib/core` goes above the root directory"]
+        );
+        assert_eq!(
+            file_messages(&[("/dir/main", "use ../stdlib/core")]),
+            ["/dir/main: cannot find file `../stdlib/core`"]
+        );
+    }
+
+    #[test]
+    fn parent_paths_can_not_leave_the_stdlib() {
+        let check = |path: &[&str], src: &str| {
+            let stdlib = File {
+                path: path.iter().map(|s| s.to_string()).collect(),
+                program: parse(src).expect("source should parse"),
+            };
+            let project = parsed_files(&[("/secret", "let hidden = 1")]);
+            let mut checker = Checker::default();
+            checker.add_stdlib();
+            checker.add_file(Some(STDLIB_PACKAGE), &stdlib);
+            checker.add_file(None, &project[0]);
+            checker.check_files();
+            checker
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            check(&["extra"], "use ../secret"),
+            ["stdlib/extra: `../secret` goes above the root directory"]
+        );
+        // Going up inside it stays inside it.
+        assert_eq!(
+            check(&["sub", "extra"], "use ../secret"),
+            ["stdlib/sub/extra: cannot find file `../secret`"]
+        );
+        assert!(check(&["sub", "extra"], "use ../core").is_empty());
+    }
+
+    #[test]
+    fn parent_paths_get_the_same_advice_as_other_paths() {
+        let files = |main| [("/dir/main", main), ("/lib", ""), ("/other/x", "")];
+        assert_eq!(
+            file_messages(&files("use ../other")),
+            ["/dir/main: `../other` is a module, so use `../other/` to import every file in it"]
+        );
+        assert_eq!(
+            file_messages(&files("use ../lib/")),
+            ["/dir/main: `../lib` is a file, so use it without the trailing slash"]
+        );
+        assert_eq!(
+            file_messages(&files("use ../missing")),
+            ["/dir/main: cannot find file `../missing`"]
+        );
+        assert_eq!(
+            file_messages(&files("use ../missing/")),
+            ["/dir/main: cannot find module `../missing/`"]
         );
     }
 

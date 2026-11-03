@@ -1530,6 +1530,36 @@ mod tests {
     }
 
     #[test]
+    fn compiles_parent_paths() {
+        let files = [
+            (
+                "/main",
+                "
+                use ./a/b/caller
+
+                fn main() -> Int {
+                    return call()
+                }
+                ",
+            ),
+            (
+                "/a/b/caller",
+                "
+                use ../sibling
+                use ../../root as top
+
+                fn call() -> Int {
+                    return sibling::value() * 10 + top::value()
+                }
+                ",
+            ),
+            ("/a/sibling", "fn value() -> Int { return 1 }"),
+            ("/root", "fn value() -> Int { return 2 }"),
+        ];
+        assert_eq!(run_files(&files), 12);
+    }
+
+    #[test]
     fn qualifies_names_by_file_name_and_alias() {
         let names = [
             (
