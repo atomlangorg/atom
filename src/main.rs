@@ -155,15 +155,22 @@ fn print_report(report: &Report<(&str, Range<usize>)>, file: &str, src: &str) {
         .expect("can write to stderr");
 }
 
-/// Reads every `.atom` file under `root`, returning each one's path from
-/// `root` without `.atom`, such as `["dir", "other"]`, along with its source.
+/// Reads every `.atom` file under `root`, without following symlinks, returning
+/// each one's path from `root` without `.atom`, such as `["dir", "other"]`, along
+/// with its source.
 fn read_atom_files(root: &Path) -> io::Result<Vec<(Vec<String>, String)>> {
     let mut files = vec![];
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            // A symlink could lead outside `root`, or back into it forever.
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 dirs.push(path);
             } else if path.extension().is_some_and(|ext| ext == "atom") {
                 let relative = path
@@ -186,6 +193,8 @@ fn read_atom_files(root: &Path) -> io::Result<Vec<(Vec<String>, String)>> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     /// Renders the first problem found in `src`, preferring errors.
@@ -238,6 +247,33 @@ mod tests {
         let output = String::from_utf8(output).expect("reports are UTF-8");
         assert!(output.contains("/main:3:24"));
         assert!(output.contains("wrong type"));
+    }
+
+    #[test]
+    fn reading_files_skips_symlinks() {
+        let temp = std::env::temp_dir().join(format!("atom-symlinks-{}", std::process::id()));
+        let root = temp.join("root");
+        let outside = temp.join("outside");
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("main.atom"), "main").unwrap();
+        fs::write(root.join("dir/other.atom"), "other").unwrap();
+        fs::write(outside.join("secret.atom"), "secret").unwrap();
+        // A directory and a file that lead outside the root, and a directory
+        // that leads back into it, which would never finish if it was followed.
+        symlink(&outside, root.join("linked")).unwrap();
+        symlink(outside.join("secret.atom"), root.join("linked.atom")).unwrap();
+        symlink(&root, root.join("dir/loop")).unwrap();
+
+        let files = read_atom_files(&root);
+        fs::remove_dir_all(&temp).unwrap();
+
+        let expected =
+            [(vec!["dir", "other"], "other"), (vec!["main"], "main")].map(|(path, src)| {
+                let path = path.into_iter().map(str::to_string).collect::<Vec<_>>();
+                (path, src.to_string())
+            });
+        assert_eq!(files.unwrap(), expected);
     }
 
     #[test]
