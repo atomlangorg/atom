@@ -34,10 +34,8 @@
 //! contain a path.
 //!
 //! The standard library is a package called `stdlib`, whose files are modules
-//! named from the package, such as `stdlib/core`. Every program imports
-//! `stdlib/core` without needing a `use`, and can import the standard
-//! library's other modules like any other module. Only the standard library
-//! can declare
+//! named from the package, such as `stdlib/core`. Every program imports all of
+//! them without needing a `use`. Only the standard library can declare
 //! primitive types, such as `Int`, which the compiler represents itself, and
 //! whose values only come from literals and operators, and primitive
 //! functions, such as `exit`, which the compiler implements itself.
@@ -1686,7 +1684,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Finds the modules imported by the current module. Modules in the
-    /// project always import `stdlib/core`.
+    /// project always import the whole standard library.
     fn resolve_imports(&mut self) {
         let always_imported = |module: usize| ImportedModule {
             name: self.modules[module].name,
@@ -1695,7 +1693,9 @@ impl<'a> Checker<'a> {
         };
         let mut imports = vec![always_imported(self.module)];
         if self.modules[self.module].package.is_none() {
-            imports.push(always_imported(self.core));
+            let stdlib = (0..self.modules.len())
+                .filter(|&module| self.modules[module].package == Some(STDLIB_PACKAGE));
+            imports.extend(stdlib.map(always_imported));
         }
 
         let mut uses = vec![];
@@ -11317,6 +11317,22 @@ primitive Float"
     }
 
     #[test]
+    fn programs_import_the_whole_stdlib_without_a_use() {
+        // The standard library only has `core` so far, so this adds to it.
+        let stdlib = modules(&[("/extra", "let fromExtra = 1")]);
+        let project = modules(&[(
+            "/main",
+            "let a: Int = fromExtra\nlet b: Int = extra::fromExtra",
+        )]);
+        let mut checker = Checker::default();
+        checker.add_stdlib();
+        checker.add_module(Some(STDLIB_PACKAGE), &stdlib[0]);
+        checker.add_module(None, &project[0]);
+        checker.check_modules();
+        assert_eq!(checker.errors, []);
+    }
+
+    #[test]
     fn imports_every_module_in_a_directory() {
         assert_eq!(
             check_files(&[
@@ -11426,7 +11442,7 @@ primitive Float"
 
     #[test]
     fn directory_imports_can_import_the_stdlib() {
-        // `stdlib/core` is imported anyway, so this changes nothing.
+        // The standard library is imported anyway, so this changes nothing.
         assert_eq!(
             check_files(&[("/main", "use stdlib/\nlet a: core::Int = 1")]),
             Ok(())
