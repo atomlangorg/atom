@@ -17,8 +17,10 @@
 use std::fmt;
 
 use chumsky::{
-    input::{Stream, ValueInput},
+    extra::ParserExtra,
+    input::{MapExtra, Stream, ValueInput},
     inspector::TruncateState,
+    pratt::{infix, left, prefix},
     prelude::*,
 };
 
@@ -102,6 +104,31 @@ fn parse_tokens<'src>(
         .parse_with_state(stream, &mut warnings)
         .into_result();
     (result, warnings.0)
+}
+
+/// Combines the operands of a binary operator into an expression.
+fn fold_binary<'src, I: Input<'src>, E: ParserExtra<'src, I>>(
+    lhs: Expr,
+    op: BinOp,
+    rhs: Expr,
+    _: &mut MapExtra<'src, '_, I, E>,
+) -> Expr {
+    Expr {
+        span: lhs.span.to(rhs.span),
+        kind: ExprKind::Binary(Box::new(lhs), op, Box::new(rhs)),
+    }
+}
+
+/// Whether `expr` is a comparison that isn't in brackets.
+fn is_comparison(expr: &Expr) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::Binary(
+            _,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+            _
+        )
+    )
 }
 
 /// The type written `Void`, which is what's meant where no type is written, at
@@ -264,67 +291,21 @@ where
             Token::Bang => UnOp::Not,
             Token::DotBang => UnOp::BitNot,
         };
-        let unary = unary_op
-            .map_with(|op, e| (op, Span::from(e.span())))
-            .repeated()
-            .foldr(atom, |(op, span), rhs| Expr {
-                span: span.to(rhs.span),
-                kind: ExprKind::Unary(op, Box::new(rhs)),
-            });
-
-        // Binary operators are left-associative: `a - b + c` is `(a - b) + c`.
-        // Each level below binds less tightly than the one before it. Each
-        // level holds two copies of the one before it, so some are boxed to
-        // stop the parser's type doubling at every level, which makes it
-        // very slow to compile and to run.
-        let fold_binary = |lhs: Expr, (op, rhs): (BinOp, Expr)| Expr {
-            span: lhs.span.to(rhs.span),
-            kind: ExprKind::Binary(Box::new(lhs), op, Box::new(rhs)),
-        };
-
         let product_op = select! {
             Token::Star => BinOp::Mul,
             Token::Slash => BinOp::Div,
         };
-        let product = unary
-            .clone()
-            .foldl(product_op.then(unary).repeated(), fold_binary);
-
         let sum_op = select! {
             Token::Plus => BinOp::Add,
             Token::Minus => BinOp::Sub,
         };
-        let sum = product
-            .clone()
-            .foldl(sum_op.then(product).repeated(), fold_binary)
-            .boxed();
-
         let shift_op = select! {
             Token::DotLt => BinOp::ShiftLeft,
             Token::DotGt => BinOp::ShiftRight,
         };
-        let shift = sum
-            .clone()
-            .foldl(shift_op.then(sum).repeated(), fold_binary);
-
         let bit_and_op = just(Token::DotAmp).to(BinOp::BitAnd);
-        let bit_and = shift
-            .clone()
-            .foldl(bit_and_op.then(shift).repeated(), fold_binary);
-
         let bit_xor_op = just(Token::DotCaret).to(BinOp::BitXor);
-        let bit_xor = bit_and
-            .clone()
-            .foldl(bit_xor_op.then(bit_and).repeated(), fold_binary);
-
         let bit_or_op = just(Token::DotPipe).to(BinOp::BitOr);
-        let bit_or = bit_xor
-            .clone()
-            .foldl(bit_or_op.then(bit_xor).repeated(), fold_binary)
-            .boxed();
-
-        // Comparisons can't be chained, since `a == b == c` would compare the
-        // result of `a == b` with `c`, which is rarely what's meant.
         let comparison_op = select! {
             Token::EqEq => BinOp::Eq,
             Token::BangEq => BinOp::Ne,
@@ -333,34 +314,46 @@ where
             Token::Gt => BinOp::Gt,
             Token::GtEq => BinOp::Ge,
         };
-        let comparison = bit_or
-            .clone()
-            .then(
-                comparison_op
-                    .then(bit_or)
-                    .map_with(|rhs, e| (rhs, e.span()))
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .validate(move |(lhs, rest), _, emitter| {
-                if let Some((_, span)) = rest.get(1) {
-                    emitter.emit(Rich::custom(
-                        *span,
-                        "comparisons can't be chained, but can be combined with `&` or `|`",
-                    ));
-                }
-                rest.into_iter().map(|(rhs, _)| rhs).fold(lhs, fold_binary)
-            });
-
         let and_op = just(Token::Amp).to(BinOp::And);
-        let and = comparison
-            .clone()
-            .foldl(and_op.then(comparison).repeated(), fold_binary);
-
         let or_op = just(Token::Pipe).to(BinOp::Or);
-        and.clone()
-            .foldl(or_op.then(and).repeated(), fold_binary)
-            .boxed()
+
+        // Binary operators are left-associative: `a - b + c` is `(a - b) + c`.
+        // A higher number binds more tightly.
+        atom.pratt((
+            prefix(10, unary_op, |op, rhs: Expr, e| Expr {
+                span: Span::from(e.span()),
+                kind: ExprKind::Unary(op, Box::new(rhs)),
+            }),
+            infix(left(9), product_op, fold_binary),
+            infix(left(8), sum_op, fold_binary),
+            infix(left(7), shift_op, fold_binary),
+            infix(left(6), bit_and_op, fold_binary),
+            infix(left(5), bit_xor_op, fold_binary),
+            infix(left(4), bit_or_op, fold_binary),
+            // Comparisons can't be chained, since `a == b == c` would compare
+            // the result of `a == b` with `c`, which is rarely what's meant.
+            // They're parsed as left-associative so that a chain gets a clear
+            // error, reported once, at its second comparison.
+            infix(
+                left(3),
+                comparison_op.map_with(|op, e| (op, Span::from(e.span()))),
+                |lhs: Expr, (op, op_span): (BinOp, Span), rhs: Expr, e| {
+                    if let ExprKind::Binary(first, ..) = &lhs.kind
+                        && is_comparison(&lhs)
+                        && !is_comparison(first)
+                    {
+                        e.emit(Rich::custom(
+                            (op_span.start..rhs.span.end).into(),
+                            "comparisons can't be chained, but can be combined with `&` or `|`",
+                        ));
+                    }
+                    fold_binary(lhs, op, rhs, e)
+                },
+            ),
+            infix(left(2), and_op, fold_binary),
+            infix(left(1), or_op, fold_binary),
+        ))
+        .boxed()
     };
 
     let mut expr = Recursive::declare();
@@ -2308,6 +2301,18 @@ mod tests {
                 "comparisons can't be chained, but can be combined with `&` or `|`",
                 "{src:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reports_chained_comparisons_once() {
+        for src in [
+            "x = a == b == c == d",
+            "x = a < b < c < d < e",
+            "x = (a == b) == c == d",
+            "x = a == (b == c) == d",
+        ] {
+            assert_eq!(parse_body(src).unwrap_err().len(), 1, "{src:?}");
         }
     }
 
