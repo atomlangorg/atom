@@ -392,7 +392,7 @@ impl fmt::Display for CheckError {
             }
             Self::PackageNotFile(package) => write!(
                 f,
-                "`{package}` is a package, so use one of its files, such as `{package}/core`"
+                "`{package}` is a package, so use one of its files, such as `{package}/bool`"
             ),
             Self::ConstructedOutsideFile { ty, file } => write!(
                 f,

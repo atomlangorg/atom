@@ -317,7 +317,7 @@ impl<'a> Checker<'a> {
         span: Span,
         not_implemented: CheckError,
     ) -> Option<FnRef> {
-        let trait_index = match self.files[self.core].scope.get(trait_name) {
+        let trait_index = match self.std_binding(trait_name) {
             Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `{trait_name}`"),
         };

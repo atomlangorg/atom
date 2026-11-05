@@ -1,0 +1,32 @@
+/*
+ * Copyright 2026 George Elsham
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Whole numbers, such as `42`. Unsigned integers (`IntU`) hold 0 to 2^N - 1,
+// and signed integers (`IntS`) hold -2^(N-1) to 2^(N-1) - 1, where N is the
+// number of bits. Arithmetic that goes outside a type's range stops the
+// program, and so does dividing by zero. Only signed integers can be negated,
+// and only unsigned integers can be shifted, with `.<` and `.>`, by an `Int`,
+// which stops the program if the amount isn't from 0 to N - 1, or if `.<`
+// shifts off a `1`.
+//
+// Integers are equal if they hold the same value, and are ordered by their
+// values. Their operators work on two of the same type, except that shifts
+// are by an `Int`. Each integer type is in its own file, such as `IntU8` in
+// `intu8`.
+
+// The integer to use unless another is needed. Integer literals are `Int`s
+// unless they're used as another integer type.
+alias Int = IntS64

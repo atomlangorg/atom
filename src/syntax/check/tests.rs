@@ -767,15 +767,15 @@ fn unknown_type_does_not_cascade() {
 
 #[test]
 fn own_names_come_before_std_names() {
-    // `/main` and `stdlib/core` are different files, so both can declare
+    // `/main` and `stdlib/int` are different files, so both can declare
     // `Int`, and in `/main` a bare `Int` means its own.
     assert_eq!(
         messages_top(
             "
             group Int {}
             let a: Int = 1
-            let b: core::Int = 1
-            fn f(x: main::Int) -> core::Bool {
+            let b: int::Int = 1
+            fn f(x: main::Int) -> bool::Bool {
                 return true
             }
             "
@@ -2259,12 +2259,12 @@ fn parent_paths_can_not_go_above_the_root() {
 #[test]
 fn parent_paths_can_not_reach_the_stdlib_from_the_project() {
     assert_eq!(
-        file_messages(&[("/main", "use ../stdlib/core")]),
-        ["/main: `../stdlib/core` goes above the root directory"]
+        file_messages(&[("/main", "use ../stdlib/int")]),
+        ["/main: `../stdlib/int` goes above the root directory"]
     );
     assert_eq!(
-        file_messages(&[("/dir/main", "use ../stdlib/core")]),
-        ["/dir/main: cannot find file `../stdlib/core`"]
+        file_messages(&[("/dir/main", "use ../stdlib/int")]),
+        ["/dir/main: cannot find file `../stdlib/int`"]
     );
 }
 
@@ -2279,13 +2279,13 @@ fn parent_paths_can_not_leave_the_stdlib() {
         messages_in_stdlib(&["sub", "extra"], "use ../secret"),
         ["stdlib/sub/extra: cannot find file `../secret`"]
     );
-    assert!(messages_in_stdlib(&["sub", "extra"], "use ../core").is_empty());
+    assert!(messages_in_stdlib(&["sub", "extra"], "use ../int").is_empty());
 }
 
 #[test]
 fn absolute_paths_in_the_stdlib_start_from_its_root() {
-    assert!(messages_in_stdlib(&["sub", "extra"], "use /core").is_empty());
-    assert!(messages_in_stdlib(&["sub", "extra"], "use /\nlet a: core::Int = 1").is_empty());
+    assert!(messages_in_stdlib(&["sub", "extra"], "use /int").is_empty());
+    assert!(messages_in_stdlib(&["sub", "extra"], "use /\nlet a: int::Int = 1").is_empty());
     // Which means they can't reach the project's files.
     assert_eq!(
         messages_in_stdlib(&["extra"], "use /secret"),
@@ -2383,7 +2383,7 @@ fn importing_twice_or_importing_itself_is_harmless() {
                 use ./main
                 use /lib
                 use ./lib
-                use stdlib/core
+                use stdlib/int
                 let x: Int = y + 1
                 let z = x
                 ",
@@ -2862,7 +2862,7 @@ fn qualified_names_must_exist() {
 #[test]
 fn std_names_can_be_qualified() {
     assert_eq!(
-        check_top("let x: core::Int = 1\nlet y: Int = x\nlet z: core::Bool = true"),
+        check_top("let x: int::Int = 1\nlet y: Int = x\nlet z: bool::Bool = true"),
         Ok(())
     );
 }
@@ -3235,9 +3235,9 @@ fn missing_types_that_were_not_written_point_at_their_declaration() {
 
 #[test]
 fn stdlib_sources_are_found_by_file() {
-    assert!(stdlib_source("stdlib/core").is_some());
+    assert!(stdlib_source("stdlib/int").is_some());
     assert_eq!(stdlib_source("stdlib/missing"), None);
-    assert_eq!(stdlib_source("/core"), None);
+    assert_eq!(stdlib_source("/int"), None);
 }
 
 #[test]
@@ -3432,7 +3432,7 @@ fn groups_are_only_constructed_in_their_own_file() {
 #[test]
 fn only_literals_create_ints_and_bools() {
     assert_eq!(
-        check_body("let v: Void = Void.new()\nlet w: core::Void = core::Void.new()"),
+        check_body("let v: Void = Void.new()\nlet w: void::Void = void::Void.new()"),
         Ok(())
     );
     assert_eq!(
@@ -3728,7 +3728,7 @@ fn impls_can_extend_std_types() {
                     return self * 2
                 }
             }
-            impl core::Bool {
+            impl bool::Bool {
                 fn flipped() -> Bool {
                     return !self
                 }
@@ -4261,7 +4261,7 @@ fn calls_static_functions_on_types() {
             "
             {POINT}
             let zero: Int = Int.zero()
-            let alsoZero: Int = core::Int.zero()
+            let alsoZero: Int = int::Int.zero()
             let origin: Point = Point.origin()
             let moved: Point = Point.at(x: 1).moved(by: 2)
             fn f() -> Int {{
@@ -4502,15 +4502,15 @@ fn stdlib_is_a_package() {
             "/main",
             "
             use stdlib
-            use stdlib/core
+            use stdlib/int
             use stdlib/missing
             let a: stdlib::Int = 1
             ",
         )]),
         [
-            "/main: `stdlib` is a package, so use one of its files, such as `stdlib/core`",
+            "/main: `stdlib` is a package, so use one of its files, such as `stdlib/bool`",
             "/main: cannot find file `stdlib/missing`",
-            "/main: `stdlib` is a package, so use one of its files, such as `stdlib/core`",
+            "/main: `stdlib` is a package, so use one of its files, such as `stdlib/bool`",
         ]
     );
 }
@@ -5525,14 +5525,14 @@ primitive Float"
 
 #[test]
 fn relative_paths_stay_in_their_package() {
-    // `./core` from the project looks in the project, not the standard
+    // `./int` from the project looks in the project, not the standard
     // library.
     assert_eq!(
-        file_messages(&[("/main", "use ./core")]),
-        ["/main: cannot find file `./core`"]
+        file_messages(&[("/main", "use ./int")]),
+        ["/main: cannot find file `./int`"]
     );
     assert_eq!(
-        check_files(&[("/main", "use ./core"), ("/core", "group Int {}")]),
+        check_files(&[("/main", "use ./int"), ("/int", "group Int {}")]),
         Ok(())
     );
 }
@@ -5540,18 +5540,18 @@ fn relative_paths_stay_in_their_package() {
 #[test]
 fn project_files_can_share_names_with_stdlib_files() {
     let clash =
-        "`core` is the name of `stdlib/core` and `/core`, so use `as` to give them different names";
+        "`int` is the name of `stdlib/int` and `/int`, so use `as` to give them different names";
     assert_eq!(
         check_files(&[
-            ("/main", "use /core\nlet a: Bool = flag"),
-            ("/core", "let flag = true"),
+            ("/main", "use /int\nlet a: Bool = flag"),
+            ("/int", "let flag = true"),
         ]),
         Ok(())
     );
     assert_eq!(
         file_messages(&[
-            ("/main", "use /core\nlet a = core::flag"),
-            ("/core", "let flag = true"),
+            ("/main", "use /int\nlet a = int::flag"),
+            ("/int", "let flag = true"),
         ]),
         [format!("/main: {clash}")]
     );
@@ -5561,27 +5561,27 @@ fn project_files_can_share_names_with_stdlib_files() {
             (
                 "/main",
                 "
-                use /core
-                use stdlib/core as std
-                let a: Bool = core::flag
+                use /int
+                use stdlib/int as std
+                let a: Bool = int::flag
                 let b: std::Int = 1
                 ",
             ),
-            ("/core", "let flag = true"),
+            ("/int", "let flag = true"),
         ]),
         Ok(())
     );
-    // It's the same in `/core` itself.
+    // It's the same in `/int` itself.
     assert_eq!(
-        file_messages(&[("/core", "let a = 1\nlet b = core::a")]),
+        file_messages(&[("/int", "let a = 1\nlet b = int::a")]),
         [
-            "/core: `core` is the name of `/core` and `stdlib/core`, so use `as` to give them different names"
+            "/int: `int` is the name of `/int` and `stdlib/int`, so use `as` to give them different names"
         ]
     );
     assert_eq!(
         check_files(&[(
-            "/core",
-            "use stdlib/core as std\nlet a = 1\nlet b: std::Int = core::a"
+            "/int",
+            "use stdlib/int as std\nlet a = 1\nlet b: std::Int = int::a"
         )]),
         Ok(())
     );
@@ -5590,14 +5590,14 @@ fn project_files_can_share_names_with_stdlib_files() {
             (
                 "/main",
                 "
-                use /core as mine
+                use /int as mine
                 let a: Bool = flag
                 let b: Bool = mine::flag
-                let c: Int = core::Int.zero()
+                let c: Int = int::Int.zero()
                 ",
             ),
             (
-                "/core",
+                "/int",
                 "
                 let flag = true
                 impl Int {
@@ -5613,16 +5613,16 @@ fn project_files_can_share_names_with_stdlib_files() {
 }
 
 #[test]
-fn programs_import_core_without_a_use() {
+fn programs_import_the_stdlib_without_a_use() {
     assert_eq!(
-        check_top("let x: Void = Void.new()\nlet y: Bool = true\nlet z: core::Int = 1"),
+        check_top("let x: Void = Void.new()\nlet y: Bool = true\nlet z: int::Int = 1"),
         Ok(())
     );
 }
 
 #[test]
 fn programs_import_the_whole_stdlib_without_a_use() {
-    // The standard library only has `core` so far, so this adds to it.
+    // Including a file added to it, as well as its own.
     let stdlib = parsed_files(&[("/extra", "let fromExtra = 1")]);
     let project = parsed_files(&[(
         "/main",
@@ -5670,7 +5670,7 @@ fn files_can_not_be_imported_with_a_slash() {
     for (main, path) in [
         ("use ./lib/", "./lib"),
         ("use /lib/", "/lib"),
-        ("use stdlib/core/", "stdlib/core"),
+        ("use stdlib/int/", "stdlib/int"),
     ] {
         let files = [("/main", main), ("/lib", "let x = 1")];
         assert_eq!(
@@ -5944,7 +5944,7 @@ fn module_imports_skip_the_importing_file() {
 fn module_imports_can_import_the_stdlib() {
     // The standard library is imported anyway, so this changes nothing.
     assert_eq!(
-        check_files(&[("/main", "use stdlib/\nlet a: core::Int = 1")]),
+        check_files(&[("/main", "use stdlib/\nlet a: int::Int = 1")]),
         Ok(())
     );
 }
@@ -5995,7 +5995,7 @@ fn creates_void_values() {
             fn nothing() {}
             let b: Void = nothing()
             fn f() -> Void {
-                return core::Void.new()
+                return void::Void.new()
             }
             "
         ),
@@ -6040,7 +6040,7 @@ fn self_constructs_the_type_of_its_impl() {
             "`y` is not declared",
             "`Self` can only be used inside an `impl` or a `trait`",
             "`make` must return `Point`, found `Other`",
-            "`Void` can only be constructed in `stdlib/core`, which declares it",
+            "`Void` can only be constructed in `stdlib/void`, which declares it",
         ]
     );
 }

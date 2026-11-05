@@ -19,8 +19,8 @@
 use super::*;
 
 impl<'a> Checker<'a> {
-    /// Finds the files imported by the current file. Files in the
-    /// project always import the whole standard library.
+    /// Finds the files imported by the current file, which always imports
+    /// the whole standard library.
     pub(super) fn resolve_imports(&mut self) {
         let always_imported = |file: usize| ImportedFile {
             name: self.files[file].name,
@@ -28,11 +28,10 @@ impl<'a> Checker<'a> {
             span: None,
         };
         let mut imports = vec![always_imported(self.cx.file)];
-        if self.files[self.cx.file].package.is_none() {
-            let stdlib = (0..self.files.len())
-                .filter(|&file| self.files[file].package == Some(STDLIB_PACKAGE));
-            imports.extend(stdlib.map(always_imported));
-        }
+        let stdlib = (0..self.files.len()).filter(|&file| {
+            file != self.cx.file && self.files[file].package == Some(STDLIB_PACKAGE)
+        });
+        imports.extend(stdlib.map(always_imported));
 
         let mut uses = vec![];
         for stmt in self.files[self.cx.file].program {

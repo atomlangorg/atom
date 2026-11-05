@@ -35,8 +35,8 @@
 //! contain a path.
 //!
 //! The standard library is a package called `stdlib`, whose files are files
-//! named from the package, such as `stdlib/core`. Every program imports all of
-//! them without needing a `use`. Only the standard library can declare
+//! named from the package, such as `stdlib/bool`. Every file imports all of
+//! them without needing a `use`, including the standard library's own. Only the standard library can declare
 //! primitive types, such as `Int`, which the compiler represents itself, and
 //! whose values only come from literals and operators, and primitive
 //! functions, such as `exit`, which the compiler implements itself.
@@ -90,10 +90,27 @@ const NO_ERRORS: &str = "the program has no errors";
 const STDLIB_PACKAGE: &str = "stdlib";
 
 /// The source of each file of the standard library, by its path within it.
-const STDLIB_FILES: [(&str, &str); 1] = [("core", include_str!("../../stdlib/core.atom"))];
+const STDLIB_FILES: [(&str, &str); 16] = [
+    ("operators", include_str!("../../stdlib/operators.atom")),
+    ("bool", include_str!("../../stdlib/bool.atom")),
+    ("int", include_str!("../../stdlib/int.atom")),
+    ("intu8", include_str!("../../stdlib/intu8.atom")),
+    ("intu16", include_str!("../../stdlib/intu16.atom")),
+    ("intu32", include_str!("../../stdlib/intu32.atom")),
+    ("intu64", include_str!("../../stdlib/intu64.atom")),
+    ("ints8", include_str!("../../stdlib/ints8.atom")),
+    ("ints16", include_str!("../../stdlib/ints16.atom")),
+    ("ints32", include_str!("../../stdlib/ints32.atom")),
+    ("ints64", include_str!("../../stdlib/ints64.atom")),
+    ("void", include_str!("../../stdlib/void.atom")),
+    ("never", include_str!("../../stdlib/never.atom")),
+    ("exit", include_str!("../../stdlib/exit.atom")),
+    ("call", include_str!("../../stdlib/call.atom")),
+    ("choices", include_str!("../../stdlib/choices.atom")),
+];
 
 /// The source of the standard library's file shown as `file`, such as
-/// `stdlib/core`, for showing where its errors are.
+/// `stdlib/bool`, for showing where its errors are.
 pub fn stdlib_source(file: &str) -> Option<&'static str> {
     let path = file.strip_prefix(STDLIB_PACKAGE)?.strip_prefix('/')?;
     let (_, src) = STDLIB_FILES.iter().find(|(name, _)| *name == path)?;
@@ -442,7 +459,7 @@ enum FnKind {
 }
 
 struct FileInfo<'a> {
-    /// The file's path, such as `/dir/other` or `stdlib/core`.
+    /// The file's path, such as `/dir/other` or `stdlib/bool`.
     display: String,
     /// The package the file is in, or `None` if it's in the project.
     package: Option<&'a str>,
@@ -533,9 +550,6 @@ struct Context<'a> {
 struct Checker<'a> {
     /// The standard library first, then the project's files.
     files: Vec<FileInfo<'a>>,
-    /// The index in `files` of `stdlib/core`, which every project file
-    /// imports, and which declares the types of literals.
-    core: usize,
     /// Every type, indexed by `id`.
     types: Vec<TypeInfo<'a>>,
     /// For each function used as a value, by its index in `functions`, the
@@ -610,10 +624,7 @@ impl<'a> Checker<'a> {
     /// Adds the standard library's files.
     fn add_stdlib(&mut self) {
         for file in STDLIB.iter() {
-            let index = self.add_file(Some(STDLIB_PACKAGE), file);
-            if file.path == ["core"] {
-                self.core = index;
-            }
+            self.add_file(Some(STDLIB_PACKAGE), file);
         }
     }
     /// The errors, in the order of the files they're in, and of where they
@@ -808,18 +819,26 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|import| self.files[import.file].scope.contains_key(name))
     }
-    /// A generic type from `stdlib/core`, such as `Fn`, as an index into
-    /// `templates`.
+    /// What the standard library declares as `name`, which is found in the
+    /// standard library itself, so it can't be shadowed.
+    fn std_binding(&self, name: &str) -> Option<&Binding> {
+        self.files
+            .iter()
+            .filter(|file| file.package == Some(STDLIB_PACKAGE))
+            .find_map(|file| file.scope.get(name))
+    }
+
+    /// A generic type from the standard library, such as `Fn`, as an index
+    /// into `templates`.
     fn std_template(&self, name: &str) -> usize {
-        match self.files[self.core].scope.get(name) {
+        match self.std_binding(name) {
             Some(Binding::Generic(template)) => *template,
             _ => panic!("the standard library should declare `{name}`"),
         }
     }
-    /// A type from `stdlib/core`, such as `Int` for integer literals. Found in
-    /// the standard library itself, so it can't be shadowed.
+    /// A type from the standard library, such as `Int` for integer literals.
     fn std_type(&self, name: &str) -> Type {
-        let ty = match self.files[self.core].scope.get(name) {
+        let ty = match self.std_binding(name) {
             Some(Binding::Type(ty)) => Some(ty),
             // The standard library's aliases are worked out before any code
             // that needs them is checked.
