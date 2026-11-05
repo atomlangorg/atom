@@ -861,7 +861,7 @@ pub fn check(files: &[File]) -> Result<ir::Program, Vec<FileError>> {
     };
     match instantiated {
         Some(instantiated) if checker.errors.is_empty() => Ok(checker.program(instantiated)),
-        _ => Err(checker.errors),
+        _ => Err(checker.sorted_errors()),
     }
 }
 
@@ -1436,6 +1436,21 @@ impl<'a> Checker<'a> {
                 self.core = index;
             }
         }
+    }
+
+    /// The errors, in the order of the files they're in, and of where they
+    /// are in each file. Errors in the same place stay in the order they
+    /// were found.
+    fn sorted_errors(self) -> Vec<FileError> {
+        let file_order: HashMap<_, _> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.display.as_str(), index))
+            .collect();
+        let mut errors = self.errors;
+        errors.sort_by_key(|error| (file_order[error.file.as_str()], error.span.start));
+        errors
     }
 
     fn error(&mut self, span: Span, error: CheckError) {
@@ -2149,43 +2164,12 @@ impl<'a> Checker<'a> {
         scope.insert(name, binding);
     }
 
-    /// Finds the type `ty`, without reporting an error if there isn't one.
-    fn find_type(&mut self, ty: &TypeName) -> Option<Type> {
-        match ty {
-            TypeName::Named(name) => self.find_named_type(name),
-            TypeName::Generic { name, args } => self.generic_type(name, args, false),
-            TypeName::SelfParam(param, span) => self.self_param(param, *span, false),
-            TypeName::Tuple(elements) => {
-                let elements = elements
-                    .iter()
-                    .map(|element| {
-                        Some(TupleElementType {
-                            label: element.label.clone(),
-                            name: element.name.clone(),
-                            ty: self.find_type(&element.ty)?,
-                        })
-                    })
-                    .collect::<Option<_>>()?;
-                Some(self.tuple_type(elements))
-            }
-        }
-    }
-
-    /// Finds the type called `name`, without reporting an error if there
-    /// isn't one.
-    fn find_named_type(&mut self, name: &Name) -> Option<Type> {
-        match self.lookup(name) {
-            Ok(Binding::Type(ty)) => Some(ty),
-            _ => None,
-        }
-    }
-
     /// Finds the type `ty`, reporting an error if it can't be found.
     fn resolve_type(&mut self, ty: &TypeName) -> Option<Type> {
         match ty {
             TypeName::Named(name) => self.resolve_named_type(name),
-            TypeName::Generic { name, args } => self.generic_type(name, args, true),
-            TypeName::SelfParam(param, span) => self.self_param(param, *span, true),
+            TypeName::Generic { name, args } => self.generic_type(name, args),
+            TypeName::SelfParam(param, span) => self.self_param(param, *span),
             TypeName::Tuple(elements) => {
                 // Every element is resolved, so each one's errors are found.
                 let elements: Vec<_> = elements
@@ -2224,16 +2208,14 @@ impl<'a> Checker<'a> {
         Type { id, name }
     }
 
-    /// The type made from the generic type called `name` with `args`,
-    /// reporting errors if `report` is set.
-    fn generic_type(&mut self, name: &Name, args: &[TypeName], report: bool) -> Option<Type> {
+    /// The type made from the generic type called `name` with `args`.
+    fn generic_type(&mut self, name: &Name, args: &[TypeName]) -> Option<Type> {
         let template = match self.lookup(name) {
             Ok(Binding::Generic(template)) => template,
-            Ok(Binding::Type(_)) if report => {
+            Ok(Binding::Type(_)) => {
                 self.error(name.span, CheckError::NotGeneric(name.to_string()));
                 return None;
             }
-            _ if !report => return None,
             _ => {
                 self.resolve_named_type(name);
                 return None;
@@ -2241,50 +2223,31 @@ impl<'a> Checker<'a> {
         };
         let expected = self.templates[template].params.len();
         if args.len() != expected {
-            if report {
-                self.error(
-                    name.span,
-                    CheckError::WrongGenericCount {
-                        ty: name.to_string(),
-                        expected,
-                        found: args.len(),
-                    },
-                );
-            }
+            self.error(
+                name.span,
+                CheckError::WrongGenericCount {
+                    ty: name.to_string(),
+                    expected,
+                    found: args.len(),
+                },
+            );
             return None;
         }
         // Every argument is resolved, so each one's errors are found.
-        let args: Vec<_> = args
-            .iter()
-            .map(|arg| {
-                if report {
-                    self.resolve_type(arg)
-                } else {
-                    self.find_type(arg)
-                }
-            })
-            .collect();
+        let args: Vec<_> = args.iter().map(|arg| self.resolve_type(arg)).collect();
         let args = args.into_iter().collect::<Option<Vec<_>>>()?;
-        self.named_instance(template, args, name, report)
+        self.named_instance(template, args, name)
     }
 
     /// The type made from the generic type called `name`, at `template` in
-    /// `templates`, with `args`, reporting errors if `report` is set.
-    fn named_instance(
-        &mut self,
-        template: usize,
-        args: Vec<Type>,
-        name: &Name,
-        report: bool,
-    ) -> Option<Type> {
+    /// `templates`, with `args`.
+    fn named_instance(&mut self, template: usize, args: Vec<Type>, name: &Name) -> Option<Type> {
         if self.is_only_for_choices(template) && self.options(args[0].id).is_none() {
-            if report {
-                let error = CheckError::NotAChoice {
-                    generic: name.to_string(),
-                    found: args[0].clone(),
-                };
-                self.error(name.span, error);
-            }
+            let error = CheckError::NotAChoice {
+                generic: name.to_string(),
+                found: args[0].clone(),
+            };
+            self.error(name.span, error);
             return None;
         }
         self.instance(template, args, name.span)
@@ -2306,23 +2269,19 @@ impl<'a> Checker<'a> {
     }
 
     /// What `Self.param` stands for in the `impl` of a type made from a
-    /// generic type, reporting errors if `report` is set.
-    fn self_param(&mut self, param: &str, span: Span, report: bool) -> Option<Type> {
+    /// generic type.
+    fn self_param(&mut self, param: &str, span: Span) -> Option<Type> {
         let impl_type = match &self.impl_type {
             Some(Some(ty)) => ty.clone(),
             // The `impl`'s type is unknown, which has been reported.
             Some(None) => return None,
             None => {
-                if report {
-                    self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
-                }
+                self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
                 return None;
             }
         };
         let Some((template, args)) = &self.types[impl_type.id].instance else {
-            if report {
-                self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
-            }
+            self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
             return None;
         };
         match self.templates[*template]
@@ -2332,29 +2291,24 @@ impl<'a> Checker<'a> {
         {
             Some(index) => Some(args[index].clone()),
             None => {
-                if report {
-                    self.error(
-                        span,
-                        CheckError::UnknownSelfParam {
-                            ty: impl_type,
-                            param: param.to_string(),
-                        },
-                    );
-                }
+                let error = CheckError::UnknownSelfParam {
+                    ty: impl_type,
+                    param: param.to_string(),
+                };
+                self.error(span, error);
                 None
             }
         }
     }
 
     /// The type `type_name` refers to where a value of one of `contexts` is
-    /// expected or matched, reporting errors if `report` is set. A generic
-    /// type's name without arguments refers to the first of `contexts` that's
-    /// made from it, since that's what its arguments must be.
+    /// expected or matched. A generic type's name without arguments refers to
+    /// the first of `contexts` that's made from it, since that's what its
+    /// arguments must be.
     fn type_in_context(
         &mut self,
         type_name: &TypeName,
         contexts: &[Option<&Type>],
-        report: bool,
     ) -> Option<Type> {
         if let TypeName::Named(name) = type_name
             && let Ok(Binding::Generic(template)) = self.lookup(name)
@@ -2363,16 +2317,12 @@ impl<'a> Checker<'a> {
                 .iter()
                 .flatten()
                 .find(|ty| self.is_made_from(ty, template));
-            if found.is_none() && report {
+            if found.is_none() {
                 self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
             }
             return found.map(|&ty| ty.clone());
         }
-        if report {
-            self.resolve_type(type_name)
-        } else {
-            self.find_type(type_name)
-        }
+        self.resolve_type(type_name)
     }
 
     /// Declares the generic group, choice or primitive called `name`, with
@@ -2726,17 +2676,16 @@ impl<'a> Checker<'a> {
     /// Checks a `let` or `var` declaration's value, returning the type it's
     /// declared with, along with what the value compiles to.
     fn decl_type(&mut self, name: &str, type_name: Option<&TypeName>, value: &Expr) -> Typed {
-        // Checked first so that `let x = x` refers to an earlier `x`. The
-        // explicit type is found first so the value can take its type from
-        // it, but its errors are reported after the value's.
-        let expected = type_name.and_then(|type_name| self.find_type(type_name));
+        // Checked before it's declared, so that `let x = x` refers to an
+        // earlier `x`. The value takes its type from the explicit type, if
+        // there is one.
+        let expected = type_name.and_then(|type_name| self.resolve_type(type_name));
         let Typed { ty: found, expr } = self.expr_as(value, expected.as_ref());
 
         // An explicit type takes precedence over the value's type, so later
         // uses are checked against what the programmer wrote.
         let ty = match type_name {
-            Some(type_name) => {
-                let expected = self.resolve_type(type_name);
+            Some(_) => {
                 self.check_assignable(name, value.span, expected.clone(), found);
                 expected
             }
@@ -3729,25 +3678,19 @@ impl<'a> Checker<'a> {
                 (Some(ir::Stmt::Assign { local, value: expr }), never)
             }
             StmtKind::Assign { name, value } => {
-                // The target is found first so the value can take its type
-                // from it, but its errors are reported after the value's.
                 let target = Name {
                     span: stmt.span,
                     ..Name::new(name)
                 };
-                let binding = self.lookup(&target);
-                let expected = match &binding {
-                    Ok(Binding::Value { ty, .. }) => ty.clone(),
-                    _ => None,
-                };
-                let (found, never) =
-                    self.evaluating(|checker| checker.expr_as(value, expected.as_ref()));
-                match binding {
+                let error = match self.lookup(&target) {
                     Ok(Binding::Value {
                         mutability: Mutability::Var,
                         ty: expected,
                         local,
                     }) => {
+                        // The value takes its type from the variable.
+                        let (found, never) =
+                            self.evaluating(|checker| checker.expr_as(value, expected.as_ref()));
                         self.check_assignable(name, value.span, expected, found.ty);
                         let value = found.expr;
                         return (Some(ir::Stmt::Assign { local, value }), never);
@@ -3755,23 +3698,28 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Value {
                         mutability: Mutability::Let,
                         ..
-                    }) => {
-                        self.error(stmt.span, CheckError::AssignToConstant(name.clone()));
-                    }
-                    Ok(Binding::Function(_)) => {
-                        self.error(stmt.span, CheckError::AssignToFunction(name.clone()));
-                    }
+                    }) => Some(CheckError::AssignToConstant(name.clone())),
+                    Ok(Binding::Function(_)) => Some(CheckError::AssignToFunction(name.clone())),
                     Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Generic(_)) => {
-                        self.error(stmt.span, CheckError::TypeAsValue(name.clone()));
+                        Some(CheckError::TypeAsValue(name.clone()))
                     }
-                    Ok(Binding::Trait(_)) => {
-                        self.error(stmt.span, CheckError::TraitAsValue(name.clone()));
-                    }
+                    Ok(Binding::Trait(_)) => Some(CheckError::TraitAsValue(name.clone())),
                     // `lookup` never finds top-level values from inside a
                     // function, which is the only place assignments can be.
-                    Ok(Binding::Global(_)) => self.lookup_error(&target, LookupError::Captured),
-                    Err(error) => self.lookup_error(&target, error),
+                    Ok(Binding::Global(_)) => {
+                        self.lookup_error(&target, LookupError::Captured);
+                        None
+                    }
+                    Err(error) => {
+                        self.lookup_error(&target, error);
+                        None
+                    }
+                };
+                if let Some(error) = error {
+                    self.error(stmt.span, error);
                 }
+                // The value is still checked, so its errors are found.
+                let (_, never) = self.evaluating(|checker| checker.expr(value));
                 (None, never)
             }
             StmtKind::If {
@@ -4110,7 +4058,7 @@ impl<'a> Checker<'a> {
     ) -> Option<(usize, Option<Type>)> {
         // A generic type's arguments can be left out, since they're the
         // matched value's.
-        let found = self.type_in_context(type_name, &[Some(ty)], true)?;
+        let found = self.type_in_context(type_name, &[Some(ty)])?;
         if found != *ty {
             self.error(
                 span,
@@ -4755,7 +4703,7 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
     ) -> Option<Receiver> {
         if let ExprKind::GenericType { name, args } = &receiver.kind {
-            let ty = self.generic_type(name, args, true)?;
+            let ty = self.generic_type(name, args)?;
             return Some(Receiver::Type(ty));
         }
         if let ExprKind::Var(name) = &receiver.kind {
@@ -4763,7 +4711,7 @@ impl<'a> Checker<'a> {
                 Ok(Binding::Type(ty)) => return Some(Receiver::Type(ty)),
                 Ok(Binding::Generic(_)) => {
                     let type_name = TypeName::Named(name.clone());
-                    let ty = self.type_in_context(&type_name, &[expected], true)?;
+                    let ty = self.type_in_context(&type_name, &[expected])?;
                     return Some(Receiver::Type(ty));
                 }
                 Err(LookupError::Undeclared)
@@ -5021,27 +4969,6 @@ impl<'a> Checker<'a> {
         {
             return self.call_option(option_ty, value, (base, value_ty), name, args, span);
         }
-        // Like a function's arguments, the input is checked first, so its
-        // errors come before the call's, and it's used as `Input`, which is
-        // found without reporting errors.
-        let call_trait = match self.files[self.core].scope.get("Call") {
-            Some(Binding::Trait(index)) => *index,
-            _ => panic!("the standard library should declare `Call`"),
-        };
-        let call_method = ty
-            .as_ref()
-            .filter(|ty| self.implements(ty, call_trait))
-            .and_then(|ty| match self.member(ty, "call") {
-                Some(Member::Method(found)) => Some(found),
-                _ => None,
-            });
-        let param = call_method
-            .and_then(|method| self.signature_of(&method, span).params.first()?.ty.clone());
-        let Typed {
-            ty: found,
-            expr: input,
-        } = self.tuple(args, param.as_ref());
-
         let function = ty.as_ref().and_then(|ty| {
             let not_callable = CheckError::NotCallable {
                 name: name.to_string(),
@@ -5049,9 +4976,22 @@ impl<'a> Checker<'a> {
             };
             self.trait_method("Call", "call", ty, span, not_callable)
         });
-        let returns = function
+        let signature = function
             .as_ref()
-            .and_then(|function| self.signature_of(function, span).returns);
+            .map(|function| self.signature_of(function, span));
+        // The input is the only parameter of `call`, which the arguments are
+        // checked as, like any other function's.
+        let (param, returns) = match signature {
+            Some(signature) => (
+                signature.params.first().and_then(|param| param.ty.clone()),
+                signature.returns,
+            ),
+            None => (None, None),
+        };
+        let Typed {
+            ty: found,
+            expr: input,
+        } = self.tuple(args, param.as_ref());
         let function = function.map(|function| self.callee(function, span));
         if let (Some(expected), Some(found)) = (&param, &found)
             && expected != found
@@ -5180,10 +5120,20 @@ impl<'a> Checker<'a> {
     ) -> Typed {
         let stand_ins = self.templates[template].stand_ins.clone();
         let mut inferred = vec![None; stand_ins.len()];
+        // The type, once every one of its arguments is known.
+        let mut made = None;
         let mut found = vec![];
         let mut lowered = vec![];
         for (index, arg) in args.iter().enumerate() {
-            let expected = self.param_once_inferred(template, method, &inferred, name, index);
+            if made.is_none()
+                && let Some(args) = inferred.iter().cloned().collect()
+            {
+                made = Some(self.named_instance(template, args, name));
+            }
+            let expected = match made.clone().flatten() {
+                Some(ty) => self.param_type(&ty, method, index, span),
+                None => None,
+            };
             let Typed { ty, expr } = self.expr_as(&arg.value, expected.as_ref());
             if let (Some(Some(param)), Some(ty)) = (declared.get(index), &ty) {
                 self.infer(param, ty, &stand_ins, &mut inferred);
@@ -5192,14 +5142,18 @@ impl<'a> Checker<'a> {
             lowered.push(expr);
         }
 
-        let Some(inferred) = inferred.into_iter().collect() else {
-            // An unknown argument has been reported, and may be why.
-            if found.iter().all(Option::is_some) {
-                self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
+        let made = match (made, inferred.into_iter().collect()) {
+            (Some(made), _) => made,
+            (None, Some(args)) => self.named_instance(template, args, name),
+            (None, None) => {
+                // An unknown argument has been reported, and may be why.
+                if found.iter().all(Option::is_some) {
+                    self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
+                }
+                return Typed::UNKNOWN;
             }
-            return Typed::UNKNOWN;
         };
-        let Some(ty) = self.named_instance(template, inferred, name, true) else {
+        let Some(ty) = made else {
             return Typed::UNKNOWN;
         };
         let full_name = format!("{ty}.{method}");
@@ -5224,23 +5178,13 @@ impl<'a> Checker<'a> {
     }
 
     /// The type of the parameter at `index` of the static function or option
-    /// called `method` of the generic type called `name`, once all of its
-    /// arguments have been `inferred`.
-    fn param_once_inferred(
-        &mut self,
-        template: usize,
-        method: &str,
-        inferred: &[Option<Type>],
-        name: &Name,
-        index: usize,
-    ) -> Option<Type> {
-        let args = inferred.iter().cloned().collect::<Option<Vec<_>>>()?;
-        let ty = self.named_instance(template, args, name, false)?;
-        if let Some((_, value_ty)) = self.option(&ty, method) {
+    /// called `method` of `ty`, for the code at `span`.
+    fn param_type(&mut self, ty: &Type, method: &str, index: usize, span: Span) -> Option<Type> {
+        if let Some((_, value_ty)) = self.option(ty, method) {
             return value_ty.filter(|_| index == 0);
         }
-        let function = self.static_function(&ty, method)?;
-        let signature = self.signature_of(&function, name.span);
+        let function = self.static_function(ty, method)?;
+        let signature = self.signature_of(&function, span);
         signature.params.get(index)?.ty.clone()
     }
 
@@ -5314,10 +5258,6 @@ impl<'a> Checker<'a> {
         {
             return self.inferred_call(name, template, method, &declared, args, span);
         }
-        // The receiver and arguments are checked first, so their errors come
-        // before the call's. What's called is found in between, without
-        // reporting errors, so the arguments can take their types from its
-        // parameters.
         let receiver = self.receiver(receiver, method, expected);
         // A field followed by arguments is called, like any other value.
         let receiver = match receiver {
@@ -5344,40 +5284,36 @@ impl<'a> Checker<'a> {
             }
             receiver => receiver,
         };
-        let signature = match &receiver {
-            Some(Receiver::Value(ty, _)) => match self.member(ty, method) {
-                Some(Member::Method(found)) => Some(self.signature_of(&found, span)),
-                _ => None,
-            },
-            Some(Receiver::Type(_)) | None => None,
-        };
-        let params: Vec<_> = signature
-            .iter()
-            .flat_map(|signature| &signature.params)
-            .map(|param| param.ty.clone())
-            .collect();
-        let (found, lowered_args) = self.args(args, &params);
-
-        let Some(receiver) = receiver else {
-            return Typed::UNKNOWN;
-        };
         let (ty, found_method, lowered_receiver) = match receiver {
-            Receiver::Value(ty, lowered_receiver) => match self.member(&ty, method) {
-                Some(Member::Method(found_method)) => (ty, found_method, lowered_receiver),
-                Some(Member::Field(..)) => unreachable!("fields were handled above"),
-                None => {
+            Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
+                Some(Member::Method(found)) => (ty, found, lowered),
+                _ => {
                     let error = self.no_member(ty, method);
                     self.error(span, error);
+                    // The arguments are still checked, so their errors are
+                    // found.
+                    self.args(args, &[]);
                     return Typed::UNKNOWN;
                 }
             },
-            Receiver::Type(ty) => {
+            Some(Receiver::Type(ty)) => {
                 let error = self.no_static_function(ty, method);
                 self.error(span, error);
+                self.args(args, &[]);
+                return Typed::UNKNOWN;
+            }
+            None => {
+                self.args(args, &[]);
                 return Typed::UNKNOWN;
             }
         };
-        let signature = signature.expect("found above");
+        let signature = self.signature_of(&found_method, span);
+        let params: Vec<_> = signature
+            .params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect();
+        let (found, lowered_args) = self.args(args, &params);
         let returns = self.check_args(format!("{ty}.{method}"), args, found, signature, span);
         let found_method = self.callee(found_method, span);
 
@@ -5396,11 +5332,20 @@ impl<'a> Checker<'a> {
     /// in, returning that type, or `None` if it can't be determined, along
     /// with what it compiles to.
     fn construct(&mut self, span: Span, values: &[FieldValue]) -> Typed {
-        // Values are checked first, so their errors come before the group's,
-        // but they take their types from its fields.
-        let fields = match &self.impl_type {
-            Some(Some(ty)) => self.fields(ty.id).to_vec(),
-            _ => vec![],
+        let ty = match &self.impl_type {
+            Some(Some(ty)) => Some(ty.clone()),
+            // The `impl`'s type is unknown, which has been reported.
+            Some(None) => None,
+            None => {
+                self.error(span, CheckError::SelfTypeOutsideImpl);
+                None
+            }
+        };
+        // The values are still checked if the type is unknown, so their
+        // errors are found. Otherwise, they take their types from its fields.
+        let fields = match &ty {
+            Some(ty) => self.fields(ty.id).to_vec(),
+            None => vec![],
         };
         let typed = values.iter().enumerate().map(|(index, value)| {
             let expected = fields
@@ -5410,15 +5355,8 @@ impl<'a> Checker<'a> {
             self.expr_as(&value.value, expected)
         });
         let (found, lowered) = split(typed.collect());
-
-        let ty = match &self.impl_type {
-            Some(Some(ty)) => ty.clone(),
-            // The `impl`'s type is unknown, which has been reported.
-            Some(None) => return Typed::UNKNOWN,
-            None => {
-                self.error(span, CheckError::SelfTypeOutsideImpl);
-                return Typed::UNKNOWN;
-            }
+        let Some(ty) = ty else {
+            return Typed::UNKNOWN;
         };
         if self.options(ty.id).is_some() {
             self.error(span, CheckError::ConstructedChoice(ty.clone()));
@@ -5509,8 +5447,7 @@ impl<'a> Checker<'a> {
                 });
                 self.call_value(ty, expr, &name, args, span)
             }
-            // Arguments are checked first, so their errors come before the
-            // call's.
+            // The arguments are still checked, so their errors are found.
             Ok(Binding::Type(_) | Binding::Alias(_) | Binding::Trait(_) | Binding::Generic(_)) => {
                 self.args(args, &[]);
                 self.error(callee.span, CheckError::NotAFunction(name));
@@ -7001,13 +6938,34 @@ mod tests {
     }
 
     #[test]
+    fn errors_are_in_the_order_they_are_written() {
+        // Types are declared before function bodies are checked, but their
+        // errors still come after the errors written before them.
+        let src = "
+            fn f() {
+                let x: Missing = y
+            }
+            group Twice {}
+            group Twice {}
+            ";
+        assert_eq!(
+            messages_top(src),
+            [
+                "unknown type `Missing`",
+                "`y` is not declared",
+                "`Twice` is already declared",
+            ]
+        );
+    }
+
+    #[test]
     fn reports_every_error() {
         assert_eq!(
             check_body("let x = 1\nx = 2\ny = z"),
             Err(vec![
                 CheckError::AssignToConstant("x".to_string()),
-                CheckError::Undeclared("z".to_string()),
                 CheckError::Undeclared("y".to_string()),
+                CheckError::Undeclared("z".to_string()),
             ])
         );
     }
@@ -7083,8 +7041,8 @@ mod tests {
             ),
             [
                 "functions can't use `total`, because it is declared outside the function",
-                "functions can't use `step`, because it is declared outside the function",
                 "functions can't use `total`, because it is declared outside the function",
+                "functions can't use `step`, because it is declared outside the function",
             ]
         );
         // Not even from an enclosing function, or a block around them.
@@ -7344,17 +7302,17 @@ mod tests {
         assert_eq!(
             check_body("fn f() {}\nf(x)\nlet y = 1\ny(z)"),
             Err(vec![
-                CheckError::Undeclared("x".to_string()),
                 CheckError::WrongArgumentCount {
                     function: "f".to_string(),
                     expected: 0,
                     found: 1,
                 },
-                CheckError::Undeclared("z".to_string()),
+                CheckError::Undeclared("x".to_string()),
                 CheckError::NotCallable {
                     name: "y".to_string(),
                     ty: ty("Int"),
                 },
+                CheckError::Undeclared("z".to_string()),
             ])
         );
     }
@@ -9484,8 +9442,8 @@ mod tests {
             ),
             [
                 "`Int` is a primitive, so it can only be created by the compiler, such as with a literal",
-                "`c` is not declared",
                 "`Bool` is a primitive, so it can only be created by the compiler, such as with a literal",
+                "`c` is not declared",
                 "`Int` has no field or method `value`",
             ]
         );
@@ -9740,9 +9698,9 @@ mod tests {
                 "
             ),
             [
-                "unknown type `Missing`",
                 "`a` must return `Int`, found `Bool`",
                 "`b` must return a value of type `Int` on every path",
+                "unknown type `Missing`",
             ]
         );
     }
@@ -10172,8 +10130,8 @@ mod tests {
             [
                 "`age` is `Int`, which doesn't implement `Call`, so it can't be called",
                 "`User.nextAge` is a method, not a value",
-                "`missing` is not declared",
                 "`isAdmin` is `Bool`, which doesn't implement `Call`, so it can't be called",
+                "`missing` is not declared",
             ]
         );
     }
@@ -10887,9 +10845,9 @@ mod tests {
         assert_eq!(
             messages_top(&src),
             [
-                inferred("Rhs"),
-                inferred("Rhs"),
                 "`Copy` is not declared by trait `Combine`".to_string(),
+                inferred("Rhs"),
+                inferred("Rhs"),
                 "`impl Bool with Make` must give `alias Unused`, since it can't be inferred from the `impl`'s functions".to_string(),
                 "`impl Void with Combine` is missing `fn combine(with rhs: Rhs) -> Output`".to_string(),
             ]
@@ -10947,8 +10905,8 @@ mod tests {
             messages_top(&src),
             // `Output` isn't given, so it's inferred from `combine`.
             [
-                "`Rhs` is already declared",
                 "`Extra` is not declared by trait `Combine`",
+                "`Rhs` is already declared",
                 "`alias Output` can only be given in an `impl` with a trait that declares it",
             ]
         );
@@ -11466,8 +11424,8 @@ mod tests {
         assert_eq!(
             messages_top(&src),
             [
-                "`or` is not declared by trait `And`",
                 "`impl Custom with And` is missing `static fn zero() -> Self`",
+                "`or` is not declared by trait `And`",
             ]
         );
     }
@@ -11519,9 +11477,9 @@ mod tests {
                 "
             ),
             [
-                "`Twice` is already declared",
-                "trait `Broken` already declares `f`",
                 "unknown type `Missing`",
+                "trait `Broken` already declares `f`",
+                "`Twice` is already declared",
             ]
         );
     }
@@ -12064,8 +12022,8 @@ primitive Float"
                 "
             ),
             [
-                "`y` is not declared",
                 "`Self` can only be used inside an `impl` or a `trait`",
+                "`y` is not declared",
                 "`Self` can only be used inside an `impl` or a `trait`",
                 "`make` must return `Point`, found `Other`",
                 "`Void` can only be constructed in `stdlib/core`, which declares it",
@@ -12585,13 +12543,13 @@ primitive Float"
                 "
             ),
             [
-                "`ChoiceTag` can only be used with a choice, found `Bool`",
-                // Generic types are checked before top-level values.
-                "`ChoiceTag` can only be used with a choice, found `T`",
                 "`ChoiceTag` can only be used with a choice, found `Int`",
+                // Generic types are checked before top-level values.
                 "`ChoiceOption` can only be used with a choice, found `Point`",
                 "`ChoiceTag` can only be used with a choice, found `Int`",
                 "unknown type `Missing`",
+                "`ChoiceTag` can only be used with a choice, found `Bool`",
+                "`ChoiceTag` can only be used with a choice, found `T`",
             ]
         );
     }
@@ -12946,8 +12904,8 @@ primitive Float"
                 "
             ),
             [
-                "`Self` can't be used inside another type in a trait's signatures, since it's a different type in each `impl`",
                 "`Node` contains itself",
+                "`Self` can't be used inside another type in a trait's signatures, since it's a different type in each `impl`",
                 "unknown type `Missing`",
             ]
         );
@@ -13328,11 +13286,11 @@ primitive Float"
             messages_top(src),
             [
                 "argument to `small` should be labelled `b`, found `c`",
-                "operator `+` expects `Int`, found `Bool`",
                 "argument `a` of `small` expects `IntU8`, found `Int`",
+                "operator `+` expects `Int`, found `Bool`",
                 "argument to `small` should be labelled `b`, found `c`",
-                "`missing` is not declared",
                 "`small` takes 2 arguments, found 1",
+                "`missing` is not declared",
             ]
         );
     }
@@ -13936,9 +13894,9 @@ primitive Float"
             messages_top(&src),
             [
                 "`Box<T>` has no generic parameter `U`",
-                "`Self.T` can only be used in the `impl` of a generic type",
-                "`Self.T` can only be used in the `impl` of a generic type",
                 "unknown type `T`",
+                "`Self.T` can only be used in the `impl` of a generic type",
+                "`Self.T` can only be used in the `impl` of a generic type",
             ]
         );
     }
@@ -13998,14 +13956,14 @@ primitive Float"
             }
             ";
         let messages = messages_top(src);
+        assert_eq!(messages[0], "`Wrap<T>` contains itself");
         assert!(
-            messages[0].contains("Grow<(_: (_: ")
-                && messages[0].ends_with(
+            messages[1].contains("Grow<(_: (_: ")
+                && messages[1].ends_with(
                     "nests generic types too deeply, which usually means a generic type uses itself with different arguments"
                 ),
             "{messages:?}"
         );
-        assert_eq!(messages[1], "`Wrap<T>` contains itself");
         assert_eq!(
             messages[2..],
             ["`Local` can't be generic, since only types at the top level can be"]
