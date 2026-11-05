@@ -1369,11 +1369,8 @@ struct Checker<'a> {
     /// For each of `functions`, what it compiles to, once its body has been
     /// checked, or `None` if it has an error.
     lowered_functions: Vec<Option<ir::Function>>,
-    /// The statements that evaluate a `Never`, which never finish, so count
-    /// as returning.
-    never_returns: HashSet<*const Stmt>,
     /// Whether a `Never` has been evaluated since `evaluating` started
-    /// checking a statement's expressions.
+    /// checking some expressions.
     evaluated_never: bool,
     globals: Vec<Global<'a>>,
     aliases: Vec<Alias<'a>>,
@@ -1524,7 +1521,7 @@ impl<'a> Checker<'a> {
                     }
                     StmtKind::PrimitiveFn { name, params, ret } => {
                         let index = self.declare_fn(name, stmt.span, params, ret);
-                        self.define_primitive_fn(index, name, stmt.span, FnKind::Function);
+                        self.define_primitive_fn(index, None, name, stmt.span, FnKind::Function);
                     }
                     StmtKind::Impl {
                         ty,
@@ -1672,7 +1669,8 @@ impl<'a> Checker<'a> {
                 FnKind::Method(self_ty.clone())
             };
             if *is_primitive {
-                self.define_primitive_fn(index, &name, function.span, kind);
+                let owner = Some(ty.name.as_str());
+                self.define_primitive_fn(index, owner, &function.name, function.span, kind);
                 continue;
             }
             let body = Pending::Fn {
@@ -2843,7 +2841,7 @@ impl<'a> Checker<'a> {
             self.declare_local(param.name, param.span, Mutability::Let, param.ty);
         }
         let param_count = self.current_fn.as_ref().expect("set above").locals.len();
-        let mut lowered: Vec<_> = body.iter().filter_map(|stmt| self.stmt(stmt)).collect();
+        let (mut lowered, returns_always) = self.stmts(body);
 
         self.scopes.pop();
         let locals = std::mem::replace(&mut self.current_fn, outer_fn)
@@ -2854,7 +2852,7 @@ impl<'a> Checker<'a> {
         self.current_impl_aliases = outer_impl_aliases;
 
         // A `Void` function can finish without an explicit `return`.
-        if !self.always_returns(body) {
+        if !returns_always {
             match &returns {
                 Some(expected) if *expected != self.std_type("Void") => {
                     self.error(
@@ -2881,29 +2879,6 @@ impl<'a> Checker<'a> {
                 returns: returns.id,
                 body: ir::Body::Stmts(lowered),
             });
-    }
-
-    /// Whether `stmts`, which have been checked, return on every path. A
-    /// statement that evaluates a `Never` counts, since it never finishes.
-    /// Both branches of an `if` must return for it to count, so an `if`
-    /// without an `else` never does. Every option of a `match` must return,
-    /// which is enough since every option is matched.
-    fn always_returns(&self, stmts: &[Stmt]) -> bool {
-        stmts.iter().any(|stmt| {
-            self.never_returns.contains(&(stmt as *const Stmt))
-                || match &stmt.kind {
-                    StmtKind::Return(_) => true,
-                    StmtKind::Match { arms, .. } => {
-                        arms.iter().all(|arm| self.always_returns(&arm.body))
-                    }
-                    StmtKind::If {
-                        then_block,
-                        else_block: Some(else_block),
-                        ..
-                    } => self.always_returns(then_block) && self.always_returns(else_block),
-                    _ => false,
-                }
-        })
     }
 
     /// Declares the trait called `name` in the current file. Its signatures
@@ -3321,45 +3296,38 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Records the primitive function called `name`, such as `exit` or
-    /// `Bool.and`, at `index` in `functions`, which must be declared in the
-    /// standard library.
-    fn define_primitive_fn(&mut self, index: usize, name: &str, span: Span, kind: FnKind) {
+    /// Records the primitive function called `name` at `index` in
+    /// `functions`, such as `exit`, or `and` from an `impl` of the type
+    /// called `owner`, such as `Bool`. It must be declared in the standard
+    /// library.
+    fn define_primitive_fn(
+        &mut self,
+        index: usize,
+        owner: Option<&str>,
+        name: &str,
+        span: Span,
+        kind: FnKind,
+    ) {
+        let shown = match owner {
+            Some(owner) => format!("{owner}.{name}"),
+            None => name.to_string(),
+        };
         if self.files[self.file].package != Some(STDLIB_PACKAGE) {
-            self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
+            self.error(span, CheckError::PrimitiveOutsideStdlib(shown));
             return;
         }
-        let primitive = match name {
-            "exit" => ir::PrimitiveFn::Exit,
-            "Bool.and" => ir::PrimitiveFn::BoolAnd,
-            "Bool.or" => ir::PrimitiveFn::BoolOr,
-            "Bool.not" => ir::PrimitiveFn::BoolNot,
-            "IntU8.isEqual" | "IntU16.isEqual" | "IntU32.isEqual" | "IntU64.isEqual"
-            | "IntS8.isEqual" | "IntS16.isEqual" | "IntS32.isEqual" | "IntS64.isEqual"
-            | "Bool.isEqual" => ir::PrimitiveFn::Equal,
-            "IntU8.isNotEqual" | "IntU16.isNotEqual" | "IntU32.isNotEqual"
-            | "IntU64.isNotEqual" | "IntS8.isNotEqual" | "IntS16.isNotEqual"
-            | "IntS32.isNotEqual" | "IntS64.isNotEqual" | "Bool.isNotEqual" => {
-                ir::PrimitiveFn::NotEqual
-            }
-            // Every type made from a generic type has its own functions.
-            _ if name.starts_with("Fn<") && name.ends_with(">.call") => ir::PrimitiveFn::CallFn,
-            _ if name.starts_with("ChoiceTag<") && name.ends_with(">.new") => {
-                ir::PrimitiveFn::ChoiceTag
-            }
-            _ if name.starts_with("ChoiceTag<") && name.ends_with(">.isEqual") => {
-                ir::PrimitiveFn::Equal
-            }
-            _ if name.starts_with("ChoiceTag<") && name.ends_with(">.isNotEqual") => {
-                ir::PrimitiveFn::NotEqual
-            }
-            _ if name.starts_with("ChoiceOption<") && name.ends_with(">.tag") => {
-                ir::PrimitiveFn::OptionTag
-            }
-            _ if name.starts_with("ChoiceOption<") && name.ends_with(">.call") => {
-                ir::PrimitiveFn::CallOption
-            }
-            _ => panic!("the compiler doesn't know how to implement `{name}`"),
+        let primitive = match (owner, name) {
+            (None, "exit") => ir::PrimitiveFn::Exit,
+            (Some("Bool"), "and") => ir::PrimitiveFn::BoolAnd,
+            (Some("Bool"), "or") => ir::PrimitiveFn::BoolOr,
+            (Some("Bool"), "not") => ir::PrimitiveFn::BoolNot,
+            (Some(_), "isEqual") => ir::PrimitiveFn::Equal,
+            (Some(_), "isNotEqual") => ir::PrimitiveFn::NotEqual,
+            (Some("Fn"), "call") => ir::PrimitiveFn::CallFn,
+            (Some("ChoiceTag"), "new") => ir::PrimitiveFn::ChoiceTag,
+            (Some("ChoiceOption"), "tag") => ir::PrimitiveFn::OptionTag,
+            (Some("ChoiceOption"), "call") => ir::PrimitiveFn::CallOption,
+            _ => panic!("the compiler doesn't know how to implement `{shown}`"),
         };
         let Signature {
             name: full_name,
@@ -3630,18 +3598,36 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks `stmts` in a new scope, so their declarations aren't visible
-    /// afterwards, returning what they compile to.
-    fn block(&mut self, stmts: &'a [Stmt]) -> Vec<ir::Stmt> {
+    /// afterwards, returning what they compile to, and whether they always
+    /// return.
+    fn block(&mut self, stmts: &'a [Stmt]) -> (Vec<ir::Stmt>, bool) {
         self.scopes.push(HashMap::new());
-        let lowered = stmts.iter().filter_map(|stmt| self.stmt(stmt)).collect();
+        let checked = self.stmts(stmts);
         self.scopes.pop();
-        lowered
+        checked
+    }
+
+    /// Checks `stmts` in the current scope, returning what they compile to,
+    /// and whether they always return, which they do if any of them does.
+    fn stmts(&mut self, stmts: &'a [Stmt]) -> (Vec<ir::Stmt>, bool) {
+        let mut lowered = vec![];
+        let mut returns = false;
+        for stmt in stmts {
+            let (checked, always_returns) = self.stmt(stmt);
+            lowered.extend(checked);
+            returns |= always_returns;
+        }
+        (lowered, returns)
     }
 
     /// Checks a statement inside a function, returning what it compiles to,
     /// or `None` if it declares a function or group, which compile
-    /// separately, or if it has an error.
-    fn stmt(&mut self, stmt: &'a Stmt) -> Option<ir::Stmt> {
+    /// separately, or if it has an error. Also returns whether it returns on
+    /// every path, which it does if it evaluates a `Never`, since that never
+    /// finishes. An `if` does if both of its blocks do, so one without an
+    /// `else` never does, and a `match` does if every arm does, which is
+    /// enough since every value is matched.
+    fn stmt(&mut self, stmt: &'a Stmt) -> (Option<ir::Stmt>, bool) {
         match &stmt.kind {
             StmtKind::Use(_)
             | StmtKind::Impl { .. }
@@ -3658,14 +3644,11 @@ impl<'a> Checker<'a> {
                 ty: type_name,
                 value,
             } => {
-                let Typed { ty, expr } = self.evaluating(stmt, |checker| {
-                    checker.decl_type(name, type_name.as_ref(), value)
-                });
+                let (Typed { ty, expr }, never) =
+                    self.evaluating(|checker| checker.decl_type(name, type_name.as_ref(), value));
                 let local = self.declare_local(name, stmt.span, *mutability, ty);
-                Some(ir::Stmt::Assign {
-                    local,
-                    value: expr?,
-                })
+                let lowered = expr.map(|value| ir::Stmt::Assign { local, value });
+                (lowered, never)
             }
             StmtKind::Assign { name, value } => {
                 // The target is found first so the value can take its type
@@ -3679,8 +3662,8 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Value { ty, .. }) => ty.clone(),
                     _ => None,
                 };
-                let found =
-                    self.evaluating(stmt, |checker| checker.expr_as(value, expected.as_ref()));
+                let (found, never) =
+                    self.evaluating(|checker| checker.expr_as(value, expected.as_ref()));
                 match binding {
                     Ok(Binding::Value {
                         mutability: Mutability::Var,
@@ -3688,10 +3671,8 @@ impl<'a> Checker<'a> {
                         local,
                     }) => {
                         self.check_assignable(name, value.span, expected, found.ty);
-                        return Some(ir::Stmt::Assign {
-                            local,
-                            value: found.expr?,
-                        });
+                        let lowered = found.expr.map(|value| ir::Stmt::Assign { local, value });
+                        return (lowered, never);
                     }
                     Ok(Binding::Value {
                         mutability: Mutability::Let,
@@ -3713,7 +3694,7 @@ impl<'a> Checker<'a> {
                     Ok(Binding::Global(_)) => self.lookup_error(&target, LookupError::Captured),
                     Err(error) => self.lookup_error(&target, error),
                 }
-                None
+                (None, never)
             }
             StmtKind::If {
                 cond,
@@ -3721,23 +3702,24 @@ impl<'a> Checker<'a> {
                 else_block,
             } => {
                 let cond_span = cond.span;
-                let cond = self.evaluating(stmt, |checker| checker.expr(cond));
+                let (cond, never) = self.evaluating(|checker| checker.expr(cond));
                 if let Some(found) = &cond.ty
                     && *found != self.std_type("Bool")
                 {
                     self.error(cond_span, CheckError::ConditionNotBool(found.clone()));
                 }
 
-                let then_block = self.block(then_block);
-                let else_block = match else_block {
+                let (then_block, then_returns) = self.block(then_block);
+                let (else_block, else_returns) = match else_block {
                     Some(else_block) => self.block(else_block),
-                    None => vec![],
+                    None => (vec![], false),
                 };
-                Some(ir::Stmt::If {
-                    cond: cond.expr?,
+                let lowered = cond.expr.map(|cond| ir::Stmt::If {
+                    cond,
                     then_block,
                     else_block,
-                })
+                });
+                (lowered, never || then_returns && else_returns)
             }
             // Inside functions, functions and groups are only visible after
             // they're declared.
@@ -3757,37 +3739,37 @@ impl<'a> Checker<'a> {
                     FnKind::Function,
                     None,
                 );
-                None
+                (None, false)
             }
             StmtKind::Group { name, params, .. } | StmtKind::Choice { name, params, .. }
                 if !params.is_empty() =>
             {
                 self.error(stmt.span, CheckError::GenericInFunction(name.clone()));
-                None
+                (None, false)
             }
             StmtKind::Group { name, .. } | StmtKind::Choice { name, .. } => {
                 let id = self.declare_type(name, stmt);
                 self.define_type(id, stmt);
                 self.check_not_recursive(id, name, stmt.span);
-                None
+                (None, false)
             }
             // Like other names inside functions, an alias is only visible
             // after it's declared, so it's worked out straight away.
             StmtKind::Alias { name, ty } => {
                 let target = self.resolve_type(ty);
                 self.declare_alias(name, stmt.span, ty, LazyType::Checked(target));
-                None
+                (None, false)
             }
             StmtKind::Match { value, arms } => self.match_(stmt, value, arms),
-            StmtKind::Destructure { pattern, value } => self.destructure(stmt, pattern, value),
+            StmtKind::Destructure { pattern, value } => self.destructure(pattern, value),
             StmtKind::Return(value) => {
                 let FnContext { name, returns, .. } = self
                     .current_fn
                     .clone()
                     .expect("statements are only checked inside functions");
-                let found = value.as_ref().map(|value| {
-                    self.evaluating(stmt, |checker| checker.expr_as(value, returns.as_ref()))
-                });
+                let found = value
+                    .as_ref()
+                    .map(|value| self.expr_as(value, returns.as_ref()));
 
                 // A bare `return` returns `Void`.
                 let function = name.to_string();
@@ -3810,76 +3792,92 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
-                match found {
+                let lowered = match found {
                     Some(found) => found.expr.map(ir::Stmt::Return),
                     None => Some(ir::Stmt::Return(self.void())),
-                }
+                };
+                (lowered, true)
             }
             StmtKind::Expr(expr) => {
                 // A call's return value can be ignored.
-                let found = self.evaluating(stmt, |checker| checker.expr(expr));
-                found.expr.map(ir::Stmt::Expr)
+                let (found, never) = self.evaluating(|checker| checker.expr(expr));
+                (found.expr.map(ir::Stmt::Expr), never)
             }
         }
     }
 
-    /// Checks the expressions of `stmt` with `check`. If they evaluate a
-    /// `Never`, `stmt` never finishes, so it counts as returning.
-    fn evaluating<T>(&mut self, stmt: &'a Stmt, check: impl FnOnce(&mut Self) -> T) -> T {
+    /// Checks expressions with `check`, also returning whether they evaluate
+    /// a `Never`.
+    fn evaluating<T>(&mut self, check: impl FnOnce(&mut Self) -> T) -> (T, bool) {
         self.evaluated_never = false;
         let checked = check(self);
-        if self.evaluated_never {
-            self.never_returns.insert(stmt);
-        }
-        checked
+        (checked, self.evaluated_never)
     }
 
     /// Checks a `match` on `value`, whose arms' patterns must together match
     /// every value it could be, with each matching something the ones before
     /// it don't, returning what it compiles to.
-    fn match_(&mut self, stmt: &'a Stmt, value: &Expr, arms: &'a [MatchArm]) -> Option<ir::Stmt> {
-        let Typed { ty, expr } = self.evaluating(stmt, |checker| checker.expr(value));
+    /// Also returns whether it always returns, as `stmt` does.
+    fn match_(
+        &mut self,
+        stmt: &'a Stmt,
+        value: &Expr,
+        arms: &'a [MatchArm],
+    ) -> (Option<ir::Stmt>, bool) {
+        let (Typed { ty, expr }, never) = self.evaluating(|checker| checker.expr(value));
         let mut lowered = vec![];
         let mut spaces = vec![];
+        let mut returns = true;
         for arm in arms {
             // A pattern's bindings are only visible in its arm's block. Arms
             // are still checked when the type is unknown, so the errors in
             // their blocks are found.
             self.scopes.push(HashMap::new());
             let (pattern, space) = self.pattern(&arm.pattern, ty.as_ref());
-            let body = arm.body.iter().filter_map(|stmt| self.stmt(stmt)).collect();
+            let (body, arm_returns) = self.stmts(&arm.body);
             self.scopes.pop();
             spaces.push(space);
+            returns &= arm_returns;
             if let Some(pattern) = pattern {
                 lowered.push(ir::MatchArm { pattern, body });
             }
         }
+        let returns = never || returns;
 
         // Patterns with errors have already been reported, and can't be told
         // apart from patterns that match anything.
-        let ty = ty?;
+        let Some(ty) = ty else {
+            return (None, returns);
+        };
         if lowered.len() < arms.len() {
-            return None;
+            return (None, returns);
         }
         self.check_exhaustive(&ty, stmt.span, arms, spaces);
-        Some(ir::Stmt::Match {
-            value: expr?,
+        let lowered = expr.map(|value| ir::Stmt::Match {
+            value,
             ty: ty.id,
             arms: lowered,
-        })
+        });
+        (lowered, returns)
     }
 
     /// Checks `pattern = value`, which declares the values that `pattern`
     /// binds in the current scope. With nothing to fall back on, `pattern`
     /// must match every value it could be given. It compiles to a `match`
     /// with one arm, whose block is empty.
-    fn destructure(
+    fn destructure(&mut self, pattern: &'a Pattern, value: &Expr) -> (Option<ir::Stmt>, bool) {
+        let (Typed { ty, expr }, never) = self.evaluating(|checker| checker.expr(value));
+        (self.destructured(pattern, ty, expr), never)
+    }
+
+    /// Checks `pattern = value`, where `value` has the type `ty` and compiles
+    /// to `expr`, returning what it compiles to.
+    fn destructured(
         &mut self,
-        stmt: &'a Stmt,
         pattern: &'a Pattern,
-        value: &Expr,
+        ty: Option<Type>,
+        expr: Option<ir::Expr>,
     ) -> Option<ir::Stmt> {
-        let Typed { ty, expr } = self.evaluating(stmt, |checker| checker.expr(value));
         let (lowered, space) = self.pattern(pattern, ty.as_ref());
         let (ty, lowered) = (ty?, lowered?);
         let tys = std::slice::from_ref(&ty);
