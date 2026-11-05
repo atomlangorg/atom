@@ -941,6 +941,38 @@ struct OptionSignature<'a> {
     ty: Option<Type>,
 }
 
+/// Everything known about a type, which `Type::id` indexes.
+struct TypeInfo<'a> {
+    /// Its full name, such as `/main::Point`.
+    name: String,
+    /// The index in `Checker::files` of the file that declares it, which is
+    /// the only one that can construct it if it's a group.
+    file: usize,
+    kind: TypeKind<'a>,
+    /// Its methods by name. Methods aren't names in any scope, and are only
+    /// found through the type of the value they're called on, wherever
+    /// they're declared. They share names with the type's fields.
+    methods: HashMap<&'a str, usize>,
+    /// Its static functions by name, which are found like methods but on the
+    /// type itself. They have their own names, separate from the type's
+    /// fields and methods.
+    statics: HashMap<&'a str, usize>,
+}
+
+/// What a type is made of.
+enum TypeKind<'a> {
+    /// A group's fields, in the order they're declared. A type that isn't a
+    /// choice is a group without fields until it's defined.
+    Group(Vec<FieldSignature<'a>>),
+    /// A choice's options, in the order they're declared, which it has none
+    /// of until it's defined.
+    Choice(Vec<OptionSignature<'a>>),
+    /// A type that the compiler represents itself.
+    Primitive(ir::Primitive),
+    /// A tuple's elements.
+    Tuple(Vec<TupleElementType>),
+}
+
 #[derive(Debug, Clone)]
 enum Binding {
     Value {
@@ -1277,8 +1309,8 @@ struct Checker<'a> {
     /// The index in `files` of `stdlib/core`, which every project file
     /// imports, and which declares the types of literals.
     core: usize,
-    /// The primitive types, by `id`.
-    primitives: HashMap<usize, ir::Primitive>,
+    /// Every type, indexed by `id`.
+    types: Vec<TypeInfo<'a>>,
     /// For each function used as a value, by its index in `functions`, the
     /// index of the function that a pointer to it really points to, which
     /// takes its `Input` as a single parameter.
@@ -1343,33 +1375,11 @@ struct Checker<'a> {
     /// Whether a `Never` has been evaluated since `evaluating` started
     /// checking a statement's expressions.
     evaluated_never: bool,
-    /// For each type `id`, its methods by name. Methods aren't names in any
-    /// scope, and are only found through the type of the value they're called
-    /// on, wherever they're declared. They share names with the type's fields.
-    methods: HashMap<usize, HashMap<&'a str, usize>>,
-    /// For each type `id`, its static functions by name, which are found like
-    /// methods but on the type itself. They have their own names, separate
-    /// from the type's fields and methods.
-    statics: HashMap<usize, HashMap<&'a str, usize>>,
     globals: Vec<Global<'a>>,
     aliases: Vec<Alias<'a>>,
     /// Indexes into `globals`, in the order their types were worked out, so
     /// that each comes after the values its initialiser uses.
     global_order: Vec<usize>,
-    /// For each type, indexed by `id`, its fields in the order they're
-    /// declared. Choices don't have any.
-    group_fields: Vec<Vec<FieldSignature<'a>>>,
-    /// For each type, indexed by `id`, the index in `files` of the file
-    /// that declares it, which is the only one that can construct it if it's
-    /// a group.
-    group_files: Vec<usize>,
-    /// For each type, indexed by `id`, its full name, such as `/main::Point`.
-    type_names: Vec<String>,
-    /// For each choice, by `id`, its options in the order they're declared.
-    /// Other types aren't in it.
-    choice_options: HashMap<usize, Vec<OptionSignature<'a>>>,
-    /// For each tuple type, by `id`, its elements. Other types aren't in it.
-    tuples: HashMap<usize, Vec<TupleElementType>>,
     /// The `id` of each tuple type, by its elements' labels, names and type
     /// `id`s. Tuples are the same type only if all of those are the same.
     tuple_ids: HashMap<Vec<TupleKey>, usize>,
@@ -1443,12 +1453,7 @@ impl<'a> Checker<'a> {
                     StmtKind::Group { name, .. }
                     | StmtKind::Choice { name, .. }
                     | StmtKind::Primitive { name, .. } => {
-                        let id = self.declare_type(name, stmt.span);
-                        // It can be used as a choice before its options are
-                        // defined.
-                        if matches!(stmt.kind, StmtKind::Choice { .. }) {
-                            self.choice_options.insert(id, vec![]);
-                        }
+                        let id = self.declare_type(name, stmt);
                         types.push((file, id, stmt));
                     }
                     StmtKind::Alias { name, ty } => {
@@ -2225,12 +2230,8 @@ impl<'a> Checker<'a> {
         let id = match self.tuple_ids.get(&key) {
             Some(&id) => id,
             None => {
-                let id = self.group_fields.len();
-                self.group_fields.push(vec![]);
-                self.group_files.push(self.file);
-                self.type_names.push(name.clone());
+                let id = self.add_type(name.clone(), self.file, TypeKind::Tuple(elements));
                 self.tuple_ids.insert(key, id);
-                self.tuples.insert(id, elements);
                 id
             }
         };
@@ -2290,7 +2291,7 @@ impl<'a> Checker<'a> {
         name: &Name,
         report: bool,
     ) -> Option<Type> {
-        if self.is_only_for_choices(template) && !self.choice_options.contains_key(&args[0].id) {
+        if self.is_only_for_choices(template) && self.options(args[0].id).is_none() {
             if report {
                 let error = CheckError::NotAChoice {
                     generic: name.to_string(),
@@ -2414,23 +2415,23 @@ impl<'a> Checker<'a> {
         let Template {
             file, params, stmt, ..
         } = self.templates[template];
+        // Its first parameter stands for a choice if its arguments must be.
+        let only_for_choices = self.is_only_for_choices(template);
         let stand_ins = params
             .iter()
-            .map(|param| {
-                let id = self.group_fields.len();
-                self.group_fields.push(vec![]);
-                self.group_files.push(file);
-                self.type_names.push(param.clone());
+            .enumerate()
+            .map(|(index, param)| {
+                let kind = if only_for_choices && index == 0 {
+                    TypeKind::Choice(vec![])
+                } else {
+                    TypeKind::Group(vec![])
+                };
                 Type {
-                    id,
+                    id: self.add_type(param.clone(), file, kind),
                     name: param.clone(),
                 }
             })
             .collect::<Vec<_>>();
-        // Its first parameter stands for a choice, like its arguments.
-        if self.is_only_for_choices(template) {
-            self.choice_options.insert(stand_ins[0].id, vec![]);
-        }
         let ty = self.instance(template, stand_ins, stmt.span, false)?;
         self.checked_instances.insert(ty.id);
         Some((file, ty, stmt.span))
@@ -2468,11 +2469,8 @@ impl<'a> Checker<'a> {
         }
 
         let Template { file, stmt, .. } = self.templates[template];
-        let id = self.group_fields.len();
-        self.group_fields.push(vec![]);
-        self.group_files.push(file);
-        self.type_names
-            .push(format!("{}::{name}", self.files[file].display));
+        let full_name = format!("{}::{name}", self.files[file].display);
+        let id = self.add_type(full_name, file, TypeKind::Group(vec![]));
         self.instance_ids.insert(key, id);
         self.instances.insert(id, (template, args.clone()));
 
@@ -2499,7 +2497,7 @@ impl<'a> Checker<'a> {
     /// How deeply the type with `id` nests types made from generic types and
     /// tuples, which is 0 for other types.
     fn type_depth(&self, id: usize) -> usize {
-        let parts: Vec<_> = match (self.instances.get(&id), self.tuples.get(&id)) {
+        let parts: Vec<_> = match (self.instances.get(&id), self.elements(id)) {
             (Some((_, args)), _) => args.iter().map(|arg| arg.id).collect(),
             (None, Some(elements)) => elements.iter().map(|element| element.ty.id).collect(),
             (None, None) => return 0,
@@ -2760,12 +2758,13 @@ impl<'a> Checker<'a> {
                     },
                 );
             } else {
+                let info = &mut self.types[self_ty.id];
                 let table = if is_static {
-                    &mut self.statics
+                    &mut info.statics
                 } else {
-                    &mut self.methods
+                    &mut info.methods
                 };
-                table.entry(self_ty.id).or_default().insert(name, index);
+                table.insert(name, index);
             }
         }
         index
@@ -3435,12 +3434,63 @@ impl<'a> Checker<'a> {
         self.declare(name, span, Binding::Alias(self.aliases.len() - 1));
     }
 
-    /// Declares a type without its fields or options, returning its `id`.
-    fn declare_type(&mut self, name: &'a str, span: Span) -> usize {
-        let id = self.group_fields.len();
-        self.group_fields.push(vec![]);
-        self.group_files.push(self.file);
-        self.type_names.push(self.full_name(name));
+    /// Adds a type with the full name `name`, declared in the file at `file`
+    /// in `files`, returning its `id`.
+    fn add_type(&mut self, name: String, file: usize, kind: TypeKind<'a>) -> usize {
+        self.types.push(TypeInfo {
+            name,
+            file,
+            kind,
+            methods: HashMap::new(),
+            statics: HashMap::new(),
+        });
+        self.types.len() - 1
+    }
+
+    /// The fields of the type with `id`, in the order they're declared. Only
+    /// groups have any.
+    fn fields(&self, id: usize) -> &[FieldSignature<'a>] {
+        match &self.types[id].kind {
+            TypeKind::Group(fields) => fields,
+            _ => &[],
+        }
+    }
+
+    /// The options of the type with `id` in the order they're declared, if
+    /// it's a choice.
+    fn options(&self, id: usize) -> Option<&[OptionSignature<'a>]> {
+        match &self.types[id].kind {
+            TypeKind::Choice(options) => Some(options),
+            _ => None,
+        }
+    }
+
+    /// The elements of the type with `id`, if it's a tuple.
+    fn elements(&self, id: usize) -> Option<&[TupleElementType]> {
+        match &self.types[id].kind {
+            TypeKind::Tuple(elements) => Some(elements),
+            _ => None,
+        }
+    }
+
+    /// How the compiler represents the type with `id`, if it's a primitive.
+    fn primitive(&self, id: usize) -> Option<ir::Primitive> {
+        match self.types[id].kind {
+            TypeKind::Primitive(primitive) => Some(primitive),
+            _ => None,
+        }
+    }
+
+    /// Declares the type called `name` that `stmt` declares, without its
+    /// fields or options, returning its `id`. A choice can be used as one
+    /// before its options are defined.
+    fn declare_type(&mut self, name: &'a str, stmt: &Stmt) -> usize {
+        let span = stmt.span;
+        let kind = match stmt.kind {
+            StmtKind::Choice { .. } => TypeKind::Choice(vec![]),
+            _ => TypeKind::Group(vec![]),
+        };
+        let id = self.add_type(self.full_name(name), self.file, kind);
         let ty = Type {
             id,
             name: name.to_string(),
@@ -3482,13 +3532,13 @@ impl<'a> Checker<'a> {
             "ChoiceTag" | "ChoiceOption" => ir::Primitive::Tag,
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
         };
-        self.primitives.insert(id, primitive);
+        self.types[id].kind = TypeKind::Primitive(primitive);
     }
 
     /// Resolves the options of the choice called `name` with `id`.
     fn define_choice(&mut self, id: usize, name: &str, options: &'a [ChoiceOption]) {
         // Its options can use it as a choice.
-        self.choice_options.insert(id, vec![]);
+        self.types[id].kind = TypeKind::Choice(vec![]);
         // Option names only need to be unique within their choice.
         let mut option_names = HashSet::new();
         let mut signatures = vec![];
@@ -3511,7 +3561,7 @@ impl<'a> Checker<'a> {
                 ty: self.resolve_type(&option.ty),
             });
         }
-        self.choice_options.insert(id, signatures);
+        self.types[id].kind = TypeKind::Choice(signatures);
     }
 
     /// Resolves the fields of the group called `name` with `id`.
@@ -3533,31 +3583,41 @@ impl<'a> Checker<'a> {
                 );
             }
             let ty = self.resolve_type(&field.ty);
-            self.group_fields[id].push(FieldSignature {
-                name: &field.name,
-                ty,
-            });
+            if let TypeKind::Group(fields) = &mut self.types[id].kind {
+                fields.push(FieldSignature {
+                    name: &field.name,
+                    ty,
+                });
+            }
         }
     }
 
     /// The `id`s of the types that the type with `id` holds directly: a
-    /// group's fields, or the values of a choice's options.
-    fn contained_types(&self, id: usize) -> impl Iterator<Item = usize> + '_ {
-        let options = self.choice_options.get(&id).into_iter().flatten();
-        let elements = self.tuples.get(&id).into_iter().flatten();
-        self.group_fields[id]
-            .iter()
-            .map(|field| &field.ty)
-            .chain(options.map(|option| &option.ty))
-            .filter_map(|ty| ty.as_ref().map(|ty| ty.id))
-            .chain(elements.map(|element| element.ty.id))
+    /// group's fields, the values of a choice's options, or a tuple's
+    /// elements.
+    fn contained_types(&self, id: usize) -> Vec<usize> {
+        match &self.types[id].kind {
+            TypeKind::Group(fields) => fields
+                .iter()
+                .filter_map(|field| field.ty.as_ref())
+                .collect(),
+            TypeKind::Choice(options) => options
+                .iter()
+                .filter_map(|option| option.ty.as_ref())
+                .collect(),
+            TypeKind::Tuple(elements) => elements.iter().map(|element| &element.ty).collect(),
+            TypeKind::Primitive(_) => vec![],
+        }
+        .into_iter()
+        .map(|ty| ty.id)
+        .collect()
     }
 
     /// Reports an error if the group or choice with `id` contains itself,
     /// which would make it infinitely large.
     fn check_not_recursive(&mut self, id: usize, name: &str, span: Span) {
         let mut seen = HashSet::new();
-        let mut unvisited: Vec<_> = self.contained_types(id).collect();
+        let mut unvisited = self.contained_types(id);
         while let Some(next) = unvisited.pop() {
             if next == id {
                 self.error(span, CheckError::RecursiveType(name.to_string()));
@@ -3706,7 +3766,7 @@ impl<'a> Checker<'a> {
                 None
             }
             StmtKind::Group { name, .. } | StmtKind::Choice { name, .. } => {
-                let id = self.declare_type(name, stmt.span);
+                let id = self.declare_type(name, stmt);
                 self.define_type(id, stmt);
                 self.check_not_recursive(id, name, stmt.span);
                 None
@@ -3914,7 +3974,7 @@ impl<'a> Checker<'a> {
             PatternKind::Bool(_) => mismatch(self),
             PatternKind::Tuple(elements) => {
                 // The labels must be the ones the tuple is built with.
-                let types = self.tuples.get(&ty.id).cloned().filter(|types| {
+                let types = self.elements(ty.id).map(<[_]>::to_vec).filter(|types| {
                     types.len() == elements.len()
                         && types
                             .iter()
@@ -4180,10 +4240,10 @@ impl<'a> Checker<'a> {
     fn ctors(&self, ty: &Type) -> Option<Vec<Ctor>> {
         if *ty == self.std_type("Bool") {
             Some(vec![Ctor::Bool(false), Ctor::Bool(true)])
-        } else if self.tuples.contains_key(&ty.id) {
+        } else if self.elements(ty.id).is_some() {
             Some(vec![Ctor::Tuple])
         } else {
-            let options = self.choice_options.get(&ty.id)?;
+            let options = self.options(ty.id)?;
             Some((0..options.len()).map(Ctor::Option).collect())
         }
     }
@@ -4192,13 +4252,15 @@ impl<'a> Checker<'a> {
     fn ctor_types(&self, ty: &Type, ctor: &Ctor) -> Vec<Type> {
         match ctor {
             Ctor::Int(_) | Ctor::Bool(_) => vec![],
-            Ctor::Tuple => self.tuples[&ty.id]
+            Ctor::Tuple => self
+                .elements(ty.id)
+                .unwrap_or_default()
                 .iter()
                 .map(|element| element.ty.clone())
                 .collect(),
             // An option whose type is unknown has already been reported.
             Ctor::Option(index) => vec![
-                self.choice_options[&ty.id][*index]
+                self.options(ty.id).unwrap_or_default()[*index]
                     .ty
                     .clone()
                     .unwrap_or_else(|| self.std_type("Void")),
@@ -4216,7 +4278,9 @@ impl<'a> Checker<'a> {
             Ctor::Int(value) => value.to_string(),
             Ctor::Bool(value) => value.to_string(),
             Ctor::Tuple => {
-                let elements: Vec<_> = self.tuples[&ty.id]
+                let elements: Vec<_> = self
+                    .elements(ty.id)
+                    .unwrap_or_default()
                     .iter()
                     .zip(parts.iter().zip(&part_tys))
                     .map(|(element, (part, part_ty))| {
@@ -4230,7 +4294,7 @@ impl<'a> Checker<'a> {
                 format!("({})", elements.join(", "))
             }
             Ctor::Option(index) => {
-                let option = self.choice_options[&ty.id][*index].name;
+                let option = self.options(ty.id).unwrap_or_default()[*index].name;
                 match &parts[0] {
                     Space::Any => format!("{ty}.{option}"),
                     value => format!("{ty}.{option}({})", self.show_space(value, &part_tys[0])),
@@ -4312,10 +4376,10 @@ impl<'a> Checker<'a> {
             ExprKind::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
             ExprKind::Call { callee, args } => self.call(callee, args, span),
             ExprKind::Construct { ty, fields } => self.construct(ty, span, fields, expected),
-            ExprKind::Paren(value) => match expected.and_then(|ty| self.tuples.get(&ty.id)) {
+            ExprKind::Paren(value) => match expected.and_then(|ty| self.elements(ty.id)) {
                 // A tuple with one unlabelled element is built from a value in
                 // brackets, as in `(1)`.
-                Some(elements) if matches!(&elements[..], [element] if element.label.is_none()) => {
+                Some([element]) if element.label.is_none() => {
                     let arg = Arg {
                         label: None,
                         value: (**value).clone(),
@@ -4370,8 +4434,8 @@ impl<'a> Checker<'a> {
 
     /// The width and signedness of `ty`, if it's an integer type.
     fn int_type(&self, ty: &Type) -> Option<(u32, bool)> {
-        match self.primitives.get(&ty.id) {
-            Some(&ir::Primitive::Int { bits, signed }) => Some((bits, signed)),
+        match self.primitive(ty.id) {
+            Some(ir::Primitive::Int { bits, signed }) => Some((bits, signed)),
             _ => None,
         }
     }
@@ -4663,7 +4727,7 @@ impl<'a> Checker<'a> {
     /// and the elements without labels can't be read.
     fn tuple(&mut self, values: &[Arg], expected: Option<&Type>) -> Typed {
         let expected_elements = expected
-            .and_then(|ty| self.tuples.get(&ty.id))
+            .and_then(|ty| self.elements(ty.id))
             .filter(|elements| {
                 elements.len() == values.len()
                     && elements
@@ -4671,7 +4735,7 @@ impl<'a> Checker<'a> {
                         .zip(values)
                         .all(|(element, value)| element.label == value.label)
             })
-            .cloned();
+            .map(<[_]>::to_vec);
         let typed: Vec<_> = values
             .iter()
             .enumerate()
@@ -4876,39 +4940,31 @@ impl<'a> Checker<'a> {
     /// Finds the field or method of `ty` called `name`. A tuple's elements
     /// are its fields, found by their names.
     fn member(&self, ty: &Type, name: &str) -> Option<Member> {
-        if let Some(elements) = self.tuples.get(&ty.id)
+        if let Some(elements) = self.elements(ty.id)
             && let Some(index) = elements
                 .iter()
                 .position(|element| element.name.as_deref() == Some(name))
         {
             return Some(Member::Field(index, Some(elements[index].ty.clone())));
         }
-        if let Some(index) = self.group_fields[ty.id]
-            .iter()
-            .position(|field| field.name == name)
-        {
-            let field_ty = self.group_fields[ty.id][index].ty.clone();
-            return Some(Member::Field(index, field_ty));
+        let fields = self.fields(ty.id);
+        if let Some(index) = fields.iter().position(|field| field.name == name) {
+            return Some(Member::Field(index, fields[index].ty.clone()));
         }
-        self.methods
-            .get(&ty.id)
-            .and_then(|methods| methods.get(name))
-            .map(|method| Member::Method(*method))
+        let method = self.types[ty.id].methods.get(name)?;
+        Some(Member::Method(*method))
     }
 
     /// Finds the static function of `ty` called `name`.
     fn static_function(&self, ty: &Type, name: &str) -> Option<usize> {
-        self.statics
-            .get(&ty.id)
-            .and_then(|statics| statics.get(name))
-            .copied()
+        self.types[ty.id].statics.get(name).copied()
     }
 
     /// Finds the option of `ty` called `name`, if `ty` is a choice, returning
     /// its index in the order they're declared, and the type of the value it
     /// holds, which is `None` if it's unknown.
     fn option(&self, ty: &Type, name: &str) -> Option<(usize, Option<Type>)> {
-        let options = self.choice_options.get(&ty.id)?;
+        let options = self.options(ty.id)?;
         let index = options.iter().position(|option| option.name == name)?;
         Some((index, options[index].ty.clone()))
     }
@@ -4944,7 +5000,7 @@ impl<'a> Checker<'a> {
         let kind = match self.member(&ty, name) {
             Some(Member::Field(..)) => MemberKind::Field,
             Some(Member::Method(_)) => MemberKind::Method,
-            None if self.choice_options.contains_key(&ty.id) => {
+            None if self.options(ty.id).is_some() => {
                 return CheckError::NoOption {
                     ty,
                     option: name.to_string(),
@@ -5055,7 +5111,7 @@ impl<'a> Checker<'a> {
             .and_then(|param| param.ty.clone());
         let input_is_tuple = param
             .as_ref()
-            .is_some_and(|param| self.tuples.contains_key(&param.id));
+            .is_some_and(|param| self.elements(param.id).is_some());
         let input = match args {
             [
                 Arg {
@@ -5333,7 +5389,10 @@ impl<'a> Checker<'a> {
             }
             TypeName::Named(_) => None,
             TypeName::Tuple(elements) => {
-                let types = self.tuples.get(&found.id).cloned().unwrap_or_default();
+                let types = self
+                    .elements(found.id)
+                    .map(<[_]>::to_vec)
+                    .unwrap_or_default();
                 for (element, ty) in elements.iter().zip(&types) {
                     self.infer_from(&element.ty, &ty.ty, template, declared, inferred);
                 }
@@ -5378,7 +5437,7 @@ impl<'a> Checker<'a> {
     /// always built in the call, with its elements as the arguments.
     fn call_function(&self, index: usize, input: ir::Expr) -> ir::Expr {
         let args = match input {
-            ir::Expr::Construct { group, fields } if self.tuples.contains_key(&group) => fields,
+            ir::Expr::Construct { group, fields } if self.elements(group).is_some() => fields,
             input => vec![input],
         };
         ir::Expr::Call {
@@ -5502,7 +5561,7 @@ impl<'a> Checker<'a> {
         // but the group is found first, without reporting errors, so they
         // can take their types from its fields.
         let fields = match self.type_in_context(type_name, &contexts, false) {
-            Some(ty) => self.group_fields[ty.id].clone(),
+            Some(ty) => self.fields(ty.id).to_vec(),
             None => vec![],
         };
         let typed = values.iter().enumerate().map(|(index, value)| {
@@ -5521,18 +5580,18 @@ impl<'a> Checker<'a> {
             ty: Some(ty),
             expr: None,
         };
-        if self.choice_options.contains_key(&ty.id) {
+        if self.options(ty.id).is_some() {
             self.error(span, CheckError::ConstructedChoice(ty.clone()));
             return with_error(ty);
         }
-        if self.primitives.contains_key(&ty.id) {
+        if self.primitive(ty.id).is_some() {
             self.error(span, CheckError::ConstructedPrimitive(ty.clone()));
             return with_error(ty);
         }
         // Only the type's own file can construct it, and only in the type's
         // `impl`s. Elsewhere, values come from its functions, such as
         // `Void.new()`. An unknown `impl` type isn't reported again.
-        let declared_in = self.group_files[ty.id];
+        let declared_in = self.types[ty.id].file;
         if declared_in != self.file {
             self.error(
                 span,
@@ -5551,7 +5610,7 @@ impl<'a> Checker<'a> {
                 return with_error(ty);
             }
         }
-        let fields = self.group_fields[ty.id].clone();
+        let fields = self.fields(ty.id).to_vec();
         let name = type_name.to_string();
 
         // Every field must be given, in the order the group declares them.
@@ -5650,7 +5709,7 @@ impl<'a> Checker<'a> {
                     ty: Some(ty),
                     ..
                 },
-            ] if !self.tuples.contains_key(&ty.id) => ty.clone(),
+            ] if !self.elements(ty.id).is_some() => ty.clone(),
             params => {
                 let elements = params.iter().map(|param| {
                     Some(TupleElementType {
@@ -5695,7 +5754,7 @@ impl<'a> Checker<'a> {
             returns,
         } = self.functions[index].clone();
         let returns = returns.expect("the function's type is known");
-        let args = if self.tuples.contains_key(&input) {
+        let args = if self.elements(input).is_some() {
             (0..params.len())
                 .map(|index| ir::Expr::Field {
                     receiver: Box::new(ir::Expr::Local(0)),
@@ -5827,30 +5886,26 @@ impl<'a> Checker<'a> {
 
         let main = self.main();
         let type_id = |ty: &Option<Type>| ty.as_ref().expect(NO_ERRORS).id;
-        let types = (0..self.group_fields.len())
-            .map(|id| {
-                let name = self.type_names[id].clone();
-                if let Some(&primitive) = self.primitives.get(&id) {
-                    ir::TypeDef::Primitive(primitive)
-                } else if let Some(elements) = self.tuples.get(&id) {
+        let types = self
+            .types
+            .iter()
+            .map(|info| {
+                let name = info.name.clone();
+                match &info.kind {
+                    TypeKind::Primitive(primitive) => ir::TypeDef::Primitive(*primitive),
                     // A tuple is laid out like a group of its elements.
-                    let fields = elements.iter().map(|element| element.ty.id);
-                    ir::TypeDef::Group {
+                    TypeKind::Tuple(elements) => ir::TypeDef::Group {
                         name,
-                        fields: fields.collect(),
-                    }
-                } else if let Some(options) = self.choice_options.get(&id) {
-                    let options = options.iter().map(|option| type_id(&option.ty));
-                    ir::TypeDef::Choice {
+                        fields: elements.iter().map(|element| element.ty.id).collect(),
+                    },
+                    TypeKind::Choice(options) => ir::TypeDef::Choice {
                         name,
-                        options: options.collect(),
-                    }
-                } else {
-                    let fields = self.group_fields[id].iter().map(|field| type_id(&field.ty));
-                    ir::TypeDef::Group {
+                        options: options.iter().map(|option| type_id(&option.ty)).collect(),
+                    },
+                    TypeKind::Group(fields) => ir::TypeDef::Group {
                         name,
-                        fields: fields.collect(),
-                    }
+                        fields: fields.iter().map(|field| type_id(&field.ty)).collect(),
+                    },
                 }
             })
             .collect();
