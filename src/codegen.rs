@@ -622,6 +622,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder
                     .build_extract_value(receiver, *index as u32, "")?
             }
+            Expr::Error => unreachable!("programs with mistakes aren't compiled"),
         })
     }
 

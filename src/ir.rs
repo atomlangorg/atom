@@ -222,4 +222,7 @@ pub enum Expr {
         receiver: Box<Expr>,
         index: usize,
     },
+    /// Where the checker found a mistake. A program with mistakes is never
+    /// compiled, so the back end never sees one.
+    Error,
 }

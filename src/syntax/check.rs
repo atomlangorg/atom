@@ -1060,11 +1060,11 @@ enum Ctor {
 fn chosen(choice: usize, option: usize, value: Typed) -> Typed {
     Typed {
         ty: value.ty,
-        expr: value.expr.map(|value| ir::Expr::Choose {
+        expr: ir::Expr::Choose {
             choice,
             option,
-            value: Box::new(value),
-        }),
+            value: Box::new(value.expr),
+        },
     }
 }
 
@@ -1119,8 +1119,7 @@ struct Global<'a> {
     ty: Option<&'a TypeName>,
     value: &'a Expr,
     state: LazyType,
-    /// What its initialiser compiles to, once it's been checked, or `None` if
-    /// it has an error.
+    /// What its initialiser compiles to, once it's been checked.
     lowered: Option<ir::Expr>,
 }
 
@@ -1174,8 +1173,8 @@ enum FnKind {
 /// What `.member` is used on.
 enum Receiver {
     /// A value of the type, for its fields and methods, along with what it
-    /// compiles to, or `None` if it has an error.
-    Value(Type, Option<ir::Expr>),
+    /// compiles to.
+    Value(Type, ir::Expr),
     /// The type itself, for its static functions.
     Type(Type),
 }
@@ -1240,23 +1239,39 @@ struct Typed {
     /// `None` if the type couldn't be determined because of an error that has
     /// already been reported.
     ty: Option<Type>,
-    /// What the expression compiles to, or `None` if it has an error.
-    expr: Option<ir::Expr>,
+    /// What the expression compiles to, which is only compiled if the program
+    /// has no errors.
+    expr: ir::Expr,
 }
 
 impl Typed {
     /// An expression whose error has already been reported.
     const UNKNOWN: Self = Self {
         ty: None,
-        expr: None,
+        expr: ir::Expr::Error,
     };
+
+    /// An expression of type `ty` with an error, which has been reported.
+    fn error(ty: Type) -> Self {
+        Self {
+            ty: Some(ty),
+            expr: ir::Expr::Error,
+        }
+    }
 }
 
-/// Splits checked expressions into their types, and what they compile to if
-/// none of them have errors.
-fn split(typed: Vec<Typed>) -> (Vec<Option<Type>>, Option<Vec<ir::Expr>>) {
-    let (types, exprs): (Vec<_>, Vec<_>) = typed.into_iter().map(|t| (t.ty, t.expr)).unzip();
-    (types, exprs.into_iter().collect())
+/// Calls the function at `function` in `Checker::callees` with `args`, which
+/// is an error if the function couldn't be found.
+fn call(function: Option<usize>, args: Vec<ir::Expr>) -> ir::Expr {
+    match function {
+        Some(function) => ir::Expr::Call { function, args },
+        None => ir::Expr::Error,
+    }
+}
+
+/// Splits checked expressions into their types and what they compile to.
+fn split(typed: Vec<Typed>) -> (Vec<Option<Type>>, Vec<ir::Expr>) {
+    typed.into_iter().map(|t| (t.ty, t.expr)).unzip()
 }
 
 /// What a program that has been checked is made of, once `Checker::instantiate`
@@ -2703,7 +2718,7 @@ impl<'a> Checker<'a> {
         self.file = outer_file;
 
         self.globals[index].state = LazyType::Checked(ty.clone());
-        self.globals[index].lowered = expr;
+        self.globals[index].lowered = Some(expr);
         self.global_order.push(index);
         ty
     }
@@ -3711,8 +3726,7 @@ impl<'a> Checker<'a> {
                 let (Typed { ty, expr }, never) =
                     self.evaluating(|checker| checker.decl_type(name, type_name.as_ref(), value));
                 let local = self.declare_local(name, stmt.span, *mutability, ty);
-                let lowered = expr.map(|value| ir::Stmt::Assign { local, value });
-                (lowered, never)
+                (Some(ir::Stmt::Assign { local, value: expr }), never)
             }
             StmtKind::Assign { name, value } => {
                 // The target is found first so the value can take its type
@@ -3735,8 +3749,8 @@ impl<'a> Checker<'a> {
                         local,
                     }) => {
                         self.check_assignable(name, value.span, expected, found.ty);
-                        let lowered = found.expr.map(|value| ir::Stmt::Assign { local, value });
-                        return (lowered, never);
+                        let value = found.expr;
+                        return (Some(ir::Stmt::Assign { local, value }), never);
                     }
                     Ok(Binding::Value {
                         mutability: Mutability::Let,
@@ -3778,12 +3792,12 @@ impl<'a> Checker<'a> {
                     Some(else_block) => self.block(else_block),
                     None => (vec![], false),
                 };
-                let lowered = cond.expr.map(|cond| ir::Stmt::If {
-                    cond,
+                let lowered = ir::Stmt::If {
+                    cond: cond.expr,
                     then_block,
                     else_block,
-                });
-                (lowered, never || then_returns && else_returns)
+                };
+                (Some(lowered), never || then_returns && else_returns)
             }
             // Inside functions, functions and groups are only visible after
             // they're declared.
@@ -3857,15 +3871,15 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
                 let lowered = match found {
-                    Some(found) => found.expr.map(ir::Stmt::Return),
-                    None => Some(ir::Stmt::Return(self.void())),
+                    Some(found) => found.expr,
+                    None => self.void(),
                 };
-                (lowered, true)
+                (Some(ir::Stmt::Return(lowered)), true)
             }
             StmtKind::Expr(expr) => {
                 // A call's return value can be ignored.
                 let (found, never) = self.evaluating(|checker| checker.expr(expr));
-                (found.expr.map(ir::Stmt::Expr), never)
+                (Some(ir::Stmt::Expr(found.expr)), never)
             }
         }
     }
@@ -3917,12 +3931,12 @@ impl<'a> Checker<'a> {
             return (None, returns);
         }
         self.check_exhaustive(&ty, stmt.span, arms, spaces);
-        let lowered = expr.map(|value| ir::Stmt::Match {
-            value,
+        let lowered = ir::Stmt::Match {
+            value: expr,
             ty: ty.id,
             arms: lowered,
-        });
-        (lowered, returns)
+        };
+        (Some(lowered), returns)
     }
 
     /// Checks `pattern = value`, which declares the values that `pattern`
@@ -3940,7 +3954,7 @@ impl<'a> Checker<'a> {
         &mut self,
         pattern: &'a Pattern,
         ty: Option<Type>,
-        expr: Option<ir::Expr>,
+        expr: ir::Expr,
     ) -> Option<ir::Stmt> {
         let (lowered, space) = self.pattern(pattern, ty.as_ref());
         let (ty, lowered) = (ty?, lowered?);
@@ -3959,7 +3973,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         Some(ir::Stmt::Match {
-            value: expr?,
+            value: expr,
             ty: ty.id,
             arms: vec![ir::MatchArm {
                 pattern: lowered,
@@ -4395,16 +4409,16 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Bool(value) => Typed {
                 ty: Some(self.std_type("Bool")),
-                expr: Some(ir::Expr::Bool(*value)),
+                expr: ir::Expr::Bool(*value),
             },
             ExprKind::Var(name) => match self.lookup(name) {
                 Ok(Binding::Value { ty, local, .. }) => Typed {
                     ty,
-                    expr: Some(ir::Expr::Local(local)),
+                    expr: ir::Expr::Local(local),
                 },
                 Ok(Binding::Global(index)) => Typed {
                     ty: self.global_type(index),
-                    expr: Some(ir::Expr::Global(index)),
+                    expr: ir::Expr::Global(index),
                 },
                 Ok(Binding::Function(index)) => {
                     let function = self.own_fn(index);
@@ -4459,7 +4473,7 @@ impl<'a> Checker<'a> {
                 match self.lookup(&name) {
                     Ok(Binding::Value { ty, local, .. }) => Typed {
                         ty,
-                        expr: Some(ir::Expr::Local(local)),
+                        expr: ir::Expr::Local(local),
                     },
                     Ok(_) => unreachable!("only methods declare `self`, as a value"),
                     Err(LookupError::Undeclared) => {
@@ -4516,19 +4530,16 @@ impl<'a> Checker<'a> {
                     max,
                 },
             );
-            return Typed {
-                ty: Some(ty),
-                expr: None,
-            };
+            return Typed::error(ty);
         }
 
         // Stored as its bits, so a negative value is in two's complement.
         let bits = (value as u128 & (u128::MAX >> (128 - bits))) as u64;
         Typed {
-            expr: Some(ir::Expr::Int {
+            expr: ir::Expr::Int {
                 value: bits,
                 ty: ty.id,
-            }),
+            },
             ty: Some(ty),
         }
     }
@@ -4551,15 +4562,9 @@ impl<'a> Checker<'a> {
             .as_ref()
             .and_then(|function| self.signature_of(function, span).returns);
         let function = function.map(|function| self.callee(function, span));
-        let expr = function
-            .zip(expr)
-            .map(|(function, operand)| ir::Expr::Call {
-                function,
-                args: vec![operand],
-            });
         Typed {
             ty: returns.map(|returns| self.named_like(returns, ty.as_ref())),
-            expr,
+            expr: call(function, vec![expr]),
         }
     }
 
@@ -4662,16 +4667,10 @@ impl<'a> Checker<'a> {
             function = None;
         }
 
-        let expr = function
-            .zip(lhs.expr.zip(rhs.expr))
-            .map(|(function, (lhs, rhs))| ir::Expr::Call {
-                function,
-                args: vec![lhs, rhs],
-            });
         let returns = signature.and_then(|(_, signature)| signature.returns);
         Typed {
             ty: returns.map(|returns| self.named_like(returns, lhs.ty.as_ref())),
-            expr,
+            expr: call(function, vec![lhs.expr, rhs.expr]),
         }
     }
 
@@ -4732,13 +4731,13 @@ impl<'a> Checker<'a> {
             let elements = elements.collect::<Option<_>>();
             elements.map(|elements| self.tuple_type(elements))
         };
-        let expr = ty
-            .as_ref()
-            .zip(lowered)
-            .map(|(ty, fields)| ir::Expr::Construct {
+        let expr = match &ty {
+            Some(ty) => ir::Expr::Construct {
                 group: ty.id,
-                fields,
-            });
+                fields: lowered,
+            },
+            None => ir::Expr::Error,
+        };
         Typed { ty, expr }
     }
 
@@ -4972,10 +4971,10 @@ impl<'a> Checker<'a> {
                 Some(Member::Field(index, field_ty)) => {
                     return Typed {
                         ty: field_ty,
-                        expr: receiver.map(|receiver| ir::Expr::Field {
+                        expr: ir::Expr::Field {
                             receiver: Box::new(receiver),
                             index,
-                        }),
+                        },
                     };
                 }
                 Some(Member::Method(_)) => CheckError::MemberNotValue {
@@ -4991,7 +4990,7 @@ impl<'a> Checker<'a> {
                 let template = self.std_template("ChoiceOption");
                 return Typed {
                     ty: value_ty.and_then(|value| self.instance(template, vec![ty, value], span)),
-                    expr: Some(ir::Expr::Tag(option)),
+                    expr: ir::Expr::Tag(option),
                 };
             }
             Receiver::Type(ty) => match self.static_function(&ty, field) {
@@ -5012,7 +5011,7 @@ impl<'a> Checker<'a> {
     fn call_value(
         &mut self,
         ty: Option<Type>,
-        value: Option<ir::Expr>,
+        value: ir::Expr,
         name: &str,
         args: &[Arg],
         span: Span,
@@ -5029,14 +5028,15 @@ impl<'a> Checker<'a> {
             Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `Call`"),
         };
-        let call = ty
+        let call_method = ty
             .as_ref()
             .filter(|ty| self.implements(ty, call_trait))
             .and_then(|ty| match self.member(ty, "call") {
                 Some(Member::Method(found)) => Some(found),
                 _ => None,
             });
-        let param = call.and_then(|call| self.signature_of(&call, span).params.first()?.ty.clone());
+        let param = call_method
+            .and_then(|method| self.signature_of(&method, span).params.first()?.ty.clone());
         let Typed {
             ty: found,
             expr: input,
@@ -5065,13 +5065,10 @@ impl<'a> Checker<'a> {
                 },
             );
         }
-        let expr = function
-            .zip(value.zip(input))
-            .map(|(call, (value, input))| ir::Expr::Call {
-                function: call,
-                args: vec![value, input],
-            });
-        Typed { ty: returns, expr }
+        Typed {
+            ty: returns,
+            expr: call(function, vec![value, input]),
+        }
     }
 
     /// Checks calling `value`, whose type `ty` is a `ChoiceOption` with
@@ -5079,7 +5076,7 @@ impl<'a> Checker<'a> {
     fn call_option(
         &mut self,
         ty: &Type,
-        value: Option<ir::Expr>,
+        value: ir::Expr,
         (base, value_ty): (Type, Type),
         name: &str,
         args: &[Arg],
@@ -5096,13 +5093,7 @@ impl<'a> Checker<'a> {
             self.option_value(name.to_string(), base, Some(value_ty), args, span);
         Typed {
             ty: returns,
-            expr: function
-                .zip(value)
-                .zip(expr)
-                .map(|((function, value), input)| ir::Expr::Call {
-                    function,
-                    args: vec![value, input],
-                }),
+            expr: call(function, vec![value, expr]),
         }
     }
 
@@ -5122,7 +5113,7 @@ impl<'a> Checker<'a> {
         if args.is_empty() && value_ty == Some(self.std_type("Void")) {
             return Typed {
                 ty: Some(base),
-                expr: Some(self.void()),
+                expr: self.void(),
             };
         }
         let (found, lowered) = self.args(args, std::slice::from_ref(&value_ty));
@@ -5139,7 +5130,7 @@ impl<'a> Checker<'a> {
         value_ty: Option<Type>,
         args: &[Arg],
         found: Vec<Option<Type>>,
-        lowered: Option<Vec<ir::Expr>>,
+        lowered: Vec<ir::Expr>,
         span: Span,
     ) -> Typed {
         let signature = Signature {
@@ -5155,9 +5146,7 @@ impl<'a> Checker<'a> {
         };
         Typed {
             ty: self.check_args(name, args, found, signature, span),
-            expr: lowered
-                .and_then(|args| <[_; 1]>::try_from(args).ok())
-                .map(|[value]| value),
+            expr: <[_; 1]>::try_from(lowered).map_or(ir::Expr::Error, |[value]| value),
         }
     }
 
@@ -5202,7 +5191,6 @@ impl<'a> Checker<'a> {
             found.push(ty);
             lowered.push(expr);
         }
-        let lowered: Option<Vec<_>> = lowered.into_iter().collect();
 
         let Some(inferred) = inferred.into_iter().collect() else {
             // An unknown argument has been reported, and may be why.
@@ -5228,7 +5216,10 @@ impl<'a> Checker<'a> {
         let function = self.callee(function, span);
         Typed {
             ty: self.check_args(full_name, args, found, signature, span),
-            expr: lowered.map(|args| ir::Expr::Call { function, args }),
+            expr: ir::Expr::Call {
+                function,
+                args: lowered,
+            },
         }
     }
 
@@ -5296,7 +5287,10 @@ impl<'a> Checker<'a> {
         let function = self.callee(function, span);
         Typed {
             ty: self.check_args(name.to_string(), args, found, signature, span),
-            expr: lowered.map(|args| ir::Expr::Call { function, args }),
+            expr: ir::Expr::Call {
+                function,
+                args: lowered,
+            },
         }
     }
 
@@ -5329,10 +5323,10 @@ impl<'a> Checker<'a> {
         let receiver = match receiver {
             Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
                 Some(Member::Field(index, field_ty)) => {
-                    let value = lowered.map(|receiver| ir::Expr::Field {
-                        receiver: Box::new(receiver),
+                    let value = ir::Expr::Field {
+                        receiver: Box::new(lowered),
                         index,
-                    });
+                    };
                     return self.call_value(field_ty, value, method, args, span);
                 }
                 _ => Some(Receiver::Value(ty, lowered)),
@@ -5388,15 +5382,13 @@ impl<'a> Checker<'a> {
         let found_method = self.callee(found_method, span);
 
         // A method's receiver is its first argument.
-        let lowered_args = lowered_receiver
-            .zip(lowered_args)
-            .map(|(receiver, args)| iter::once(receiver).chain(args).collect());
+        let args = iter::once(lowered_receiver).chain(lowered_args).collect();
         Typed {
             ty: returns,
-            expr: lowered_args.map(|args| ir::Expr::Call {
+            expr: ir::Expr::Call {
                 function: found_method,
                 args,
-            }),
+            },
         }
     }
 
@@ -5428,17 +5420,13 @@ impl<'a> Checker<'a> {
                 return Typed::UNKNOWN;
             }
         };
-        let with_error = |ty| Typed {
-            ty: Some(ty),
-            expr: None,
-        };
         if self.options(ty.id).is_some() {
             self.error(span, CheckError::ConstructedChoice(ty.clone()));
-            return with_error(ty);
+            return Typed::error(ty);
         }
         if self.primitive(ty.id).is_some() {
             self.error(span, CheckError::ConstructedPrimitive(ty.clone()));
-            return with_error(ty);
+            return Typed::error(ty);
         }
         // Only the type's own file can construct it. Elsewhere, values come
         // from its functions, such as `Void.new()`.
@@ -5451,7 +5439,7 @@ impl<'a> Checker<'a> {
                     file: self.files[declared_in].display.clone(),
                 },
             );
-            return with_error(ty);
+            return Typed::error(ty);
         }
         let fields = self.fields(ty.id).to_vec();
         let name = ty.to_string();
@@ -5466,7 +5454,7 @@ impl<'a> Checker<'a> {
                     found: values.len(),
                 },
             );
-            return with_error(ty);
+            return Typed::error(ty);
         }
 
         for ((value, found), field) in values.iter().zip(found).zip(&fields) {
@@ -5495,10 +5483,10 @@ impl<'a> Checker<'a> {
         }
 
         Typed {
-            expr: lowered.map(|fields| ir::Expr::Construct {
+            expr: ir::Expr::Construct {
                 group: ty.id,
-                fields,
-            }),
+                fields: lowered,
+            },
             ty: Some(ty),
         }
     }
@@ -5574,7 +5562,7 @@ impl<'a> Checker<'a> {
         };
         Typed {
             ty: Some(ty),
-            expr: Some(ir::Expr::Function(self.callee(value, span))),
+            expr: ir::Expr::Function(self.callee(value, span)),
         }
     }
 
@@ -5632,7 +5620,7 @@ impl<'a> Checker<'a> {
         &mut self,
         args: &[Arg],
         params: &[Option<Type>],
-    ) -> (Vec<Option<Type>>, Option<Vec<ir::Expr>>) {
+    ) -> (Vec<Option<Type>>, Vec<ir::Expr>) {
         let typed = args.iter().enumerate().map(|(index, arg)| {
             let expected = params.get(index).and_then(Option::as_ref);
             self.expr_as(&arg.value, expected)
@@ -5931,7 +5919,11 @@ impl<'a> Checker<'a> {
         state: &mut Instantiating,
     ) -> Option<()> {
         match expr {
-            ir::Expr::Bool(_) | ir::Expr::Local(_) | ir::Expr::Global(_) | ir::Expr::Tag(_) => {}
+            ir::Expr::Bool(_)
+            | ir::Expr::Local(_)
+            | ir::Expr::Global(_)
+            | ir::Expr::Tag(_)
+            | ir::Expr::Error => {}
             ir::Expr::Int { ty, .. } => *ty = self.concrete(*ty, params, state)?,
             ir::Expr::Call { function, args } => {
                 *function = self.instantiate_callee(*function, params, state)?;
