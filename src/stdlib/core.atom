@@ -634,11 +634,10 @@ impl IntS64 with BitNot {
 }
 
 // Types whose values can be called like functions, which calls `call`, as in
-// `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. If `Input` is a
-// tuple, the arguments are its elements, so a tuple is never unpacked into
-// them. Otherwise, the only argument is the `Input`, as in `negate(3)`. A
-// `ChoiceOption` always has one argument, which is its `Input`, even if that's
-// a tuple.
+// `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. The arguments
+// are always built into a tuple, which must be the `Input`, so a tuple is
+// never unpacked into them. A `ChoiceOption` always has one argument, which
+// is its `Input`, even if that's a tuple.
 trait Call {
     alias Input
     alias Output
@@ -647,13 +646,12 @@ trait Call {
 }
 
 // A function, which is what naming a function or static function refers to
-// when it's used as a value, as in `add` or `Int.zero`. `Input` is the type of
-// its only parameter if that has no label and isn't a tuple, and otherwise a
-// tuple of its parameters, as in
-// `Fn<(a: Int, b: Int), Int>` for `fn add(a: Int, b: Int) -> Int`, or
-// `Fn<(_: (a: Int, b: Int)), Int>` for
-// `fn sum(_ pair: (a: Int, b: Int)) -> Int`. Calling a function by name uses
-// `Call`, so `add(a: 3, b: 5)` is `add.call(input: (a: 3, b: 5))`.
+// when it's used as a value, as in `add` or `Int.zero`. `Input` is a tuple of
+// its parameters, as in `Fn<(a: Int, b: Int), Int>` for
+// `fn add(a: Int, b: Int) -> Int`, or `Fn<(_: Int), Int>` for
+// `fn negate(_ value: Int) -> Int`. A function called by name is called
+// directly, and as a value it uses `Call`, so `adder(a: 3, b: 5)`, where
+// `adder` is `add`, is `adder.call(input: (a: 3, b: 5))`.
 primitive Fn<Input, Output>
 
 impl Fn with Call {

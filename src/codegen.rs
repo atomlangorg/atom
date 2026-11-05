@@ -2940,8 +2940,8 @@ mod tests {
             }
 
             impl Scale with Call {
-                fn call(input: Int) -> Int {
-                    return input * self.by
+                fn call(input: (_ value: Int)) -> Int {
+                    return input.value * self.by
                 }
             }
 
@@ -3030,7 +3030,7 @@ mod tests {
             fn main() -> Int {
                 let pair = (a: 30, b: 12)
                 let sums = add(a: 100, b: 1) + add.call(input: (a: 200, b: 2)) + add.call(input: pair)
-                return sums + negate(1) + negate.call(input: 2)
+                return sums + negate(1) + negate.call(input: (2))
             }
             ";
         // 101 + 202 + 42 - 1 - 2
@@ -3041,12 +3041,12 @@ mod tests {
     fn fn_values_can_be_passed_stored_and_returned() {
         let src = "
             choice Maybe {
-                one: Fn<Int, Int>
+                one: Fn<(_: Int), Int>
                 none
             }
 
             group Tools {
-                let double: Fn<Int, Int>
+                let double: Fn<(_: Int), Int>
             }
 
             impl Tools {
@@ -3063,11 +3063,11 @@ mod tests {
                 return value + 1
             }
 
-            fn applying(_ function: Fn<Int, Int>, to value: Int) -> Int {
+            fn applying(_ function: Fn<(_: Int), Int>, to value: Int) -> Int {
                 return function(value)
             }
 
-            fn chosen() -> Fn<Int, Int> {
+            fn chosen() -> Fn<(_: Int), Int> {
                 return inc
             }
 
@@ -3137,7 +3137,7 @@ mod tests {
                 }
             }
 
-            fn built(by make: Fn<Int, Box<Int>>, from value: Int) -> Int {
+            fn built(by make: Fn<(_: Int), Box<Int>>, from value: Int) -> Int {
                 return make(value).value
             }
 
@@ -3185,7 +3185,7 @@ mod tests {
                     return Self { value: value }
                 }
 
-                fn mapped(with function: Fn<Self.T, Self.T>) -> Self {
+                fn mapped(with function: Fn<(_: Self.T), Self.T>) -> Self {
                     return Self { value: function(self.value) }
                 }
             }

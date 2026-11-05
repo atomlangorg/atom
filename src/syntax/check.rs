@@ -1171,14 +1171,6 @@ enum Receiver {
     Type(Type),
 }
 
-/// What's called by `Checker::call_value`.
-enum Callee {
-    /// A value, which compiles to this if it has no errors.
-    Value(Option<ir::Expr>),
-    /// A function by its name, as an index into `Checker::functions`.
-    Function(usize),
-}
-
 struct FileInfo<'a> {
     /// The file's path, such as `/dir/other` or `stdlib/core`.
     display: String,
@@ -4844,22 +4836,20 @@ impl<'a> Checker<'a> {
         Typed::UNKNOWN
     }
 
-    /// Checks calling `callee`, of type `ty`, called `name`, with `args`, at
-    /// `span`, which calls its `call` from the standard library's `Call` trait, as in
-    /// `adder(a: 3)` for `adder.call(input: (a: 3))`. If `Input` is a tuple,
-    /// the arguments are its elements, so a tuple is never unpacked into them.
-    /// Otherwise, the only argument is the `Input`, as in `negate(3)`.
+    /// Checks calling `value`, of type `ty`, called `name`, with `args`, at
+    /// `span`, which calls its `call` from the standard library's `Call`
+    /// trait, as in `adder(a: 3)` for `adder.call(input: (a: 3))`. The
+    /// arguments are always built into a tuple, which must be the `Input`.
     fn call_value(
         &mut self,
         ty: Option<Type>,
-        callee: Callee,
+        value: Option<ir::Expr>,
         name: &str,
         args: &[Arg],
         span: Span,
     ) -> Typed {
         if let Some(option_ty) = ty.as_ref()
             && let Some((base, value_ty)) = self.option_args(option_ty)
-            && let Callee::Value(value) = callee
         {
             return self.call_option(option_ty, value, (base, value_ty), name, args, span);
         }
@@ -4878,24 +4868,10 @@ impl<'a> Checker<'a> {
                 _ => None,
             })
             .and_then(|param| param.ty.clone());
-        let input_is_tuple = param
-            .as_ref()
-            .is_some_and(|param| self.elements(param.id).is_some());
-        let input = match args {
-            [
-                Arg {
-                    label: None, value, ..
-                },
-            ] if !input_is_tuple => value.clone(),
-            _ => Expr {
-                kind: ExprKind::Tuple(args.to_vec()),
-                span,
-            },
-        };
         let Typed {
             ty: found,
             expr: input,
-        } = self.expr_as(&input, param.as_ref());
+        } = self.tuple(args, param.as_ref());
 
         let function = ty.as_ref().and_then(|ty| {
             let not_callable = CheckError::NotCallable {
@@ -4905,31 +4881,24 @@ impl<'a> Checker<'a> {
             self.trait_method("Call", "call", ty, span, not_callable)
         });
         let returns = function.and_then(|function| self.functions[function].returns.clone());
-        if found != param {
-            if let Callee::Function(index) = callee {
-                self.check_function_args(index, name, args, span);
-            } else if let (Some(expected), Some(found)) = (param, found) {
-                self.error(
-                    span,
-                    CheckError::WrongCallInput {
-                        name: name.to_string(),
-                        expected,
-                        found,
-                    },
-                );
-            }
-            return Typed {
-                ty: returns,
-                expr: None,
-            };
+        if let (Some(expected), Some(found)) = (&param, &found)
+            && expected != found
+        {
+            self.error(
+                span,
+                CheckError::WrongCallInput {
+                    name: name.to_string(),
+                    expected: expected.clone(),
+                    found: found.clone(),
+                },
+            );
         }
-        let expr = function.zip(input).and_then(|(call, input)| match callee {
-            Callee::Value(value) => value.map(|value| ir::Expr::Call {
+        let expr = function
+            .zip(value.zip(input))
+            .map(|(call, (value, input))| ir::Expr::Call {
                 function: call,
                 args: vec![value, input],
-            }),
-            Callee::Function(index) => Some(self.call_function(index, input)),
-        });
+            });
         Typed { ty: returns, expr }
     }
 
@@ -5186,32 +5155,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Reports what's wrong with each of `args`, which don't make the `Input`
-    /// of the function at `index`, called `name`, against its parameters. Each
-    /// is checked again as its parameter, as it may not have had a type to use
-    /// as part of the input, so errors in the arguments themselves, which have
-    /// already been reported, are dropped.
-    fn check_function_args(&mut self, index: usize, name: &str, args: &[Arg], span: Span) {
-        let errors = self.errors.len();
+    /// Checks a call to the function at `index` in `functions`, called
+    /// `name`, with `args`, which are checked as its parameters.
+    fn call_function(&mut self, index: usize, name: &str, args: &[Arg], span: Span) -> Typed {
         let params = self.param_types(index);
-        let (found, _) = self.args(args, &params);
-        self.errors.truncate(errors);
+        let (found, lowered) = self.args(args, &params);
         let signature = self.functions[index].clone();
-        self.check_args(name.to_string(), args, found, signature, span);
-    }
-
-    /// What calling the function at `index` with `input`, its `Input`,
-    /// compiles to. It's the same as using `Fn.call`, but the function is called
-    /// directly, rather than through a pointer. If `Input` is a tuple, it's
-    /// always built in the call, with its elements as the arguments.
-    fn call_function(&self, index: usize, input: ir::Expr) -> ir::Expr {
-        let args = match input {
-            ir::Expr::Construct { group, fields } if self.elements(group).is_some() => fields,
-            input => vec![input],
-        };
-        ir::Expr::Call {
-            function: index,
-            args,
+        Typed {
+            ty: self.check_args(name.to_string(), args, found, signature, span),
+            expr: lowered.map(|args| ir::Expr::Call {
+                function: index,
+                args,
+            }),
         }
     }
 
@@ -5248,16 +5203,13 @@ impl<'a> Checker<'a> {
                         receiver: Box::new(receiver),
                         index,
                     });
-                    return self.call_value(field_ty, Callee::Value(value), method, args, span);
+                    return self.call_value(field_ty, value, method, args, span);
                 }
                 _ => Some(Receiver::Value(ty, lowered)),
             },
-            // So is a static function, like any other function.
+            // A static function is called like any other function.
             Some(Receiver::Type(ty)) if let Some(found) = self.static_function(&ty, method) => {
-                let fn_type = self.function_type(found, span);
-                let name = format!("{ty}.{method}");
-                let callee = Callee::Function(found);
-                return self.call_value(fn_type, callee, &name, args, span);
+                return self.call_function(found, &format!("{ty}.{method}"), args, span);
             }
             // An option is called directly, since it's known which one it is.
             Some(Receiver::Type(ty)) if let Some((option, value_ty)) = self.option(&ty, method) => {
@@ -5430,21 +5382,19 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks a call, returning what's called's return type, or `None` if it
-    /// can't be determined, along with what it compiles to. Functions and other
-    /// values are called alike, through the standard library's `Call` trait.
+    /// can't be determined, along with what it compiles to. A function is
+    /// called directly, and other values through the standard library's
+    /// `Call` trait.
     fn call(&mut self, callee: &Name, args: &[Arg], span: Span) -> Typed {
         let name = callee.to_string();
         match self.lookup(callee) {
-            Ok(Binding::Function(index)) => {
-                let ty = self.function_type(index, span);
-                self.call_value(ty, Callee::Function(index), &name, args, span)
-            }
+            Ok(Binding::Function(index)) => self.call_function(index, &name, args, span),
             Ok(Binding::Value { .. } | Binding::Global(_)) => {
                 let Typed { ty, expr } = self.expr(&Expr {
                     kind: ExprKind::Var(callee.clone()),
                     span: callee.span,
                 });
-                self.call_value(ty, Callee::Value(expr), &name, args, span)
+                self.call_value(ty, expr, &name, args, span)
             }
             // Arguments are checked first, so their errors come before the
             // call's.
@@ -5462,35 +5412,22 @@ impl<'a> Checker<'a> {
     }
 
     /// The type `Fn<Input, Output>` of the function at `index` in `functions`,
-    /// or `None` if it's unknown. Its `Input` is the type of its only parameter
-    /// if that has no label and isn't a tuple, and otherwise a tuple of its
-    /// parameters, which have only their labels, since their names are private
-    /// to the function. So a tuple `Input` always holds the arguments. It's used
-    /// by the code at `span`.
+    /// or `None` if it's unknown. Its `Input` is a tuple of its parameters,
+    /// which have only their labels, since their names are private to the
+    /// function. It's used by the code at `span`.
     fn function_type(&mut self, index: usize, span: Span) -> Option<Type> {
         let Signature {
             params, returns, ..
         } = self.functions[index].clone();
-        let input = match &params[..] {
-            [
-                ParamSignature {
-                    label: None,
-                    ty: Some(ty),
-                    ..
-                },
-            ] if !self.elements(ty.id).is_some() => ty.clone(),
-            params => {
-                let elements = params.iter().map(|param| {
-                    Some(TupleElementType {
-                        label: param.label.map(str::to_string),
-                        name: param.label.map(str::to_string),
-                        ty: param.ty.clone()?,
-                    })
-                });
-                let elements = elements.collect::<Option<_>>()?;
-                self.tuple_type(elements)
-            }
-        };
+        let elements = params.iter().map(|param| {
+            Some(TupleElementType {
+                label: param.label.map(str::to_string),
+                name: param.label.map(str::to_string),
+                ty: param.ty.clone()?,
+            })
+        });
+        let input = elements.collect::<Option<_>>()?;
+        let input = self.tuple_type(input);
         let template = self.std_template("Fn");
         self.instance(template, vec![input, returns?], span, true)
     }
@@ -5513,8 +5450,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Makes a function that calls the function at `index` in `functions`,
-    /// whose type is `ty`, with its `Input` as a single parameter, returning
-    /// its index in `functions`.
+    /// whose type is `ty`, with the elements of its `Input` as a single
+    /// parameter, returning its index in `functions`.
     fn single_input_function(&mut self, index: usize, ty: &Type) -> usize {
         let input = self.instances[&ty.id].1[0].id;
         let Signature {
@@ -5523,16 +5460,12 @@ impl<'a> Checker<'a> {
             returns,
         } = self.functions[index].clone();
         let returns = returns.expect("the function's type is known");
-        let args = if self.elements(input).is_some() {
-            (0..params.len())
-                .map(|index| ir::Expr::Field {
-                    receiver: Box::new(ir::Expr::Local(0)),
-                    index,
-                })
-                .collect()
-        } else {
-            vec![ir::Expr::Local(0)]
-        };
+        let args = (0..params.len())
+            .map(|index| ir::Expr::Field {
+                receiver: Box::new(ir::Expr::Local(0)),
+                index,
+            })
+            .collect();
         let value = self.functions.len();
         let value_name = format!("{name}.value");
         self.functions.push(Signature {
@@ -12941,11 +12874,11 @@ primitive Float"
             }
         }
 
-        group Negate {}
+        group Negator {}
 
-        impl Negate with Call {
-            fn call(input: Int) -> Int {
-                return -input
+        impl Negator with Call {
+            fn call(input: (_ value: Int)) -> Int {
+                return -input.value
             }
         }
 
@@ -12959,7 +12892,7 @@ primitive Float"
 
         group Tools {
             let adder: Adder
-            let negate: Negate
+            let negate: Negator
         }
         ";
 
@@ -12970,7 +12903,7 @@ primitive Float"
         let src = format!(
             "
             {CALLABLES}
-            fn f(adder: Adder, negate: Negate, counter: Counter, tools: Tools) -> Int {{
+            fn f(adder: Adder, negate: Negator, counter: Counter, tools: Tools) -> Int {{
                 let sum: Int = adder(a: 3, b: 5)
                 let same: Int = adder.call(input: (a: 3, b: 5))
                 let negated: Int = negate(sum) + tools.negate(1)
@@ -12988,7 +12921,7 @@ primitive Float"
         let src = format!(
             "
             {CALLABLES}
-            fn f(adder: Adder, negate: Negate, tools: Tools, count: Int) {{
+            fn f(adder: Adder, negate: Negator, tools: Tools, count: Int) {{
                 let a = count(1)
                 let b = adder(a: 3)
                 let c = adder(b: 3, a: 5)
@@ -13005,8 +12938,8 @@ primitive Float"
                 "`count` is `Int`, which doesn't implement `Call`, so it can't be called",
                 "`adder` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
                 "`adder` is called with `(a: Int, b: Int)`, but was given `(b: Int, a: Int)`",
-                "`negate` is called with `Int`, but was given `Bool`",
-                "`negate` is called with `Int`, but was given `()`",
+                "`negate` is called with `(_ value: Int)`, but was given `(_: Bool)`",
+                "`negate` is called with `(_ value: Int)`, but was given `()`",
                 "`missing` is not declared",
                 "`unknown` is not declared",
             ]
@@ -13015,9 +12948,7 @@ primitive Float"
 
     #[test]
     fn functions_are_values_of_type_fn() {
-        // The `Input` is the type of an only parameter without a label that
-        // isn't a tuple, and otherwise a tuple of the parameters, by their
-        // labels.
+        // The `Input` is a tuple of the parameters, by their labels.
         let src = "
             fn add(a: Int, b: Int) -> Int {
                 return a + b
@@ -13043,7 +12974,7 @@ primitive Float"
 
             fn f() {
                 let a: Fn<(a: Int, b: Int), Int> = add
-                let b: Fn<Int, Int> = negate
+                let b: Fn<(_: Int), Int> = negate
                 let c: Fn<(_: Int, by: Int), Int> = scale
                 let d: Fn<(to: Int), Int> = same
                 let e: Fn<(_: (a: Int, b: Int)), Int> = sum
@@ -13215,7 +13146,7 @@ primitive Float"
             fn f() {
                 let at: Fn<(x: Int, y: Int), Point> = Point.at
                 let origin: Fn<(), Point> = Point.origin
-                let of: Fn<Int, Box<Int>> = Box<Int>.of
+                let of: Fn<(_: Int), Box<Int>> = Box<Int>.of
                 let a: Point = at(x: 1, y: 2)
                 let b: Point = origin()
                 let c: Box<Int> = of(1)
