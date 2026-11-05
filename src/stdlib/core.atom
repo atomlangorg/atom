@@ -209,7 +209,8 @@ trait BitNot {
 }
 
 // Each `impl` infers its trait's aliases from its signatures, such as
-// `alias Rhs = Self` and `alias Output = Bool` from `and`.
+// `alias Rhs = Self` and `alias Output = Bool` from `and`. `Bool`s are equal if
+// they hold the same value.
 impl Bool with And {
     // `true` if both are `true`.
     primitive fn and(_ rhs: Self) -> Bool
@@ -225,54 +226,19 @@ impl Bool with Not {
     primitive fn not() -> Bool
 }
 
-// Integers and `Bool`s are equal if they hold the same value.
-impl IntU8 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntU16 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntU32 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntU64 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntS8 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntS16 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntS32 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
-impl IntS64 with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
-}
-
 impl Bool with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
-// Integers are ordered by their values, and their operators work on two of
-// the same type.
+// Integers are equal if they hold the same value, and are ordered by their
+// values. Their operators work on two of the same type, except that shifts
+// are by an `Int`.
+impl IntU8 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
 impl IntU8 with Order {
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
@@ -318,6 +284,11 @@ impl IntU8 with ShiftRight {
 
 impl IntU8 with BitNot {
     primitive fn bitNot() -> Self
+}
+
+impl IntU16 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntU16 with Order {
@@ -367,6 +338,11 @@ impl IntU16 with BitNot {
     primitive fn bitNot() -> Self
 }
 
+impl IntU32 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
 impl IntU32 with Order {
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
@@ -412,6 +388,11 @@ impl IntU32 with ShiftRight {
 
 impl IntU32 with BitNot {
     primitive fn bitNot() -> Self
+}
+
+impl IntU64 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntU64 with Order {
@@ -461,6 +442,11 @@ impl IntU64 with BitNot {
     primitive fn bitNot() -> Self
 }
 
+impl IntS8 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
 impl IntS8 with Order {
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
@@ -502,6 +488,11 @@ impl IntS8 with Negate {
 
 impl IntS8 with BitNot {
     primitive fn bitNot() -> Self
+}
+
+impl IntS16 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntS16 with Order {
@@ -547,6 +538,11 @@ impl IntS16 with BitNot {
     primitive fn bitNot() -> Self
 }
 
+impl IntS32 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
 impl IntS32 with Order {
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
@@ -588,6 +584,11 @@ impl IntS32 with Negate {
 
 impl IntS32 with BitNot {
     primitive fn bitNot() -> Self
+}
+
+impl IntS64 with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
 impl IntS64 with Order {
