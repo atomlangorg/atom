@@ -1265,7 +1265,7 @@ mod tests {
 
             impl Point {
                 static fn at(x: Int, y: Int) -> Point {
-                    return Point { x: x, y: y }
+                    return Self { x: x, y: y }
                 }
 
                 fn sum() -> Int {
@@ -1275,7 +1275,7 @@ mod tests {
 
             impl Line {
                 static fn from(_ start: Point, to end: Point) -> Line {
-                    return Line { start: start, end: end }
+                    return Self { start: start, end: end }
                 }
 
                 fn width() -> Int {
@@ -1373,7 +1373,7 @@ mod tests {
 
                 impl Square {
                     static fn new(side: Int) -> Square {
-                        return Square { side: side }
+                        return Self { side: side }
                     }
 
                     fn area() -> Int {
@@ -1402,7 +1402,7 @@ mod tests {
 
                 impl User {
                     static fn new() -> User {
-                        return User {}
+                        return Self {}
                     }
                 }
 
@@ -1452,7 +1452,7 @@ mod tests {
 
                 impl Thing {{
                     static fn new() -> Thing {{
-                        return Thing {{}}
+                        return Self {{}}
                     }}
                 }}
 
@@ -1716,7 +1716,7 @@ mod tests {
 
             impl Maker {{
                 static fn new() -> Maker {{
-                    return Maker {{ make: Shape.circle }}
+                    return Self {{ make: Shape.circle }}
                 }}
             }}
 
@@ -1981,7 +1981,7 @@ mod tests {
 
             impl Point {{
                 static fn at(x: Int, y: Int) -> Point {{
-                    return Point {{ x: x, y: y }}
+                    return Self {{ x: x, y: y }}
                 }}
             }}
 
@@ -2023,7 +2023,7 @@ mod tests {
 
             impl Canvas {{
                 static fn of(_ shape: Shape) -> Canvas {{
-                    return Canvas {{ shape: shape }}
+                    return Self {{ shape: shape }}
                 }}
             }}
 
@@ -2130,7 +2130,7 @@ mod tests {
 
             impl Point {{
                 static fn at(x: Int, y: Int) -> Point {{
-                    return Point {{ x: x, y: y }}
+                    return Self {{ x: x, y: y }}
                 }}
             }}
 
@@ -2480,7 +2480,7 @@ mod tests {
                 alias Output = Self
 
                 fn not() -> Self {
-                    return Flags { bits: .!self.bits }
+                    return Self { bits: .!self.bits }
                 }
             }
 

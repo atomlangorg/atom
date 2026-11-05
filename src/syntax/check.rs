@@ -172,8 +172,6 @@ pub enum CheckError {
     ConstructedPrimitive(Type),
     /// A primitive type was declared outside the standard library.
     PrimitiveOutsideStdlib(String),
-    /// A group was constructed outside the `impl`s of its type.
-    ConstructedOutsideImpl(Type),
     /// A group was constructed outside the file that declares it.
     ConstructedOutsideFile { ty: Type, file: String },
     /// `::` was used after a name that's declared, but isn't a file.
@@ -517,9 +515,6 @@ impl fmt::Display for CheckError {
                 f,
                 "`{ty}` can only be constructed in `{file}`, which declares it"
             ),
-            Self::ConstructedOutsideImpl(ty) => {
-                write!(f, "`{ty}` can only be constructed inside an `impl {ty}`")
-            }
             Self::ConstructedPrimitive(ty) => write!(
                 f,
                 "`{ty}` is a primitive, so it can only be created by the compiler, such as with a literal"
@@ -4338,7 +4333,7 @@ impl<'a> Checker<'a> {
             ExprKind::Unary(op, operand) => self.unary(*op, operand, expected),
             ExprKind::Binary(lhs, op, rhs) => self.binary(lhs, *op, rhs, expected),
             ExprKind::Call { callee, args } => self.call(callee, args, span),
-            ExprKind::Construct { ty, fields } => self.construct(ty, span, fields, expected),
+            ExprKind::Construct(fields) => self.construct(span, fields),
             ExprKind::Paren(value) => match expected.and_then(|ty| self.elements(ty.id)) {
                 // A tuple with one unlabelled element is built from a value in
                 // brackets, as in `(1)`.
@@ -5264,26 +5259,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks the construction of a group, returning its type, or `None` if
-    /// it can't be determined, along with what it compiles to.
-    ///
-    /// A generic group's name can leave out its arguments when the group is
-    /// used as `expected`, or is the `impl`'s type, if that's made from it.
-    fn construct(
-        &mut self,
-        type_name: &TypeName,
-        span: Span,
-        values: &[FieldValue],
-        expected: Option<&Type>,
-    ) -> Typed {
-        let impl_type = self.impl_type.clone().flatten();
-        let contexts = [expected, impl_type.as_ref()];
+    /// Checks `Self { ... }`, which constructs the type of the `impl` it's
+    /// in, returning that type, or `None` if it can't be determined, along
+    /// with what it compiles to.
+    fn construct(&mut self, span: Span, values: &[FieldValue]) -> Typed {
         // Values are checked first, so their errors come before the group's,
-        // but the group is found first, without reporting errors, so they
-        // can take their types from its fields.
-        let fields = match self.type_in_context(type_name, &contexts, false) {
-            Some(ty) => self.fields(ty.id).to_vec(),
-            None => vec![],
+        // but they take their types from its fields.
+        let fields = match &self.impl_type {
+            Some(Some(ty)) => self.fields(ty.id).to_vec(),
+            _ => vec![],
         };
         let typed = values.iter().enumerate().map(|(index, value)| {
             let expected = fields
@@ -5294,8 +5278,14 @@ impl<'a> Checker<'a> {
         });
         let (found, lowered) = split(typed.collect());
 
-        let Some(ty) = self.type_in_context(type_name, &contexts, true) else {
-            return Typed::UNKNOWN;
+        let ty = match &self.impl_type {
+            Some(Some(ty)) => ty.clone(),
+            // The `impl`'s type is unknown, which has been reported.
+            Some(None) => return Typed::UNKNOWN,
+            None => {
+                self.error(span, CheckError::SelfTypeOutsideImpl);
+                return Typed::UNKNOWN;
+            }
         };
         let with_error = |ty| Typed {
             ty: Some(ty),
@@ -5309,9 +5299,8 @@ impl<'a> Checker<'a> {
             self.error(span, CheckError::ConstructedPrimitive(ty.clone()));
             return with_error(ty);
         }
-        // Only the type's own file can construct it, and only in the type's
-        // `impl`s. Elsewhere, values come from its functions, such as
-        // `Void.new()`. An unknown `impl` type isn't reported again.
+        // Only the type's own file can construct it. Elsewhere, values come
+        // from its functions, such as `Void.new()`.
         let declared_in = self.types[ty.id].file;
         if declared_in != self.file {
             self.error(
@@ -5323,16 +5312,8 @@ impl<'a> Checker<'a> {
             );
             return with_error(ty);
         }
-        match &self.impl_type {
-            Some(Some(impl_type)) if *impl_type == ty => {}
-            Some(None) => {}
-            _ => {
-                self.error(span, CheckError::ConstructedOutsideImpl(ty.clone()));
-                return with_error(ty);
-            }
-        }
         let fields = self.fields(ty.id).to_vec();
-        let name = type_name.to_string();
+        let name = ty.to_string();
 
         // Every field must be given, in the order the group declares them.
         if values.len() != fields.len() {
@@ -5937,7 +5918,7 @@ mod tests {
                 alias Output = Self
 
                 fn not() -> Self {
-                    return Flags { bits: .!self.bits }
+                    return Self { bits: .!self.bits }
                 }
             }
 
@@ -8333,7 +8314,7 @@ mod tests {
                     }
                     impl User {
                         static fn new() -> User {
-                            return User { age: 1 }
+                            return Self { age: 1 }
                         }
                     }
                     fn make() -> User {
@@ -8859,15 +8840,9 @@ mod tests {
                 "
             )
         };
-        assert_eq!(
-            pointed_at_top(&in_impl("Point { x: 1, y: true }")),
-            ["true"]
-        );
-        assert_eq!(pointed_at_top(&in_impl("Point { x: 1, z: 2 }")), ["z: 2"]);
-        assert_eq!(
-            pointed_at_top(&in_impl("Point { x: 1 }")),
-            ["Point { x: 1 }"]
-        );
+        assert_eq!(pointed_at_top(&in_impl("Self { x: 1, y: true }")), ["true"]);
+        assert_eq!(pointed_at_top(&in_impl("Self { x: 1, z: 2 }")), ["z: 2"]);
+        assert_eq!(pointed_at_top(&in_impl("Self { x: 1 }")), ["Self { x: 1 }"]);
     }
 
     #[test]
@@ -8974,7 +8949,7 @@ mod tests {
         }
         impl User {
             static fn new(age: Int, isAdmin: Bool) -> User {
-                return User { age: age, isAdmin: isAdmin }
+                return Self { age: age, isAdmin: isAdmin }
             }
         }
     ";
@@ -8992,15 +8967,15 @@ mod tests {
                 group Empty {{}}
                 impl Team {{
                     static fn new() -> Team {{
-                        return Team {{ lead: User.new(age: 30, isAdmin: false), size: 1 + 2 }}
+                        return Self {{ lead: User.new(age: 30, isAdmin: false), size: 1 + 2 }}
                     }}
                     fn withLead(lead: User) -> Team {{
-                        return Team {{ lead: lead, size: 1 }}
+                        return Self {{ lead: lead, size: 1 }}
                     }}
                 }}
                 impl Empty {{
                     static fn new() -> Empty {{
-                        let empty = Empty {{}}
+                        let empty = Self {{}}
                         return empty
                     }}
                 }}
@@ -9022,8 +8997,8 @@ mod tests {
                 {USER}
                 impl User {{
                     static fn make() {{
-                        let x: Int = User {{ age: 1, isAdmin: true }}
-                        let y = User {{ age: 1, isAdmin: true }} + 1
+                        let x: Int = Self {{ age: 1, isAdmin: true }}
+                        let y = Self {{ age: 1, isAdmin: true }} + 1
                     }}
                 }}
                 "
@@ -9043,9 +9018,9 @@ mod tests {
                 {USER}
                 impl User {{
                     static fn make() {{
-                        let a = User {{ age: 1 }}
-                        let b = User {{ age: 1, isAdmin: true, extra: 2 }}
-                        let c = User {{}}
+                        let a = Self {{ age: 1 }}
+                        let b = Self {{ age: 1, isAdmin: true, extra: 2 }}
+                        let c = Self {{}}
                     }}
                 }}
                 "
@@ -9066,8 +9041,8 @@ mod tests {
                 {USER}
                 impl User {{
                     static fn make() {{
-                        let a = User {{ isAdmin: true, age: 1 }}
-                        let b = User {{ age: 1, admin: true }}
+                        let a = Self {{ isAdmin: true, age: 1 }}
+                        let b = Self {{ age: 1, admin: true }}
                     }}
                 }}
                 "
@@ -9088,8 +9063,8 @@ mod tests {
                 {USER}
                 impl User {{
                     static fn make() {{
-                        let a = User {{ age: true, isAdmin: 1 }}
-                        let b = User {{ age: -true, isAdmin: false }}
+                        let a = Self {{ age: true, isAdmin: 1 }}
+                        let b = Self {{ age: -true, isAdmin: false }}
                     }}
                 }}
                 "
@@ -9098,27 +9073,6 @@ mod tests {
                 "field `age` of `User` expects `Int`, found `Bool`",
                 "field `isAdmin` of `User` expects `Bool`, found `Int`",
                 "operator `-` expects a type that implements `Negate`, found `Bool`",
-            ]
-        );
-    }
-
-    #[test]
-    fn constructors_need_a_group() {
-        assert_eq!(
-            messages(
-                "
-                let x = 1
-                fn f() {}
-                let a = Missing { value: y }
-                let b = x {}
-                let c = f {}
-                "
-            ),
-            [
-                "`y` is not declared",
-                "unknown type `Missing`",
-                "`x` is not a type",
-                "`f` is not a type",
             ]
         );
     }
@@ -9133,7 +9087,7 @@ mod tests {
                 }
                 impl Box {
                     static fn make() -> Box {
-                        return Box { value: 1 }
+                        return Self { value: 1 }
                     }
                 }
                 "
@@ -9154,22 +9108,18 @@ mod tests {
                     use ./users/user
                     impl User {
                         static fn admin(age: Int) -> User {
-                            return User { age: age, isAdmin: true }
+                            return Self { age: age, isAdmin: true }
                         }
                         static fn guest() -> User {
                             return User.new(age: 3, isAdmin: false)
                         }
                     }
-                    let a = user::User { age: 1, isAdmin: true }
                     let b: User = User.guest()
                     ",
                 ),
                 ("/users/user", USER),
             ]),
-            [
-                "/main: `User` can only be constructed in `/users/user`, which declares it",
-                "/main: `User` can only be constructed in `/users/user`, which declares it",
-            ]
+            ["/main: `User` can only be constructed in `/users/user`, which declares it"]
         );
     }
 
@@ -9180,11 +9130,21 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            messages(
+            messages_top(
                 "
-                let a = Int {}
-                let b = core::Bool { value: c }
-                let d = 1.value
+                impl Int {
+                    static fn made() -> Int {
+                        return Self {}
+                    }
+                }
+                impl Bool {
+                    static fn made() -> Bool {
+                        return Self { value: c }
+                    }
+                }
+                fn f() {
+                    let d = 1.value
+                }
                 "
             ),
             [
@@ -9207,7 +9167,7 @@ mod tests {
                     let age = 1
                     impl User {{
                         static fn make() -> User {{
-                            return User {{ age: age, isAdmin: true }}
+                            return Self {{ age: age, isAdmin: true }}
                         }}
                     }}
                     // A value can't contain itself.
@@ -9283,7 +9243,7 @@ mod tests {
         group Counter {}
         impl Counter {
             static fn new() -> Counter {
-                return Counter {}
+                return Self {}
             }
             fn me() -> Counter {
                 return self
@@ -9543,7 +9503,7 @@ mod tests {
                 ),
                 (
                     "/users/user",
-                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}"
+                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn Self {}\n}\n}"
                 ),
                 (
                     "/users/score",
@@ -9592,7 +9552,7 @@ mod tests {
                 ),
                 (
                     "/user",
-                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn User {}\n}\n}"
+                    "group User {}\nimpl User {\nstatic fn new() -> User {\nreturn Self {}\n}\n}"
                 ),
                 ("/score", score),
             ]),
@@ -9679,7 +9639,7 @@ mod tests {
                 let x: Int = Counter.new().once()
                 impl Counter {
                     static fn new() -> Counter {
-                        return Counter {}
+                        return Self {}
                     }
                     fn once() -> Int {
                         return 1
@@ -9719,7 +9679,7 @@ mod tests {
         }
         impl User {
             static fn new(age: Int, isAdmin: Bool) -> User {
-                return User { age: age, isAdmin: isAdmin }
+                return Self { age: age, isAdmin: isAdmin }
             }
         }
         group Team {
@@ -9728,7 +9688,7 @@ mod tests {
         }
         impl Team {
             static fn new(lead: User, size: Int) -> Team {
-                return Team { lead: lead, size: size }
+                return Self { lead: lead, size: size }
             }
         }
     ";
@@ -9930,7 +9890,7 @@ mod tests {
                     }
                     impl User {
                         static fn new(age: Int) -> User {
-                            return User { age: age }
+                            return Self { age: age }
                         }
                     }
                     ",
@@ -9977,10 +9937,10 @@ mod tests {
         }
         impl Point {
             static fn origin() -> Point {
-                return Point { x: Int.zero() }
+                return Self { x: Int.zero() }
             }
             static fn at(x: Int) -> Point {
-                return Point { x: x }
+                return Self { x: x }
             }
             fn moved(by amount: Int) -> Point {
                 return Point.at(x: self.x + amount)
@@ -10026,7 +9986,7 @@ mod tests {
                     group Point {}
                     impl Point {
                         static fn origin() -> Point {
-                            return Point {}
+                            return Self {}
                         }
                     }
                     ",
@@ -10165,7 +10125,7 @@ mod tests {
                         return 1
                     }
                     static fn make() -> Point {
-                        return Point { x: 0 }
+                        return Self { x: 0 }
                     }
                 }
                 let a: Int = Point.make().x
@@ -10219,7 +10179,7 @@ mod tests {
                 let p: Point = Point.origin()
                 impl Point {
                     static fn origin() -> Point {
-                        return Point {}
+                        return Self {}
                     }
                 }
                 group Point {}
@@ -10267,7 +10227,7 @@ mod tests {
 
                 fn moved(by amount: Int) -> Self {
                     let moved: Self = Self.origin()
-                    return Point { x: self.x + moved.x + amount }
+                    return Self { x: self.x + moved.x + amount }
                 }
 
                 fn is_same(as other: Self) -> Bool {
@@ -10399,7 +10359,7 @@ mod tests {
                 }}
 
                 static fn zero() -> Custom {{
-                    return Custom {{ value: 0 }}
+                    return Self {{ value: 0 }}
                 }}
             }}
 
@@ -10518,7 +10478,7 @@ mod tests {
 
             impl Flags with Not {
                 fn not() -> Self {
-                    return Flags { bits: .!self.bits }
+                    return Self { bits: .!self.bits }
                 }
             }
 
@@ -11540,7 +11500,7 @@ primitive Float"
                     }
                     impl User {
                         static fn new(age: Int) -> User {
-                            return User { age: age }
+                            return Self { age: age }
                         }
                     }
                     let maxAge = 120
@@ -11553,7 +11513,7 @@ primitive Float"
                     group Admin {}
                     impl Admin {
                         static fn promote(user: User) -> Admin {
-                            return Admin {}
+                            return Self {}
                         }
                     }
                     ",
@@ -11744,32 +11704,35 @@ primitive Float"
     }
 
     #[test]
-    fn groups_are_only_constructed_in_their_impls() {
+    fn self_constructs_the_type_of_its_impl() {
+        // So it's only in an `impl`, and never constructs another type. Its
+        // values are still checked outside one.
         assert_eq!(
             messages_top(
                 "
                 group Point {}
                 group Other {}
-                let a = Point {}
+                let a = Self { value: y }
                 fn f() -> Point {
-                    return Point {}
+                    return Self {}
                 }
                 impl Other {
                     static fn make() -> Point {
-                        return Point {}
-                    }
-                    fn method() -> Point {
-                        return Point {}
+                        return Self {}
                     }
                 }
-                let b = Void {}
+                impl Void {
+                    static fn again() -> Void {
+                        return Self {}
+                    }
+                }
                 "
             ),
             [
-                "`Point` can only be constructed inside an `impl Point`",
-                "`Point` can only be constructed inside an `impl Point`",
-                "`Point` can only be constructed inside an `impl Point`",
-                "`Point` can only be constructed inside an `impl Point`",
+                "`y` is not declared",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`Self` can only be used inside an `impl` or a `trait`",
+                "`make` must return `Point`, found `Other`",
                 "`Void` can only be constructed in `stdlib/core`, which declares it",
             ]
         );
@@ -11783,11 +11746,11 @@ primitive Float"
                 group Point {}
                 impl Point {
                     static fn origin() -> Point {
-                        return Point {}
+                        return Self {}
                     }
                     fn copy() -> Point {
                         fn make() -> Point {
-                            return Point {}
+                            return Self {}
                         }
                         return make()
                     }
@@ -11807,7 +11770,7 @@ primitive Float"
                 group Point {}
                 impl Missing {
                     static fn make() -> Point {
-                        return Point {}
+                        return Self {}
                     }
                 }
                 "
@@ -12258,7 +12221,6 @@ primitive Float"
                 let b = ChoiceTag<Shape>.new(Shape.empty())
                 let c = ChoiceTag<Shape>.new()
                 let d = ChoiceTag.new()
-                let e = ChoiceTag<Shape> {{}}
                 "
             )),
             [
@@ -12266,7 +12228,6 @@ primitive Float"
                 "argument to `ChoiceTag<Shape>.new` is missing the label `of`",
                 "`ChoiceTag<Shape>.new` takes 1 argument, found 0",
                 "the arguments of `ChoiceTag` can't be inferred here, so they must be given, as in `ChoiceTag<...>`",
-                "`ChoiceTag<Shape>` is a primitive, so it can only be created by the compiler, such as with a literal",
             ]
         );
     }
@@ -12392,7 +12353,7 @@ primitive Float"
                 {SHAPE}
                 impl Shape {{
                     static fn new() -> Shape {{
-                        return Shape {{}}
+                        return Self {{}}
                     }}
                 }}
                 "
@@ -13000,7 +12961,6 @@ primitive Float"
                 let a: Fn<Int, Int> = add
                 let b: Fn<Int> = add
                 let c = add.missing
-                let d = Fn<Int, Int> {}
                 let g = add
                 let h: Bool = g(a: 1, b: 2)
                 let i = g(a: 1)
@@ -13012,7 +12972,6 @@ primitive Float"
                 "cannot assign `Fn<(a: Int, b: Int), Int>` to `a`, which has type `Fn<Int, Int>`",
                 "`Fn` has 2 generic parameters, but was given 1",
                 "`Fn<(a: Int, b: Int), Int>` has no field or method `missing`",
-                "`Fn<Int, Int>` is a primitive, so it can only be created by the compiler, such as with a literal",
                 "cannot assign `Int` to `h`, which has type `Bool`",
                 "`g` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
             ]
@@ -13293,7 +13252,7 @@ primitive Float"
 
         impl Box {
             static fn of(_ value: Self.T) -> Self {
-                return Box { value: value }
+                return Self { value: value }
             }
 
             fn get() -> Self.T {
@@ -13549,7 +13508,7 @@ primitive Float"
             {GENERICS}
             impl Box {{
                 fn rebuilt() -> Self {{
-                    return Box {{ value: self.value }}
+                    return Self {{ value: self.value }}
                 }}
             }}
 
@@ -13894,7 +13853,7 @@ primitive Float"
                 let b = Never.anything(1)
                 impl Never {
                     static fn new() -> Never {
-                        return Never {}
+                        return Self {}
                     }
                 }
                 "
@@ -13970,7 +13929,7 @@ primitive Float"
                     }
                     impl Spot {
                         static fn at(x: Int) -> Point {
-                            return Spot { x: x }
+                            return Self { x: x }
                         }
                     }
                     ",
@@ -14125,7 +14084,7 @@ primitive Float"
 
             impl Pixel {
                 static fn new(red: IntU8) -> Pixel {
-                    return Pixel { red: 200 }
+                    return Self { red: 200 }
                 }
 
                 fn brighter(by amount: IntU8) -> IntU8 {

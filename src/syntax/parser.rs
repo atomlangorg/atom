@@ -385,7 +385,9 @@ where
         _ => ExprKind::Tuple(values),
     });
 
-    // `Type { field: value, ... }`. Every field must be labelled.
+    // `Self { field: value, ... }`. Every field must be labelled. Only `Self`
+    // can be constructed, so in `if done { ... }`, the `{` always starts the
+    // `if`'s block.
     let field_value = ident
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
@@ -394,10 +396,9 @@ where
             value,
             span: Span::from(e.span()),
         });
-    let construct = named_type
-        .clone()
-        .then(comma_list(field_value, Token::LBrace, Token::RBrace))
-        .map(|(ty, fields)| ExprKind::Construct { ty, fields });
+    let construct = just(Token::SelfType)
+        .ignore_then(comma_list(field_value, Token::LBrace, Token::RBrace))
+        .map(ExprKind::Construct);
 
     // `Optional<Int>` before a `.`, as in `Optional<Int>.none`. In `a < b`,
     // there's no `>` and `.`, so it's a comparison.
@@ -441,25 +442,8 @@ where
 
     expr.define(operators(with_members(
         literal
-            .or(self_value.clone())
-            .or(construct)
-            .or(generic_type.clone())
-            .or(name_or_call.clone())
-            .or(parenthesised.clone())
-            .map_with(|kind, e| Expr {
-                kind,
-                span: Span::from(e.span()),
-            })
-            .labelled("expression")
-            .boxed(),
-    )));
-
-    // An `if` condition, or the value of a `match`, can't construct a group
-    // outside of parentheses or arguments, since in `if done { ... }`, the
-    // `{` starts the `if`'s block rather than constructing `done`.
-    let condition = operators(with_members(
-        literal
             .or(self_value)
+            .or(construct)
             .or(generic_type)
             .or(name_or_call)
             .or(parenthesised)
@@ -469,7 +453,7 @@ where
             })
             .labelled("expression")
             .boxed(),
-    ));
+    )));
 
     // `_`, `let name`, a literal, a tuple of patterns, or `Type.option` with
     // an optional pattern for its value, as in `Shape.circle(let radius)`.
@@ -696,7 +680,7 @@ where
                 just(Token::Else).ignore_then(block.clone().or(if_.map(|stmt| vec![stmt])));
 
             just(Token::If)
-                .ignore_then(condition.clone())
+                .ignore_then(expr.clone())
                 .map_with(|cond, e| (cond, Span::from(e.span())))
                 .then(block.clone())
                 .then(else_block.or_not())
@@ -720,7 +704,7 @@ where
         // Like a block, one option per line with blank lines allowed, and the
         // `{` on the same line as `match`.
         let match_ = just(Token::Match)
-            .ignore_then(condition.clone())
+            .ignore_then(expr.clone())
             .map_with(|value, e| (value, Span::from(e.span())))
             .then(
                 newlines
@@ -1178,7 +1162,7 @@ mod tests {
             "a.b.c",
             "a.f(to: 1).b",
             "-a.b",
-            "Point { x: 1 }",
+            "Self { x: 1 }",
             "Box<Int>.none",
         ] {
             assert_eq!(spanned_value(value), value);
@@ -1226,12 +1210,12 @@ mod tests {
         assert_eq!(text(src, args[0].value.span), "1 + 2");
         assert_eq!(text(src, args[1].span), "3");
 
-        let src = "let x = Point { x: 1, y: 2 }";
+        let src = "let x = Self { x: 1, y: 2 }";
         let mut program = parse_spanned(src);
         let StmtKind::Decl { value, .. } = program.remove(0).kind else {
             panic!("expected a declaration");
         };
-        let ExprKind::Construct { fields, .. } = value.kind else {
+        let ExprKind::Construct(fields) = value.kind else {
             panic!("expected a group being constructed");
         };
         assert_eq!(text(src, fields[1].span), "y: 2");
@@ -1655,10 +1639,6 @@ mod tests {
 
     #[test]
     fn parses_generic_types_in_expressions() {
-        let int_box = || TypeName::Generic {
-            name: Name::new("Box"),
-            args: vec![TypeName::new("Int")],
-        };
         assert_eq!(
             parse_expr("Optional<Int>.none"),
             field_access(
@@ -1669,18 +1649,7 @@ mod tests {
                 "none"
             )
         );
-        assert_eq!(
-            parse_expr("Box<Int> { value: 1 }"),
-            expr_node(ExprKind::Construct {
-                ty: int_box(),
-                fields: vec![FieldValue {
-                    name: "value".to_string(),
-                    value: expr_node(ExprKind::Int(1)),
-                    span: Span::default()
-                }],
-            })
-        );
-        // Without a `.` or `{` after the `>`, they're comparisons.
+        // Without a `.` after the `>`, they're comparisons.
         assert_eq!(parse_expr("a < b"), *bin(var("a"), BinOp::Lt, var("b")));
         assert_eq!(
             parse_expr("f(a < b, c > d)"),
@@ -3200,25 +3169,6 @@ mod tests {
     }
 
     #[test]
-    fn match_values_need_parentheses_to_construct() {
-        // The `{` starts the options, not a constructor.
-        assert_eq!(
-            parse_body("match s {}"),
-            Ok(vec![stmt_node(StmtKind::Match {
-                value: *var("s"),
-                arms: vec![],
-            })])
-        );
-        assert_eq!(
-            parse_body("match (S {}) {}"),
-            Ok(vec![stmt_node(StmtKind::Match {
-                value: expr_node(ExprKind::Paren(Box::new(construct(Name::new("S"), vec![])))),
-                arms: vec![],
-            })])
-        );
-    }
-
-    #[test]
     fn rejects_malformed_matches() {
         for src in [
             // Missing parts.
@@ -3596,120 +3546,103 @@ mod tests {
         }
     }
 
-    fn construct(ty: Name, fields: Vec<FieldValue>) -> Expr {
-        expr_node(ExprKind::Construct {
-            ty: TypeName::Named(ty),
-            fields,
-        })
+    fn construct(fields: Vec<FieldValue>) -> Expr {
+        expr_node(ExprKind::Construct(fields))
     }
 
     #[test]
     fn parses_constructors() {
         assert_eq!(
-            parse_expr("User { age: 42, isAdmin: true }"),
-            construct(
-                Name::new("User"),
-                vec![
-                    field_value("age", expr_node(ExprKind::Int(42))),
-                    field_value("isAdmin", expr_node(ExprKind::Bool(true))),
-                ],
-            )
+            parse_expr("Self { age: 42, isAdmin: true }"),
+            construct(vec![
+                field_value("age", expr_node(ExprKind::Int(42))),
+                field_value("isAdmin", expr_node(ExprKind::Bool(true))),
+            ],)
         );
+        assert_eq!(parse_expr("Self {}"), construct(vec![]));
         assert_eq!(
-            parse_expr("Empty {}"),
-            construct(Name::new("Empty"), vec![])
-        );
-        assert_eq!(
-            parse_expr("user::User {age:1+2,isAdmin:f()}"),
-            construct(
-                qualified("user", "User"),
-                vec![
-                    field_value("age", *bin(int(1), BinOp::Add, int(2))),
-                    field_value("isAdmin", *call("f", vec![])),
-                ],
-            )
+            parse_expr("Self {age:1+2,isAdmin:f()}"),
+            construct(vec![
+                field_value("age", *bin(int(1), BinOp::Add, int(2))),
+                field_value("isAdmin", *call("f", vec![])),
+            ],)
         );
     }
 
     #[test]
     fn constructors_nest_and_bind_tightest() {
         assert_eq!(
-            parse_expr("-Team { lead: User { age: 1 } } * 2"),
+            parse_expr("-Self { lead: Self { age: 1 } } * 2"),
             *bin(
-                neg(Box::new(construct(
-                    Name::new("Team"),
-                    vec![field_value(
-                        "lead",
-                        construct(
-                            Name::new("User"),
-                            vec![field_value("age", expr_node(ExprKind::Int(1)))]
-                        ),
-                    )],
-                ))),
+                neg(Box::new(construct(vec![field_value(
+                    "lead",
+                    construct(vec![field_value("age", expr_node(ExprKind::Int(1)))]),
+                )],))),
                 BinOp::Mul,
                 int(2),
             )
         );
         assert_eq!(
-            parse_expr("f(user: User {})"),
-            *call(
-                "f",
-                vec![arg(Some("user"), construct(Name::new("User"), vec![]))]
-            )
+            parse_expr("f(user: Self {})"),
+            *call("f", vec![arg(Some("user"), construct(vec![]))])
         );
     }
 
     #[test]
-    fn if_conditions_need_parentheses_to_construct() {
-        // The `{` starts the block, not a constructor.
+    fn conditions_are_any_expression() {
+        // Only `Self` can be constructed, so after any other value, the `{`
+        // starts the block or the options.
         assert_eq!(
             parse_body("if done {}"),
             Ok(vec![if_(*var("done"), vec![], None)])
         );
         assert_eq!(
-            parse_body("if (Flag {}) {}"),
-            Ok(vec![if_(
-                *paren(Box::new(construct(Name::new("Flag"), vec![]))),
-                vec![],
-                None
-            )])
+            parse_body("match s {}"),
+            Ok(vec![stmt_node(StmtKind::Match {
+                value: *var("s"),
+                arms: vec![],
+            })])
+        );
+        let on = || construct(vec![field_value("on", expr_node(ExprKind::Bool(true)))]);
+        assert_eq!(
+            parse_body("if Self { on: true } {}"),
+            Ok(vec![if_(on(), vec![], None)])
         );
         assert_eq!(
-            parse_body("if f(flag: Flag {}) {}"),
+            parse_body("if f(flag: Self { on: true }) {}"),
             Ok(vec![if_(
-                *call(
-                    "f",
-                    vec![arg(Some("flag"), construct(Name::new("Flag"), vec![]))]
-                ),
+                *call("f", vec![arg(Some("flag"), on())]),
                 vec![],
                 None,
             )])
         );
-        assert!(parse_body("if Flag { on: true } {}").is_err());
     }
 
     #[test]
     fn rejects_constructor_statements() {
         // Only calls can be statements.
-        assert!(parse_body("User {}").is_err());
-        assert!(parse_body("User { age: 1 }").is_err());
+        assert!(parse_body("Self {}").is_err());
+        assert!(parse_body("Self { age: 1 }").is_err());
     }
 
     #[test]
     fn rejects_malformed_constructors() {
         for src in [
-            "x = User {",
-            "x = User { age }",
-            "x = User { age: }",
-            "x = User { 42 }",
-            "x = User { age = 42 }",
-            "x = User { age: 1,, }",
-            "x = User { age: 1 isAdmin: true }",
-            "x = User { , }",
-            "x = User { _: 1 }",
-            "x = User\n{}",
+            "x = Self {",
+            "x = Self { age }",
+            "x = Self { age: }",
+            "x = Self { 42 }",
+            "x = Self { age = 42 }",
+            "x = Self { age: 1,, }",
+            "x = Self { age: 1 isAdmin: true }",
+            "x = Self { , }",
+            "x = Self { _: 1 }",
+            "x = Self\n{}",
             "x = 1 {}",
-            "x = (User) {}",
+            "x = (Self) {}",
+            // Only `Self` can be constructed.
+            "x = User { age: 1 }",
+            "x = Box<Int> { value: 1 }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
@@ -3718,24 +3651,21 @@ mod tests {
     #[test]
     fn parses_multiline_constructors() {
         let user = || {
-            construct(
-                Name::new("User"),
-                vec![
-                    field_value("age", expr_node(ExprKind::Int(42))),
-                    field_value("isAdmin", expr_node(ExprKind::Bool(true))),
-                ],
-            )
+            construct(vec![
+                field_value("age", expr_node(ExprKind::Int(42))),
+                field_value("isAdmin", expr_node(ExprKind::Bool(true))),
+            ])
         };
         assert_eq!(
             parse_body(
                 "
-                let a = User {
+                let a = Self {
                     age: 42,
                     isAdmin: true
                 }
-                let b = User { age: 42,
+                let b = Self { age: 42,
                     isAdmin: true }
-                let c = User {
+                let c = Self {
 
                     // The age in years.
                     age: 42, /* Never negative. */
@@ -3750,10 +3680,7 @@ mod tests {
                 decl(Mutability::Let, "c", None, user()),
             ])
         );
-        assert_eq!(
-            parse_expr("Empty {\n\n}"),
-            construct(Name::new("Empty"), vec![])
-        );
+        assert_eq!(parse_expr("Self {\n\n}"), construct(vec![]));
     }
 
     #[test]
@@ -3761,11 +3688,11 @@ mod tests {
         assert_eq!(
             parse_body(
                 "
-                let t = Team {
-                    lead: User {
+                let t = Self {
+                    lead: Self {
                         age: 30
                     },
-                    size: f(x: Point {
+                    size: f(x: Self {
                         x: 1
                     })
                 }
@@ -3775,31 +3702,22 @@ mod tests {
                 Mutability::Let,
                 "t",
                 None,
-                construct(
-                    Name::new("Team"),
-                    vec![
-                        field_value(
-                            "lead",
-                            construct(
-                                Name::new("User"),
-                                vec![field_value("age", expr_node(ExprKind::Int(30)))]
-                            ),
+                construct(vec![
+                    field_value(
+                        "lead",
+                        construct(vec![field_value("age", expr_node(ExprKind::Int(30)))]),
+                    ),
+                    field_value(
+                        "size",
+                        *call(
+                            "f",
+                            vec![arg(
+                                Some("x"),
+                                construct(vec![field_value("x", expr_node(ExprKind::Int(1)))]),
+                            )],
                         ),
-                        field_value(
-                            "size",
-                            *call(
-                                "f",
-                                vec![arg(
-                                    Some("x"),
-                                    construct(
-                                        Name::new("Point"),
-                                        vec![field_value("x", expr_node(ExprKind::Int(1)))]
-                                    ),
-                                )],
-                            ),
-                        ),
-                    ],
-                ),
+                    ),
+                ],),
             )])
         );
     }
@@ -3809,28 +3727,28 @@ mod tests {
         for src in [
             // Fields still need commas between them.
             "
-            x = User {
+            x = Self {
                 age: 42
                 isAdmin: true
             }
             ",
             // The comma must come straight after the value.
             "
-            x = User {
+            x = Self {
                 age: 42
                 , isAdmin: true
             }
             ",
             // A field can't be split across lines.
             "
-            x = User {
+            x = Self {
                 age:
                     42
             }
             ",
-            // The `{` must be on the same line as the type.
+            // The `{` must be on the same line as `Self`.
             "
-            x = User
+            x = Self
             {
                 age: 42
             }
@@ -3892,7 +3810,7 @@ mod tests {
                     a: g(
                         1
                     ),
-                    b: User {
+                    b: Self {
                         age: h(
                             c: 2
                         )
@@ -3914,16 +3832,10 @@ mod tests {
                             ),
                             arg(
                                 Some("b"),
-                                construct(
-                                    Name::new("User"),
-                                    vec![field_value(
-                                        "age",
-                                        *call(
-                                            "h",
-                                            vec![arg(Some("c"), expr_node(ExprKind::Int(2)))]
-                                        ),
-                                    )],
-                                ),
+                                construct(vec![field_value(
+                                    "age",
+                                    *call("h", vec![arg(Some("c"), expr_node(ExprKind::Int(2)))]),
+                                )],),
                             ),
                         ],
                     ),
@@ -3980,8 +3892,8 @@ mod tests {
     fn allows_trailing_commas() {
         assert_eq!(parse_expr("f(a: 1,)"), parse_expr("f(a: 1)"));
         assert_eq!(
-            parse_expr("User { age: 1, }"),
-            parse_expr("User { age: 1 }")
+            parse_expr("Self { age: 1, }"),
+            parse_expr("Self { age: 1 }")
         );
         assert_eq!(
             parse_body(
@@ -3999,7 +3911,7 @@ mod tests {
     #[test]
     fn warns_about_trailing_commas_on_one_line() {
         assert_eq!(
-            warnings("f(a: 1,)\nx = User { age: 1, }"),
+            warnings("f(a: 1,)\nx = Self { age: 1, }"),
             [
                 WarningKind::RedundantTrailingComma,
                 WarningKind::RedundantTrailingComma,
@@ -4026,7 +3938,7 @@ mod tests {
                     a: 1,
                     b: 2
                 )
-                x = User {
+                x = Self {
                     age: 1
                 }
                 "
@@ -4050,14 +3962,14 @@ mod tests {
                 )
                 f(a: 1,
                     b: 2)
-                x = User {
+                x = Self {
                     age: 1,
 
                 }
                 f()
                 f(
                 )
-                x = Empty {}
+                x = Self {}
                 "
             ),
             []
@@ -4110,7 +4022,7 @@ mod tests {
     fn warnings_from_abandoned_parses_are_dropped() {
         // `f(b: 1,)` is parsed while trying to read a constructor, which then
         // fails at `c`, so its warning is dropped along with it.
-        let (result, warnings) = parse_with_warnings("let x = User { a: f(b: 1,), c }");
+        let (result, warnings) = parse_with_warnings("let x = Self { a: f(b: 1,), c }");
         assert!(result.is_err());
         assert_eq!(warnings, []);
     }
@@ -4342,8 +4254,8 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_expr("User {}.f()"),
-            method_call(construct(Name::new("User"), vec![]), "f", vec![])
+            parse_expr("Self {}.f()"),
+            method_call(construct(vec![]), "f", vec![])
         );
         assert_eq!(
             parse_expr(
@@ -4662,7 +4574,7 @@ mod tests {
             "trait And { fn and(_ rhs: Self) -> Bool fn or() }",
             "trait other::And {}",
             "impl Custom with {}",
-            "impl Custom with And, Or {}",
+            "impl Custom with And, Self {}",
             "impl Custom with And with Or {}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
@@ -4679,14 +4591,11 @@ mod tests {
                 mutability: Mutability::Let,
                 name: "p".to_string(),
                 ty: Some(TypeName::new("Self")),
-                value: construct(
-                    Name::new("Self"),
-                    vec![FieldValue {
-                        name: "x".to_string(),
-                        value: *int(1),
-                        span: Span::default()
-                    }],
-                ),
+                value: construct(vec![FieldValue {
+                    name: "x".to_string(),
+                    value: *int(1),
+                    span: Span::default()
+                }],),
             })])
         );
         assert_eq!(
@@ -4727,12 +4636,9 @@ mod tests {
             field_access(expr_node(ExprKind::SelfValue), "age")
         );
         assert_eq!(
-            parse_expr("User { age: 1 }.age"),
+            parse_expr("Self { age: 1 }.age"),
             field_access(
-                construct(
-                    Name::new("User"),
-                    vec![field_value("age", expr_node(ExprKind::Int(1)))]
-                ),
+                construct(vec![field_value("age", expr_node(ExprKind::Int(1)))]),
                 "age"
             )
         );

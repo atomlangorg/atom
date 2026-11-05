@@ -47,7 +47,7 @@ group Void {}
 impl Void {
     // Creates a `Void`, for when one is needed as a value.
     static fn new() -> Void {
-        return Void {}
+        return Self {}
     }
 }
 

@@ -11,10 +11,10 @@ fn describe(user: User) -> Int {
 }
 
 impl User {
-    // Groups can only be constructed inside their own `impl`, so other code
-    // uses `User.new(...)`.
+    // Groups are constructed with `Self { ... }`, which only works inside
+    // their own `impl`, so other code uses `User.new(...)`.
     static fn new(age: Int, isAdmin: Bool) -> User {
-        return User { age: age, isAdmin: isAdmin }
+        return Self { age: age, isAdmin: isAdmin }
     }
 
     // Methods can only reach each other through `self`.

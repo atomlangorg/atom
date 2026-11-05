@@ -377,13 +377,9 @@ pub enum ExprKind {
         callee: Name,
         args: Vec<Arg>,
     },
-    /// `Type { field: value, ... }`: constructs a group, giving every field
-    /// a value in the order they're declared. The type is a name, which can
-    /// be given generic arguments, as in `Box<Int> { ... }`.
-    Construct {
-        ty: TypeName,
-        fields: Vec<FieldValue>,
-    },
+    /// `Self { field: value, ... }`: constructs the group that `Self` is,
+    /// giving every field a value in the order they're declared.
+    Construct(Vec<FieldValue>),
     /// `Type<Arg, ...>` before a `.`, as in `Optional<Int>.none`: a generic
     /// type given its arguments, whose options and static functions can be
     /// used.
