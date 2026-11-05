@@ -1026,9 +1026,13 @@ struct TraitInfo<'a> {
     /// implementation gives.
     aliases: &'a [String],
     functions: &'a [TraitFunction],
+    /// A type standing for `Self`, then one for each of `aliases`, since
+    /// they're a different type in each `impl`.
+    stand_ins: Vec<Type>,
     /// For each of `functions`, its parameter types and return type, which
-    /// are `None` if they're unknown. Worked out once types are defined.
-    signatures: Vec<(Vec<Option<TraitType>>, Option<TraitType>)>,
+    /// are `None` if they're unknown, and use `stand_ins`. Worked out once
+    /// types are defined.
+    signatures: Vec<(Vec<Option<Type>>, Option<Type>)>,
 }
 
 /// Which values a pattern matches, for checking that a `match`'s patterns
@@ -1104,17 +1108,6 @@ enum ImplAliasType {
     /// Not given, so it's being inferred from the `impl`'s signatures, which
     /// can't use it.
     Inferring,
-}
-
-/// A type in a trait's function signature.
-#[derive(Debug, Clone)]
-enum TraitType {
-    /// `Self`, which is whichever type implements the trait.
-    SelfType,
-    /// One of the trait's aliases, as an index into `TraitInfo::aliases`,
-    /// whose type each implementation gives.
-    Alias(usize),
-    Type(Type),
 }
 
 /// A value declared at the top level of a file. Its type is worked out when
@@ -2945,6 +2938,7 @@ impl<'a> Checker<'a> {
             file: self.file,
             aliases,
             functions,
+            stand_ins: vec![],
             signatures: vec![],
         });
         self.declare(name, span, Binding::Trait(self.traits.len() - 1));
@@ -2989,6 +2983,21 @@ impl<'a> Checker<'a> {
             self.error(span, error);
         }
 
+        // The signatures are resolved with `Self` and the aliases standing
+        // for their stand-ins.
+        let stand_ins: Vec<_> = iter::once("Self")
+            .chain(aliases.iter().map(String::as_str))
+            .map(|name| Type {
+                id: self.add_type(name.to_string(), file, TypeKind::Group(vec![])),
+                name: name.to_string(),
+            })
+            .collect();
+        let outer_impl_type = self.impl_type.replace(Some(stand_ins[0].clone()));
+        let alias_types = aliases.iter().zip(&stand_ins[1..]);
+        let alias_types =
+            alias_types.map(|(alias, ty)| (alias.as_str(), ImplAliasType::Known(Some(ty.clone()))));
+        self.impl_aliases.push(alias_types.collect());
+        self.current_impl_aliases = Some(self.impl_aliases.len() - 1);
         let mut signatures = vec![];
         for function in functions {
             let params = function
@@ -2998,29 +3007,23 @@ impl<'a> Checker<'a> {
                 .collect();
             signatures.push((params, self.trait_type(aliases, &function.ret)));
         }
+        self.impl_type = outer_impl_type;
+        self.current_impl_aliases = None;
+        self.traits[index].stand_ins = stand_ins;
         self.traits[index].signatures = signatures;
     }
 
     /// Resolves the type `ty` in the signature of a trait with `aliases`.
-    fn trait_type(&mut self, aliases: &[String], ty: &TypeName) -> Option<TraitType> {
-        let TypeName::Named(name) = ty else {
-            // `Self` and the aliases are a different type in each `impl`, so
-            // they can't be in a tuple, whose type is always the same.
-            if let Some(name) = trait_names(ty, aliases).next() {
-                self.error(name.span, CheckError::TraitTypeInTuple(name.name.clone()));
-                return None;
-            }
-            return self.resolve_type(ty).map(TraitType::Type);
-        };
-        if name.is_self() {
-            return Some(TraitType::SelfType);
-        }
-        if name.file.is_none()
-            && let Some(index) = aliases.iter().position(|alias| *alias == name.name)
+    fn trait_type(&mut self, aliases: &[String], ty: &TypeName) -> Option<Type> {
+        // `Self` and the aliases are a different type in each `impl`, so
+        // they can't be inside another type, which is always the same.
+        if !matches!(ty, TypeName::Named(_))
+            && let Some(name) = trait_names(ty, aliases).next()
         {
-            return Some(TraitType::Alias(index));
+            self.error(name.span, CheckError::TraitTypeInTuple(name.name.clone()));
+            return None;
         }
-        self.resolve_named_type(name).map(TraitType::Type)
+        self.resolve_type(ty)
     }
 
     /// Works out the types of an `impl`'s `aliases`, which can use `Self`
@@ -3074,14 +3077,14 @@ impl<'a> Checker<'a> {
         let trait_ = &self.traits[trait_index];
         let mut inferred = vec![];
         let mut errors = vec![];
-        for (alias, name) in trait_.aliases.iter().enumerate() {
+        for (name, stand_in) in trait_.aliases.iter().zip(&trait_.stand_ins[1..]) {
             if !matches!(
                 self.impl_aliases[aliases].get(name.as_str()),
                 Some(ImplAliasType::Inferring)
             ) {
                 continue;
             }
-            let is_alias = |expected: &Option<TraitType>| matches!(expected, Some(TraitType::Alias(found)) if *found == alias);
+            let is_alias = |expected: &Option<Type>| expected.as_ref() == Some(stand_in);
             let uses_alias =
                 |(params, returns): &(Vec<_>, _)| params.iter().any(is_alias) || is_alias(returns);
             // A function that's missing is reported by `check_implements`,
@@ -3242,19 +3245,22 @@ impl<'a> Checker<'a> {
             alias_types,
         } = implementation;
         let trait_ = &self.traits[index];
-        let alias_type = |alias: usize| {
-            let types = &self.impl_aliases[alias_types?];
-            match types.get(trait_.aliases[alias].as_str())? {
-                ImplAliasType::Known(ty) => ty.as_ref(),
-                ImplAliasType::Inferring => None,
-            }
+        // What `Self` and each alias stand for in this `impl`, or `None` for
+        // an alias that couldn't be worked out.
+        let alias_type = |alias: &str| match self.impl_aliases[alias_types?].get(alias)? {
+            ImplAliasType::Known(ty) => ty.as_ref(),
+            ImplAliasType::Inferring => None,
         };
-        let matches = |found: &Option<Type>, expected: &Option<TraitType>| match (found, expected) {
-            (Some(found), Some(TraitType::SelfType)) => found == self_ty,
-            (Some(found), Some(TraitType::Alias(alias))) => {
-                alias_type(*alias).is_none_or(|expected| found == expected)
-            }
-            (Some(found), Some(TraitType::Type(expected))) => found == expected,
+        let stands_for: HashMap<_, _> = iter::once(Some(self_ty))
+            .chain(trait_.aliases.iter().map(|alias| alias_type(alias)))
+            .zip(&trait_.stand_ins)
+            .map(|(ty, stand_in)| (stand_in.id, ty))
+            .collect();
+        let matches = |found: &Option<Type>, expected: &Option<Type>| match (found, expected) {
+            (Some(found), Some(expected)) => match stands_for.get(&expected.id) {
+                Some(stands_for) => stands_for.is_none_or(|expected| found == expected),
+                None => found == expected,
+            },
             // An unknown type has already been reported.
             _ => true,
         };
