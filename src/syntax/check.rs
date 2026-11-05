@@ -1330,6 +1330,32 @@ enum Pending<'a> {
     },
 }
 
+/// Where the code being checked is, which decides what its names refer to.
+#[derive(Default)]
+struct Context<'a> {
+    /// The index in `Checker::files` of the file it's in.
+    file: usize,
+    /// One scope per enclosing block inside functions, innermost last. Empty
+    /// at the top level, where names are in the file's own scope. Values,
+    /// functions and types all share the same names.
+    scopes: Vec<HashMap<&'a str, Binding>>,
+    /// The index in `scopes` of the current function's outermost scope. Names
+    /// can't be redeclared from here inwards.
+    fn_scope_start: usize,
+    current_fn: Option<FnContext<'a>>,
+    /// The type whose `impl` it's in, including inside functions nested in
+    /// its methods. Only it can be constructed. `Some(None)` if the `impl`'s
+    /// type is unknown.
+    impl_type: Option<Option<Type>>,
+    /// The index in `Checker::impl_aliases` of the aliases it can use, if
+    /// it's in an `impl` that gives any, including inside functions nested
+    /// in its methods.
+    impl_aliases: Option<usize>,
+    /// While a generic type is defined, its index in `Checker::templates`,
+    /// and the stand-ins for its parameters.
+    type_params: Option<(usize, Vec<Type>)>,
+}
+
 #[derive(Default)]
 struct Checker<'a> {
     /// The standard library first, then the project's files.
@@ -1343,36 +1369,17 @@ struct Checker<'a> {
     /// index of the function that a pointer to it really points to, which
     /// takes its `Input` as a single parameter.
     function_values: HashMap<usize, usize>,
-    /// The index in `files` of the file being checked.
-    file: usize,
-    /// One scope per enclosing block inside functions, innermost last. Empty
-    /// at the top level, where names are in the file's own scope. Values,
-    /// functions and types all share the same names.
-    scopes: Vec<HashMap<&'a str, Binding>>,
-    /// The index in `scopes` of the current function's outermost scope. Names
-    /// can't be redeclared from here inwards.
-    fn_scope_start: usize,
-    current_fn: Option<FnContext<'a>>,
-    /// The type whose `impl` the code being checked is in, including inside
-    /// functions nested in its methods. Only it can be constructed. `Some(None)`
-    /// if the `impl`'s type is unknown.
-    impl_type: Option<Option<Type>>,
+    /// Where the code being checked is.
+    cx: Context<'a>,
     /// The aliases of each `impl` with a trait, by name, whether they're
     /// given, such as `alias Rhs = Self`, or inferred.
     impl_aliases: Vec<HashMap<&'a str, ImplAliasType>>,
-    /// The index in `impl_aliases` of the aliases that the code being
-    /// checked can use, if it's in an `impl` that gives any, including inside
-    /// functions nested in its methods.
-    current_impl_aliases: Option<usize>,
     functions: Vec<Signature<'a>>,
     traits: Vec<TraitInfo<'a>>,
     templates: Vec<Template<'a>>,
     /// The `id` of each type made from a generic type, by the index in
     /// `templates` of what it's made from and its arguments' `id`s.
     instance_ids: HashMap<(usize, Vec<usize>), usize>,
-    /// While a generic type is defined, its index in `templates`, and the
-    /// stand-ins for its parameters.
-    type_params: Option<(usize, Vec<Type>)>,
     /// The types made from generic types whose fields or options haven't
     /// been made from the generic type's yet, since it hasn't been defined.
     unfilled: Vec<usize>,
@@ -1454,7 +1461,7 @@ impl<'a> Checker<'a> {
     }
 
     fn error(&mut self, span: Span, error: CheckError) {
-        self.error_in(self.file, span, error);
+        self.error_in(self.cx.file, span, error);
     }
 
     fn error_in(&mut self, file: usize, span: Span, error: CheckError) {
@@ -1467,7 +1474,7 @@ impl<'a> Checker<'a> {
     /// top-level names can be used in any order.
     fn check_files(&mut self) {
         for file in 0..self.files.len() {
-            self.file = file;
+            self.cx.file = file;
             self.resolve_imports();
         }
 
@@ -1476,7 +1483,7 @@ impl<'a> Checker<'a> {
         // order.
         let mut types = vec![];
         for file in 0..self.files.len() {
-            self.file = file;
+            self.cx.file = file;
             for stmt in self.files[file].program {
                 match &stmt.kind {
                     StmtKind::Group { name, params, .. }
@@ -1508,34 +1515,34 @@ impl<'a> Checker<'a> {
             self.alias_type(index);
         }
         for &(file, id, stmt) in &types {
-            self.file = file;
+            self.cx.file = file;
             self.define_type(id, stmt);
         }
         // Each generic type is checked once, with stand-ins for its
         // parameters, so its errors are reported once.
         let mut checked = vec![];
         for template in 0..self.templates.len() {
-            self.file = self.templates[template].file;
+            self.cx.file = self.templates[template].file;
             checked.extend(self.check_template(template));
         }
         for index in 0..self.traits.len() {
             self.define_trait(index);
         }
         for &(file, id, stmt) in &types {
-            self.file = file;
+            self.cx.file = file;
             if let StmtKind::Group { name, .. } | StmtKind::Choice { name, .. } = &stmt.kind {
                 self.check_not_recursive(id, name, stmt.span);
             }
         }
         for (file, ty, span) in checked {
-            self.file = file;
+            self.cx.file = file;
             self.check_not_recursive(ty.id, &ty.name, span);
         }
 
         // Functions, methods and values come after groups, since their types
         // can be groups.
         for file in 0..self.files.len() {
-            self.file = file;
+            self.cx.file = file;
             for stmt in self.files[file].program {
                 match &stmt.kind {
                     StmtKind::Fn(function) => {
@@ -1608,7 +1615,7 @@ impl<'a> Checker<'a> {
         }
 
         for (file, pending) in std::mem::take(&mut self.pending) {
-            self.file = file;
+            self.cx.file = file;
             match pending {
                 Pending::Global(index) => {
                     self.global_type(index);
@@ -1650,49 +1657,50 @@ impl<'a> Checker<'a> {
                 self.error(alias.span, CheckError::ImplAliasWithoutTrait(name));
             }
         }
-        // Signatures can use `Self` and the `impl`'s aliases,
-        // just like bodies.
-        let outer_impl_type = self.impl_type.replace(self_ty.clone());
-        let impl_aliases = self.define_impl_aliases(aliases, trait_index);
+        // Signatures can use `Self` and the `impl`'s aliases, just like
+        // bodies.
+        let impl_aliases = self.in_impl(self_ty.clone(), None, |checker| {
+            checker.define_impl_aliases(aliases, trait_index)
+        });
         let mut indexes = vec![];
-        for ImplFunction {
-            is_static,
-            is_primitive,
-            function,
-        } in functions
-        {
-            let name = format!("{type_name}.{}", function.name);
-            let full_name = self.full_name(&name);
-            let index = self.declare_method(
-                self_ty.as_ref(),
-                (&function.name, &function.params, &function.ret),
-                function.span,
-                *is_static,
-                full_name,
-            );
-            indexes.push(index);
-            let kind = if *is_static {
-                FnKind::Static(self_ty.clone())
-            } else {
-                FnKind::Method(self_ty.clone())
-            };
-            if *is_primitive {
-                let owner = Some(ty.name.as_str());
-                self.define_primitive_fn(index, owner, &function.name, function.span, kind);
-                continue;
+        self.in_impl(self_ty.clone(), impl_aliases, |checker| {
+            for ImplFunction {
+                is_static,
+                is_primitive,
+                function,
+            } in functions
+            {
+                let name = format!("{type_name}.{}", function.name);
+                let full_name = checker.full_name(&name);
+                let index = checker.declare_method(
+                    self_ty.as_ref(),
+                    (&function.name, &function.params, &function.ret),
+                    function.span,
+                    *is_static,
+                    full_name,
+                );
+                indexes.push(index);
+                let kind = if *is_static {
+                    FnKind::Static(self_ty.clone())
+                } else {
+                    FnKind::Method(self_ty.clone())
+                };
+                if *is_primitive {
+                    let owner = Some(ty.name.as_str());
+                    checker.define_primitive_fn(index, owner, &function.name, function.span, kind);
+                    continue;
+                }
+                let body = Pending::Fn {
+                    index,
+                    name: &function.name,
+                    span: function.span,
+                    body: &function.body,
+                    kind,
+                    aliases: impl_aliases,
+                };
+                pending.push((checker.cx.file, body));
             }
-            let body = Pending::Fn {
-                index,
-                name: &function.name,
-                span: function.span,
-                body: &function.body,
-                kind,
-                aliases: impl_aliases,
-            };
-            pending.push((self.file, body));
-        }
-        self.impl_type = outer_impl_type;
-        self.current_impl_aliases = None;
+        });
         if let Some((with, (trait_index, aliases))) = with.zip(trait_index.zip(impl_aliases)) {
             let implemented: Vec<_> = functions.iter().zip(&indexes).collect();
             self.infer_impl_aliases(ty, with, trait_index, aliases, &implemented);
@@ -1733,15 +1741,15 @@ impl<'a> Checker<'a> {
             file,
             span: None,
         };
-        let mut imports = vec![always_imported(self.file)];
-        if self.files[self.file].package.is_none() {
+        let mut imports = vec![always_imported(self.cx.file)];
+        if self.files[self.cx.file].package.is_none() {
             let stdlib = (0..self.files.len())
                 .filter(|&file| self.files[file].package == Some(STDLIB_PACKAGE));
             imports.extend(stdlib.map(always_imported));
         }
 
         let mut uses = vec![];
-        for stmt in self.files[self.file].program {
+        for stmt in self.files[self.cx.file].program {
             let StmtKind::Use(import) = &stmt.kind else {
                 continue;
             };
@@ -1804,7 +1812,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        self.files[self.file].imports = imports;
+        self.files[self.cx.file].imports = imports;
     }
 
     /// The error for a path that doesn't lead to a file.
@@ -1830,7 +1838,7 @@ impl<'a> Checker<'a> {
         let suggestions = self.paths_with_start(dir, true);
         let exists = self
             .full_path(dir)
-            .is_some_and(|(package, path)| self.is_in_module(self.file, package, &path));
+            .is_some_and(|(package, path)| self.is_in_module(self.cx.file, package, &path));
         if self.goes_above_root(dir) {
             CheckError::PathAboveRoot(import.to_string())
         } else if exists {
@@ -1883,7 +1891,7 @@ impl<'a> Checker<'a> {
             return vec![];
         };
         (0..self.files.len())
-            .filter(|&index| index != self.file && self.is_in_module(index, package, &dir))
+            .filter(|&index| index != self.cx.file && self.is_in_module(index, package, &dir))
             .collect()
     }
 
@@ -1899,7 +1907,7 @@ impl<'a> Checker<'a> {
     /// The directory of the current file, from the root of its package or the
     /// project.
     fn current_dir(&self) -> &'a [String] {
-        let current = &self.files[self.file];
+        let current = &self.files[self.cx.file];
         current
             .path
             .split_last()
@@ -1920,7 +1928,7 @@ impl<'a> Checker<'a> {
     /// above the root of their own package or the project, so only a package's
     /// name can leave it.
     fn full_path(&self, path: &'a ImportPath) -> Option<(Option<&'a str>, Vec<&'a String>)> {
-        let current = &self.files[self.file];
+        let current = &self.files[self.cx.file];
         Some(match path {
             ImportPath::Absolute(segments) => (current.package, segments.iter().collect()),
             ImportPath::Relative(segments) => (
@@ -1945,7 +1953,7 @@ impl<'a> Checker<'a> {
     /// Finds the file that the qualifier `name` refers to. It must be the
     /// current file or one it imports.
     fn resolve_qualifier(&self, name: &str) -> Result<usize, LookupError> {
-        let matches: Vec<_> = self.files[self.file]
+        let matches: Vec<_> = self.files[self.cx.file]
             .imports
             .iter()
             .filter(|import| import.name == name)
@@ -1975,8 +1983,8 @@ impl<'a> Checker<'a> {
     /// Whether `name` is declared anywhere the current code could see it,
     /// even if it's a value that a function can't use.
     fn is_declared(&self, name: &str) -> bool {
-        self.scopes.iter().any(|scope| scope.contains_key(name))
-            || self.files[self.file]
+        self.cx.scopes.iter().any(|scope| scope.contains_key(name))
+            || self.files[self.cx.file]
                 .imports
                 .iter()
                 .any(|import| self.files[import.file].scope.contains_key(name))
@@ -2017,7 +2025,7 @@ impl<'a> Checker<'a> {
         // `Self` is a keyword, so it's never declared, and always refers to
         // the type of the `impl` it's in.
         if name.is_self() {
-            return match &self.impl_type {
+            return match &self.cx.impl_type {
                 Some(Some(ty)) => Ok(Binding::Type(ty.clone())),
                 Some(None) => Err(LookupError::Reported),
                 None => Err(LookupError::SelfTypeOutsideImpl),
@@ -2046,7 +2054,7 @@ impl<'a> Checker<'a> {
             None => {
                 // While a type made from a generic type is defined, its
                 // parameters stand for its arguments.
-                if let Some((template, args)) = &self.type_params
+                if let Some((template, args)) = &self.cx.type_params
                     && let Some(index) = self.templates[*template]
                         .params
                         .iter()
@@ -2055,6 +2063,7 @@ impl<'a> Checker<'a> {
                     return Ok(Binding::Type(args[index].clone()));
                 }
                 let local = self
+                    .cx
                     .scopes
                     .iter()
                     .enumerate()
@@ -2064,7 +2073,7 @@ impl<'a> Checker<'a> {
                     // Functions can't capture values from outside them.
                     // Functions and types can still be used, since they never
                     // depend on a value.
-                    Some((index, Binding::Value { .. })) if index < self.fn_scope_start => {
+                    Some((index, Binding::Value { .. })) if index < self.cx.fn_scope_start => {
                         return Err(LookupError::Captured);
                     }
                     Some((_, binding)) => return Ok(binding.clone()),
@@ -2072,7 +2081,7 @@ impl<'a> Checker<'a> {
                 }
 
                 // Then the aliases of the `impl` it's in.
-                if let Some(aliases) = self.current_impl_aliases
+                if let Some(aliases) = self.cx.impl_aliases
                     && let Some(ty) = self.impl_aliases[aliases].get(name.name.as_str())
                 {
                     return match ty {
@@ -2086,10 +2095,10 @@ impl<'a> Checker<'a> {
                 // The current file's own names come first. Otherwise, a name
                 // that isn't qualified must only be declared in one of the
                 // files it imports.
-                if let Some(binding) = self.files[self.file].scope.get(name.name.as_str()) {
+                if let Some(binding) = self.files[self.cx.file].scope.get(name.name.as_str()) {
                     return self.top_level(binding);
                 }
-                let found: Vec<_> = self.files[self.file].imports[1..]
+                let found: Vec<_> = self.files[self.cx.file].imports[1..]
                     .iter()
                     .filter_map(|import| {
                         let binding = self.files[import.file].scope.get(name.name.as_str())?;
@@ -2116,7 +2125,7 @@ impl<'a> Checker<'a> {
     /// Checks that a file's top-level `binding` can be used here. Top-level
     /// values are outside every function.
     fn top_level(&self, binding: &Binding) -> Result<Binding, LookupError> {
-        if matches!(binding, Binding::Global(_)) && self.current_fn.is_some() {
+        if matches!(binding, Binding::Global(_)) && self.cx.current_fn.is_some() {
             return Err(LookupError::Captured);
         }
         Ok(binding.clone())
@@ -2144,21 +2153,21 @@ impl<'a> Checker<'a> {
         // Names can't be redeclared within a function, even to shadow an
         // outer block. A function's own scope can reuse names from outside it.
         // At the top level, names only need to be unique within their file.
-        let scope = match self.scopes.last_mut() {
+        let scope = match self.cx.scopes.last_mut() {
             Some(_) => {
-                if self.scopes[self.fn_scope_start..]
+                if self.cx.scopes[self.cx.fn_scope_start..]
                     .iter()
                     .any(|scope| scope.contains_key(name))
                 {
                     self.error(span, CheckError::Redeclared(name.to_string()));
                 }
-                self.scopes.last_mut().expect("checked above")
+                self.cx.scopes.last_mut().expect("checked above")
             }
             None => {
-                if self.files[self.file].scope.contains_key(name) {
+                if self.files[self.cx.file].scope.contains_key(name) {
                     self.error(span, CheckError::Redeclared(name.to_string()));
                 }
-                &mut self.files[self.file].scope
+                &mut self.files[self.cx.file].scope
             }
         };
         scope.insert(name, binding);
@@ -2200,7 +2209,7 @@ impl<'a> Checker<'a> {
         let id = match self.tuple_ids.get(&key) {
             Some(&id) => id,
             None => {
-                let id = self.add_type(name.clone(), self.file, TypeKind::Tuple(elements));
+                let id = self.add_type(name.clone(), self.cx.file, TypeKind::Tuple(elements));
                 self.tuple_ids.insert(key, id);
                 id
             }
@@ -2271,7 +2280,7 @@ impl<'a> Checker<'a> {
     /// What `Self.param` stands for in the `impl` of a type made from a
     /// generic type.
     fn self_param(&mut self, param: &str, span: Span) -> Option<Type> {
-        let impl_type = match &self.impl_type {
+        let impl_type = match &self.cx.impl_type {
             Some(Some(ty)) => ty.clone(),
             // The `impl`'s type is unknown, which has been reported.
             Some(None) => return None,
@@ -2336,7 +2345,7 @@ impl<'a> Checker<'a> {
         }
         self.templates.push(Template {
             name,
-            file: self.file,
+            file: self.cx.file,
             params,
             stmt,
             stand_ins: vec![],
@@ -2477,33 +2486,34 @@ impl<'a> Checker<'a> {
             let params = self.params(template, &args);
             // A generic type nested too deeply is found here, so it's
             // reported where its generic type is declared.
-            let outer_file = std::mem::replace(&mut self.file, file);
             let kind = self.types[generic].kind.clone();
-            let mut substitute =
-                |ty: Option<Type>| ty.and_then(|ty| self.substitute(&ty, &params, stmt.span));
-            let kind = match kind {
-                TypeKind::Group(fields) => TypeKind::Group(
-                    fields
-                        .into_iter()
-                        .map(|field| FieldSignature {
-                            ty: substitute(field.ty),
-                            ..field
-                        })
-                        .collect(),
-                ),
-                TypeKind::Choice(options) => TypeKind::Choice(
-                    options
-                        .into_iter()
-                        .map(|option| OptionSignature {
-                            ty: substitute(option.ty),
-                            ..option
-                        })
-                        .collect(),
-                ),
-                TypeKind::Primitive(primitive) => TypeKind::Primitive(primitive),
-                TypeKind::Tuple(_) => unreachable!("tuples aren't generic"),
-            };
-            self.file = outer_file;
+            let kind = self.at_top_level(file, None, |checker| {
+                let mut substitute = |ty: Option<Type>| {
+                    ty.and_then(|ty| checker.substitute(&ty, &params, stmt.span))
+                };
+                match kind {
+                    TypeKind::Group(fields) => TypeKind::Group(
+                        fields
+                            .into_iter()
+                            .map(|field| FieldSignature {
+                                ty: substitute(field.ty),
+                                ..field
+                            })
+                            .collect(),
+                    ),
+                    TypeKind::Choice(options) => TypeKind::Choice(
+                        options
+                            .into_iter()
+                            .map(|option| OptionSignature {
+                                ty: substitute(option.ty),
+                                ..option
+                            })
+                            .collect(),
+                    ),
+                    TypeKind::Primitive(primitive) => TypeKind::Primitive(primitive),
+                    TypeKind::Tuple(_) => unreachable!("tuples aren't generic"),
+                }
+            });
             self.types[id].kind = kind;
         }
         self.filling = false;
@@ -2566,29 +2576,37 @@ impl<'a> Checker<'a> {
     }
 
     /// Runs `check` as if it were at the top level of `file`, outside any
-    /// function or `impl`, with `type_params` as `Checker::type_params`.
-    /// Generic types are defined like this.
+    /// function or `impl`, with `type_params` as `Context::type_params`.
     fn at_top_level<T>(
         &mut self,
         file: usize,
         type_params: Option<(usize, Vec<Type>)>,
         check: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let file = std::mem::replace(&mut self.file, file);
-        let scopes = std::mem::take(&mut self.scopes);
-        let fn_scope_start = std::mem::replace(&mut self.fn_scope_start, 0);
-        let current_fn = self.current_fn.take();
-        let impl_type = self.impl_type.take();
-        let impl_aliases = self.current_impl_aliases.take();
-        let type_params = std::mem::replace(&mut self.type_params, type_params);
+        let context = Context {
+            file,
+            type_params,
+            ..Context::default()
+        };
+        let outer = std::mem::replace(&mut self.cx, context);
         let checked = check(self);
-        self.file = file;
-        self.scopes = scopes;
-        self.fn_scope_start = fn_scope_start;
-        self.current_fn = current_fn;
-        self.impl_type = impl_type;
-        self.current_impl_aliases = impl_aliases;
-        self.type_params = type_params;
+        self.cx = outer;
+        checked
+    }
+
+    /// Runs `check` as if it were in an `impl` of `ty`, which is `None` if
+    /// it's unknown, that can use the aliases at `aliases` in `impl_aliases`.
+    fn in_impl<T>(
+        &mut self,
+        ty: Option<Type>,
+        aliases: Option<usize>,
+        check: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer_type = self.cx.impl_type.replace(ty);
+        let outer_aliases = std::mem::replace(&mut self.cx.impl_aliases, aliases);
+        let checked = check(self);
+        self.cx.impl_type = outer_type;
+        self.cx.impl_aliases = outer_aliases;
         checked
     }
 
@@ -2630,15 +2648,11 @@ impl<'a> Checker<'a> {
             LazyType::Unchecked => {}
         }
 
-        // Worked out in its own file, even when another file needs it
-        // first. Only top-level aliases are worked out later, and they're all
-        // worked out before any functions are checked, so there are no local
-        // scopes to set aside.
+        // Worked out at the top level of its own file, even when another file
+        // needs it first.
         let (file, target) = (alias.file, alias.target);
         self.aliases[index].state = LazyType::Checking;
-        let outer_file = std::mem::replace(&mut self.file, file);
-        let ty = self.resolve_type(target);
-        self.file = outer_file;
+        let ty = self.at_top_level(file, None, |checker| checker.resolve_type(target));
 
         self.aliases[index].state = LazyType::Checked(ty.clone());
         ty
@@ -2658,14 +2672,13 @@ impl<'a> Checker<'a> {
             LazyType::Unchecked => {}
         }
 
-        // Checked as part of its own file, even when another file needs
-        // it first. Top-level values are only used at the top level, so
-        // there are no local scopes to set aside.
+        // Checked at the top level of its own file, even when another file
+        // needs it first.
         let (file, name, type_name, value) = (global.file, global.name, global.ty, global.value);
         self.globals[index].state = LazyType::Checking;
-        let outer_file = std::mem::replace(&mut self.file, file);
-        let Typed { ty, expr } = self.decl_type(name, type_name, value);
-        self.file = outer_file;
+        let Typed { ty, expr } = self.at_top_level(file, None, |checker| {
+            checker.decl_type(name, type_name, value)
+        });
 
         self.globals[index].state = LazyType::Checked(ty.clone());
         self.globals[index].lowered = Some(expr);
@@ -2698,9 +2711,9 @@ impl<'a> Checker<'a> {
     /// `ir::Function::name`. Names inside a function start with the
     /// function's own.
     fn full_name(&self, name: &str) -> String {
-        let outer = match &self.current_fn {
+        let outer = match &self.cx.current_fn {
             Some(function) => &function.full_name,
-            None => &self.files[self.file].display,
+            None => &self.files[self.cx.file].display,
         };
         format!("{outer}::{name}")
     }
@@ -2818,24 +2831,25 @@ impl<'a> Checker<'a> {
 
         // The body starts a new function scope holding the parameters. It can
         // see the functions and types declared outside it, but not values.
-        let outer_scope_start = std::mem::replace(&mut self.fn_scope_start, self.scopes.len());
-        let outer_fn = self.current_fn.replace(FnContext {
+        let outer_scope_start =
+            std::mem::replace(&mut self.cx.fn_scope_start, self.cx.scopes.len());
+        let outer_fn = self.cx.current_fn.replace(FnContext {
             name,
             full_name: full_name.clone(),
             returns: returns.clone(),
             is_static: matches!(kind, FnKind::Static(_)),
             locals: vec![],
         });
-        self.scopes.push(HashMap::new());
+        self.cx.scopes.push(HashMap::new());
         let outer_impl_type = match &kind {
-            FnKind::Method(ty) | FnKind::Static(ty) => self.impl_type.replace(ty.clone()),
-            FnKind::Function => self.impl_type.clone(),
+            FnKind::Method(ty) | FnKind::Static(ty) => self.cx.impl_type.replace(ty.clone()),
+            FnKind::Function => self.cx.impl_type.clone(),
         };
         let outer_impl_aliases = match &kind {
             FnKind::Method(_) | FnKind::Static(_) => {
-                std::mem::replace(&mut self.current_impl_aliases, aliases)
+                std::mem::replace(&mut self.cx.impl_aliases, aliases)
             }
-            FnKind::Function => self.current_impl_aliases,
+            FnKind::Function => self.cx.impl_aliases,
         };
 
         // `self` is a keyword, so it can't clash with a parameter. Like any
@@ -2846,16 +2860,16 @@ impl<'a> Checker<'a> {
         for param in params {
             self.declare_local(param.name, param.span, Mutability::Let, param.ty);
         }
-        let param_count = self.current_fn.as_ref().expect("set above").locals.len();
+        let param_count = self.cx.current_fn.as_ref().expect("set above").locals.len();
         let (mut lowered, returns_always) = self.stmts(body);
 
-        self.scopes.pop();
-        let locals = std::mem::replace(&mut self.current_fn, outer_fn)
+        self.cx.scopes.pop();
+        let locals = std::mem::replace(&mut self.cx.current_fn, outer_fn)
             .expect("set above")
             .locals;
-        self.fn_scope_start = outer_scope_start;
-        self.impl_type = outer_impl_type;
-        self.current_impl_aliases = outer_impl_aliases;
+        self.cx.fn_scope_start = outer_scope_start;
+        self.cx.impl_type = outer_impl_type;
+        self.cx.impl_aliases = outer_impl_aliases;
 
         // A `Void` function can finish without an explicit `return`.
         if !returns_always {
@@ -2899,7 +2913,7 @@ impl<'a> Checker<'a> {
         self.traits.push(TraitInfo {
             name,
             span,
-            file: self.file,
+            file: self.cx.file,
             aliases,
             functions,
             stand_ins: vec![],
@@ -2920,7 +2934,7 @@ impl<'a> Checker<'a> {
             functions,
             ..
         } = self.traits[index];
-        self.file = file;
+        self.cx.file = file;
         // Aliases and functions have separate names, like types and methods.
         let mut alias_names = HashSet::new();
         let mut function_names = HashSet::new();
@@ -2956,23 +2970,23 @@ impl<'a> Checker<'a> {
                 name: name.to_string(),
             })
             .collect();
-        let outer_impl_type = self.impl_type.replace(Some(stand_ins[0].clone()));
         let alias_types = aliases.iter().zip(&stand_ins[1..]);
         let alias_types =
             alias_types.map(|(alias, ty)| (alias.as_str(), ImplAliasType::Known(Some(ty.clone()))));
         self.impl_aliases.push(alias_types.collect());
-        self.current_impl_aliases = Some(self.impl_aliases.len() - 1);
-        let mut signatures = vec![];
-        for function in functions {
-            let params = function
-                .params
-                .iter()
-                .map(|param| self.trait_type(aliases, &param.ty))
-                .collect();
-            signatures.push((params, self.trait_type(aliases, &function.ret)));
-        }
-        self.impl_type = outer_impl_type;
-        self.current_impl_aliases = None;
+        let alias_types = Some(self.impl_aliases.len() - 1);
+        let signatures = self.in_impl(Some(stand_ins[0].clone()), alias_types, |checker| {
+            let mut signatures = vec![];
+            for function in functions {
+                let params = function
+                    .params
+                    .iter()
+                    .map(|param| checker.trait_type(aliases, &param.ty))
+                    .collect();
+                signatures.push((params, checker.trait_type(aliases, &function.ret)));
+            }
+            signatures
+        });
         self.traits[index].stand_ins = stand_ins;
         self.traits[index].signatures = signatures;
     }
@@ -3014,7 +3028,7 @@ impl<'a> Checker<'a> {
             .map(|declared| (declared.as_str(), ImplAliasType::Inferring));
         self.impl_aliases.push(inferred.collect());
         let index = self.impl_aliases.len() - 1;
-        self.current_impl_aliases = Some(index);
+        self.cx.impl_aliases = Some(index);
         for alias in aliases {
             let ty = ImplAliasType::Known(self.resolve_type(&alias.ty));
             if self.impl_aliases[index].insert(&alias.name, ty).is_some() {
@@ -3129,8 +3143,6 @@ impl<'a> Checker<'a> {
             .iter()
             .all(|declared| declared.body.is_some() || is_implemented(declared));
 
-        let outer_impl_type = self.impl_type.replace(self_ty.cloned());
-        self.current_impl_aliases = aliases;
         let trait_file = self.traits[trait_index].file;
         let mut pending = vec![];
         for declared in declared.iter().filter(|declared| !is_implemented(declared)) {
@@ -3140,15 +3152,19 @@ impl<'a> Checker<'a> {
             let name = format!("{type_name}.{}", declared.name);
             // Named after the `impl`, since each one has its own copy.
             let full_name = self.full_name(&name);
-            let impl_file = std::mem::replace(&mut self.file, trait_file);
-            let index = self.declare_method(
-                self_ty,
-                (&declared.name, &declared.params, &declared.ret),
-                declared.span,
-                declared.is_static,
-                full_name,
-            );
-            self.file = impl_file;
+            // Declared as written in the trait, in its file, but as part of
+            // the `impl`.
+            let index = self.at_top_level(trait_file, None, |checker| {
+                checker.in_impl(self_ty.cloned(), aliases, |checker| {
+                    checker.declare_method(
+                        self_ty,
+                        (&declared.name, &declared.params, &declared.ret),
+                        declared.span,
+                        declared.is_static,
+                        full_name,
+                    )
+                })
+            });
             let kind = if declared.is_static {
                 FnKind::Static(self_ty.cloned())
             } else {
@@ -3166,8 +3182,6 @@ impl<'a> Checker<'a> {
                 pending.push((trait_file, body));
             }
         }
-        self.impl_type = outer_impl_type;
-        self.current_impl_aliases = None;
         pending
     }
 
@@ -3329,7 +3343,7 @@ impl<'a> Checker<'a> {
             Some(owner) => format!("{owner}.{name}"),
             None => name.to_string(),
         };
-        if self.files[self.file].package != Some(STDLIB_PACKAGE) {
+        if self.files[self.cx.file].package != Some(STDLIB_PACKAGE) {
             self.error(span, CheckError::PrimitiveOutsideStdlib(shown));
             return;
         }
@@ -3390,6 +3404,7 @@ impl<'a> Checker<'a> {
         ty: Option<Type>,
     ) -> usize {
         let locals = &mut self
+            .cx
             .current_fn
             .as_mut()
             .expect("values are only declared inside functions")
@@ -3420,7 +3435,7 @@ impl<'a> Checker<'a> {
     /// type has been worked out if `state` says so.
     fn declare_alias(&mut self, name: &'a str, span: Span, target: &'a TypeName, state: LazyType) {
         self.aliases.push(Alias {
-            file: self.file,
+            file: self.cx.file,
             name,
             span,
             target,
@@ -3486,7 +3501,7 @@ impl<'a> Checker<'a> {
             StmtKind::Choice { .. } => TypeKind::Choice(vec![]),
             _ => TypeKind::Group(vec![]),
         };
-        let id = self.add_type(self.full_name(name), self.file, kind);
+        let id = self.add_type(self.full_name(name), self.cx.file, kind);
         let ty = Type {
             id,
             name: name.to_string(),
@@ -3509,7 +3524,7 @@ impl<'a> Checker<'a> {
     /// Records the primitive type called `name` with `id`, which must be
     /// declared in the standard library.
     fn define_primitive(&mut self, id: usize, name: &str, span: Span) {
-        if self.files[self.file].package != Some(STDLIB_PACKAGE) {
+        if self.files[self.cx.file].package != Some(STDLIB_PACKAGE) {
             self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
@@ -3629,9 +3644,9 @@ impl<'a> Checker<'a> {
     /// afterwards, returning what they compile to, and whether they always
     /// return.
     fn block(&mut self, stmts: &'a [Stmt]) -> (Vec<ir::Stmt>, bool) {
-        self.scopes.push(HashMap::new());
+        self.cx.scopes.push(HashMap::new());
         let checked = self.stmts(stmts);
-        self.scopes.pop();
+        self.cx.scopes.pop();
         checked
     }
 
@@ -3790,6 +3805,7 @@ impl<'a> Checker<'a> {
             StmtKind::Destructure { pattern, value } => self.destructure(pattern, value),
             StmtKind::Return(value) => {
                 let FnContext { name, returns, .. } = self
+                    .cx
                     .current_fn
                     .clone()
                     .expect("statements are only checked inside functions");
@@ -3858,10 +3874,10 @@ impl<'a> Checker<'a> {
             // A pattern's bindings are only visible in its arm's block. Arms
             // are still checked when the type is unknown, so the errors in
             // their blocks are found.
-            self.scopes.push(HashMap::new());
+            self.cx.scopes.push(HashMap::new());
             let (pattern, space) = self.pattern(&arm.pattern, ty.as_ref());
             let (body, arm_returns) = self.stmts(&arm.body);
-            self.scopes.pop();
+            self.cx.scopes.pop();
             spaces.push(space);
             returns &= arm_returns;
             if let Some(pattern) = pattern {
@@ -4425,7 +4441,7 @@ impl<'a> Checker<'a> {
                     },
                     Ok(_) => unreachable!("only methods declare `self`, as a value"),
                     Err(LookupError::Undeclared) => {
-                        let in_static = self.current_fn.as_ref().is_some_and(|f| f.is_static);
+                        let in_static = self.cx.current_fn.as_ref().is_some_and(|f| f.is_static);
                         self.error(
                             span,
                             if in_static {
@@ -4716,7 +4732,7 @@ impl<'a> Checker<'a> {
                 }
                 Err(LookupError::Undeclared)
                     if name.file.is_none()
-                        && self.files[self.file]
+                        && self.files[self.cx.file]
                             .imports
                             .iter()
                             .any(|import| import.name == name.name) =>
@@ -4815,7 +4831,7 @@ impl<'a> Checker<'a> {
         if let Some(&index) = self.callee_ids.get(&function) {
             return index;
         }
-        self.callees.push((function.clone(), self.file, span));
+        self.callees.push((function.clone(), self.cx.file, span));
         self.callee_ids.insert(function, self.callees.len() - 1);
         self.callees.len() - 1
     }
@@ -4824,7 +4840,7 @@ impl<'a> Checker<'a> {
     /// index into `templates`, if it's in one, including inside one of its
     /// functions.
     fn generic_context(&self) -> Option<usize> {
-        let Some(Some(ty)) = &self.impl_type else {
+        let Some(Some(ty)) = &self.cx.impl_type else {
             return None;
         };
         let (template, _) = self.types[ty.id].instance.as_ref()?;
@@ -5332,7 +5348,7 @@ impl<'a> Checker<'a> {
     /// in, returning that type, or `None` if it can't be determined, along
     /// with what it compiles to.
     fn construct(&mut self, span: Span, values: &[FieldValue]) -> Typed {
-        let ty = match &self.impl_type {
+        let ty = match &self.cx.impl_type {
             Some(Some(ty)) => Some(ty.clone()),
             // The `impl`'s type is unknown, which has been reported.
             Some(None) => None,
@@ -5369,7 +5385,7 @@ impl<'a> Checker<'a> {
         // Only the type's own file can construct it. Elsewhere, values come
         // from its functions, such as `Void.new()`.
         let declared_in = self.types[ty.id].file;
-        if declared_in != self.file {
+        if declared_in != self.cx.file {
             self.error(
                 span,
                 CheckError::ConstructedOutsideFile {
@@ -5810,7 +5826,7 @@ impl<'a> Checker<'a> {
             name: self.types[id].name.clone(),
         };
         let (file, span) = state.site;
-        self.file = file;
+        self.cx.file = file;
         Some(self.substitute(&ty, params, span)?.id)
     }
 
@@ -5896,7 +5912,7 @@ impl<'a> Checker<'a> {
         state: &mut Instantiating,
     ) -> Option<usize> {
         let (function, file, span) = self.callees[callee].clone();
-        self.file = file;
+        self.cx.file = file;
         let args = function
             .args
             .iter()
