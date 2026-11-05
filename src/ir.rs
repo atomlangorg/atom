@@ -93,17 +93,19 @@ pub enum Body {
 pub enum PrimitiveFn {
     /// Stops the program with exit code 1.
     Exit,
-    /// `Bool.and`, which is `true` if both `Bool`s are.
-    BoolAnd,
-    /// `Bool.or`, which is `true` if either `Bool` is.
-    BoolOr,
-    /// `Bool.not`, which is `true` if the `Bool` isn't.
-    BoolNot,
-    /// `isEqual` on an integer or `Bool`, which is whether two of the same
-    /// type are equal.
-    Equal,
-    /// `isNotEqual` on an integer or `Bool`, the opposite of `Equal`.
-    NotEqual,
+    /// The function that a binary operator calls on two integers, `Bool`s or
+    /// `ChoiceTag`s of the same type, such as `add` for `+`. Shifts are only
+    /// on unsigned integers, by an integer of any type.
+    Binary {
+        op: BinOp,
+        /// Whether the operands are signed integers, which decides when
+        /// arithmetic overflows, how it divides, and how integers are
+        /// ordered.
+        signed: bool,
+    },
+    /// The function that an operator before a value calls on an integer or a
+    /// `Bool`, such as `negate` for `-`, which is only on signed integers.
+    Unary(UnOp),
     /// `Fn.call`, which calls the function that the `Fn` points to with the
     /// input.
     CallFn,
@@ -190,20 +192,6 @@ pub enum Expr {
     Local(usize),
     /// An index into `Program::globals`.
     Global(usize),
-    /// An operator on integers or `Bool`s. `-` is only used on signed
-    /// integers.
-    Unary(UnOp, Box<Expr>),
-    /// An operator on integers or `Bool`s. Shifts are only used on unsigned
-    /// integers, and their `rhs` can be any integer type.
-    Binary {
-        lhs: Box<Expr>,
-        op: BinOp,
-        rhs: Box<Expr>,
-        /// Whether the operands are signed integers, which decides when
-        /// arithmetic overflows, how it divides, and how integers are
-        /// ordered.
-        signed: bool,
-    },
     /// Calls the function at an index into `Program::functions`. A method's
     /// receiver is its first argument.
     Call {

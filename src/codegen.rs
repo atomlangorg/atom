@@ -376,28 +376,77 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         Ok(())
     }
 
-    /// Builds the single instruction that `primitive` is, on `args`, where
-    /// a method's `self` comes first, or `None` if it isn't one, such as
-    /// `exit`.
+    /// Builds the instructions that `primitive` is, on `args`, where a
+    /// method's `self` comes first, or `None` if it isn't built in place,
+    /// such as `exit`.
     fn primitive_instruction(
-        &self,
+        &mut self,
         primitive: PrimitiveFn,
         args: &[BasicValueEnum<'ctx>],
     ) -> Result<Option<IntValue<'ctx>>, BuilderError> {
         let int = |index: usize| args[index].into_int_value();
         Ok(Some(match primitive {
             PrimitiveFn::Exit | PrimitiveFn::CallFn | PrimitiveFn::CallOption => return Ok(None),
-            PrimitiveFn::BoolAnd => self.builder.build_and(int(0), int(1), "")?,
-            PrimitiveFn::BoolOr => self.builder.build_or(int(0), int(1), "")?,
-            PrimitiveFn::BoolNot => self.builder.build_not(int(0), "")?,
-            PrimitiveFn::Equal => self.builder.build_int_compare(EQ, int(0), int(1), "")?,
-            PrimitiveFn::NotEqual => self.builder.build_int_compare(NE, int(0), int(1), "")?,
+            PrimitiveFn::Binary { op, signed } => self.binary(op, signed, int(0), int(1))?,
+            // Negating the smallest integer overflows.
+            PrimitiveFn::Unary(UnOp::Neg) => {
+                let zero = int(0).get_type().const_zero();
+                self.checked("llvm.ssub.with.overflow", zero, int(0))?
+            }
+            PrimitiveFn::Unary(UnOp::Not | UnOp::BitNot) => self.builder.build_not(int(0), "")?,
             PrimitiveFn::ChoiceTag => self
                 .builder
                 .build_extract_value(args[0].into_struct_value(), 0, "")?
                 .into_int_value(),
             PrimitiveFn::OptionTag => int(0),
         }))
+    }
+
+    /// Builds `op` on `lhs` and `rhs`, which are signed integers if `signed`
+    /// is set.
+    fn binary(
+        &mut self,
+        op: BinOp,
+        signed: bool,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, BuilderError> {
+        let sign = if signed { "s" } else { "u" };
+        let ordered = |signed_predicate, unsigned_predicate| {
+            if signed {
+                signed_predicate
+            } else {
+                unsigned_predicate
+            }
+        };
+        Ok(match op {
+            BinOp::Add => self.checked(&format!("llvm.{sign}add.with.overflow"), lhs, rhs)?,
+            BinOp::Sub => self.checked(&format!("llvm.{sign}sub.with.overflow"), lhs, rhs)?,
+            BinOp::Mul => self.checked(&format!("llvm.{sign}mul.with.overflow"), lhs, rhs)?,
+            BinOp::Div => self.divide(lhs, rhs, signed)?,
+            BinOp::Eq => self.builder.build_int_compare(EQ, lhs, rhs, "")?,
+            BinOp::Ne => self.builder.build_int_compare(NE, lhs, rhs, "")?,
+            BinOp::Lt => self
+                .builder
+                .build_int_compare(ordered(SLT, ULT), lhs, rhs, "")?,
+            BinOp::Le => self
+                .builder
+                .build_int_compare(ordered(SLE, ULE), lhs, rhs, "")?,
+            BinOp::Gt => self
+                .builder
+                .build_int_compare(ordered(SGT, UGT), lhs, rhs, "")?,
+            BinOp::Ge => self
+                .builder
+                .build_int_compare(ordered(SGE, UGE), lhs, rhs, "")?,
+            BinOp::BitAnd | BinOp::And => self.builder.build_and(lhs, rhs, "")?,
+            BinOp::BitOr | BinOp::Or => self.builder.build_or(lhs, rhs, "")?,
+            BinOp::BitXor => self.builder.build_xor(lhs, rhs, "")?,
+            BinOp::ShiftLeft => self.shift_left(lhs, rhs)?,
+            BinOp::ShiftRight => {
+                let amount = self.shift_amount(lhs, rhs)?;
+                self.builder.build_right_shift(lhs, amount, false, "")?
+            }
+        })
     }
 
     /// Builds the C `main`, which sets every top-level value, then returns
@@ -519,70 +568,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 let ty = self.types[self.program.globals[*index].ty];
                 let global = self.globals[*index].as_pointer_value();
                 self.builder.build_load(ty, global, "")?
-            }
-            Expr::Unary(op, operand) => {
-                let operand = self.expr(operand)?.into_int_value();
-                match op {
-                    // Negating the smallest integer overflows. Only signed
-                    // integers can be negated.
-                    UnOp::Neg => {
-                        let zero = operand.get_type().const_zero();
-                        self.checked("llvm.ssub.with.overflow", zero, operand)?
-                    }
-                    UnOp::BitNot => self.builder.build_not(operand, "")?,
-                    UnOp::Not => unreachable!("`!` compiles to a call to `not`"),
-                }
-                .into()
-            }
-            Expr::Binary {
-                lhs,
-                op,
-                rhs,
-                signed,
-            } => {
-                let lhs = self.expr(lhs)?.into_int_value();
-                let rhs = self.expr(rhs)?.into_int_value();
-                let sign = if *signed { "s" } else { "u" };
-                match op {
-                    BinOp::Add => {
-                        self.checked(&format!("llvm.{sign}add.with.overflow"), lhs, rhs)?
-                    }
-                    BinOp::Sub => {
-                        self.checked(&format!("llvm.{sign}sub.with.overflow"), lhs, rhs)?
-                    }
-                    BinOp::Mul => {
-                        self.checked(&format!("llvm.{sign}mul.with.overflow"), lhs, rhs)?
-                    }
-                    BinOp::Div => self.divide(lhs, rhs, *signed)?,
-                    BinOp::Lt => {
-                        let predicate = if *signed { SLT } else { ULT };
-                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
-                    }
-                    BinOp::Le => {
-                        let predicate = if *signed { SLE } else { ULE };
-                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
-                    }
-                    BinOp::Gt => {
-                        let predicate = if *signed { SGT } else { UGT };
-                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
-                    }
-                    BinOp::Ge => {
-                        let predicate = if *signed { SGE } else { UGE };
-                        self.builder.build_int_compare(predicate, lhs, rhs, "")?
-                    }
-                    BinOp::BitAnd => self.builder.build_and(lhs, rhs, "")?,
-                    BinOp::BitOr => self.builder.build_or(lhs, rhs, "")?,
-                    BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne => {
-                        unreachable!("`&`, `|`, `==` and `!=` compile to calls to trait functions")
-                    }
-                    BinOp::BitXor => self.builder.build_xor(lhs, rhs, "")?,
-                    BinOp::ShiftLeft => self.shift_left(lhs, rhs)?,
-                    BinOp::ShiftRight => {
-                        let amount = self.shift_amount(lhs, rhs)?;
-                        self.builder.build_right_shift(lhs, amount, false, "")?
-                    }
-                }
-                .into()
             }
             Expr::Call { function, args } => {
                 let args = args
@@ -2285,7 +2270,7 @@ mod tests {
             fn main() -> Int {
                 let byte: IntU8 = 1
                 let huge: IntU64 = 18446744073709551615
-                let by: IntS8 = 7
+                let by = 7
                 let a = bit(byte .< 7 == 128, at: 1)
                 let b = bit(byte .< by .> by == 1, at: 2)
                 let c = bit(huge .> 63 == 1, at: 4)
@@ -2308,11 +2293,11 @@ mod tests {
             ("shl_negative", "let x: IntU8 = 0\nlet y = x .< -1"),
             (
                 "shr_negative",
-                "let x: IntU8 = 0\nlet by: IntS8 = -128\nlet y = x .> by",
+                "let x: IntU8 = 0\nlet by = -128\nlet y = x .> by",
             ),
             (
                 "shr_wide",
-                "let x: IntU8 = 0\nlet by: IntU64 = 4294967296\nlet y = x .> by",
+                "let x: IntU8 = 0\nlet by = 4294967296\nlet y = x .> by",
             ),
         ];
         for (name, body) in cases {
@@ -2641,6 +2626,54 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 51);
+    }
+
+    #[test]
+    fn arithmetic_and_ordering_operators_call_their_traits() {
+        let src = "
+            group Money {
+                let cents: Int
+            }
+
+            impl Money {
+                static fn of(cents: Int) -> Self {
+                    return Self { cents: cents }
+                }
+            }
+
+            impl Money with Add {
+                fn add(_ rhs: Self) -> Self {
+                    return Money.of(cents: self.cents + rhs.cents)
+                }
+            }
+
+            impl Money with Order {
+                fn isLess(than rhs: Self) -> Bool {
+                    return self.cents < rhs.cents
+                }
+
+                fn isLessOrEqual(to rhs: Self) -> Bool {
+                    return self.cents <= rhs.cents
+                }
+
+                fn isGreater(than rhs: Self) -> Bool {
+                    return self.cents > rhs.cents
+                }
+
+                fn isGreaterOrEqual(to rhs: Self) -> Bool {
+                    return self.cents >= rhs.cents
+                }
+            }
+
+            fn main() -> Int {
+                let total = Money.of(cents: 30) + Money.of(cents: 12)
+                if total > Money.of(cents: 41) {
+                    return total.cents
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 42);
     }
 
     #[test]

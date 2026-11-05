@@ -224,42 +224,51 @@ impl fmt::Display for TupleElement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A binary operator, which calls a function of a trait from the standard
+/// library, as `trait_function` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
     Mul,
     Div,
-    /// `==`, which compares two `Int`s or two `Bool`s.
     Eq,
-    /// `!=`, the opposite of `==`.
     Ne,
-    /// `<`, which orders two integers.
     Lt,
-    /// `<=`, which orders two integers.
     Le,
-    /// `>`, which orders two integers.
     Gt,
-    /// `>=`, which orders two integers.
     Ge,
-    /// `.&`, which ands each bit of two integers.
     BitAnd,
-    /// `.|`, which ors each bit of two integers.
     BitOr,
-    /// `.^`, which xors each bit of two integers.
     BitXor,
-    /// `.<`, which shifts the bits of an unsigned integer left, filling with
-    /// zeros.
     ShiftLeft,
-    /// `.>`, which shifts the bits of an unsigned integer right, filling with
-    /// zeros.
     ShiftRight,
     And,
     Or,
 }
 
 impl BinOp {
-    pub fn symbol(&self) -> &'static str {
+    pub const ALL: [Self; 17] = [
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Eq,
+        Self::Ne,
+        Self::Lt,
+        Self::Le,
+        Self::Gt,
+        Self::Ge,
+        Self::BitAnd,
+        Self::BitOr,
+        Self::BitXor,
+        Self::ShiftLeft,
+        Self::ShiftRight,
+        Self::And,
+        Self::Or,
+    ];
+
+    pub fn symbol(self) -> &'static str {
         match self {
             Self::Add => "+",
             Self::Sub => "-",
@@ -280,22 +289,70 @@ impl BinOp {
             Self::Or => "|",
         }
     }
+
+    /// The trait from the standard library that the operator calls a
+    /// function of, and that function's name, such as `Add` and `add` for
+    /// `+`.
+    pub fn trait_function(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Add => ("Add", "add"),
+            Self::Sub => ("Subtract", "subtract"),
+            Self::Mul => ("Multiply", "multiply"),
+            Self::Div => ("Divide", "divide"),
+            Self::Eq => ("Equal", "isEqual"),
+            Self::Ne => ("Equal", "isNotEqual"),
+            Self::Lt => ("Order", "isLess"),
+            Self::Le => ("Order", "isLessOrEqual"),
+            Self::Gt => ("Order", "isGreater"),
+            Self::Ge => ("Order", "isGreaterOrEqual"),
+            Self::BitAnd => ("BitAnd", "bitAnd"),
+            Self::BitOr => ("BitOr", "bitOr"),
+            Self::BitXor => ("BitXor", "bitXor"),
+            Self::ShiftLeft => ("ShiftLeft", "shiftLeft"),
+            Self::ShiftRight => ("ShiftRight", "shiftRight"),
+            Self::And => ("And", "and"),
+            Self::Or => ("Or", "or"),
+        }
+    }
+
+    /// Whether it compares its operands, producing a `Bool` rather than
+    /// something like them. Comparisons can't be chained.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Self::Eq | Self::Ne | Self::Lt | Self::Le | Self::Gt | Self::Ge
+        )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An operator before a value, which calls a function of a trait from the
+/// standard library, as `trait_function` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
     Not,
-    /// `.!`, which flips each bit of an integer.
     BitNot,
 }
 
 impl UnOp {
-    pub fn symbol(&self) -> &'static str {
+    pub const ALL: [Self; 3] = [Self::Neg, Self::Not, Self::BitNot];
+
+    pub fn symbol(self) -> &'static str {
         match self {
             Self::Neg => "-",
             Self::Not => "!",
             Self::BitNot => ".!",
+        }
+    }
+
+    /// The trait from the standard library that the operator calls a
+    /// function of, and that function's name, such as `Negate` and `negate`
+    /// for `-`.
+    pub fn trait_function(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Neg => ("Negate", "negate"),
+            Self::Not => ("Not", "not"),
+            Self::BitNot => ("BitNot", "bitNot"),
         }
     }
 }

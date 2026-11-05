@@ -121,14 +121,7 @@ fn fold_binary<'src, I: Input<'src>, E: ParserExtra<'src, I>>(
 
 /// Whether `expr` is a comparison that isn't in brackets.
 fn is_comparison(expr: &Expr) -> bool {
-    matches!(
-        expr.kind,
-        ExprKind::Binary(
-            _,
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
-            _
-        )
-    )
+    matches!(expr.kind, ExprKind::Binary(_, op, _) if op.is_comparison())
 }
 
 /// The type written `Void`, which is what's meant where no type is written, at

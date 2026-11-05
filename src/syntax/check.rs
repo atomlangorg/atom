@@ -198,13 +198,6 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// An arithmetic, bitwise or ordering operator was used on something
-    /// that isn't an integer.
-    NotInteger { op: &'static str, found: Type },
-    /// `-` was used on something that isn't a signed integer.
-    NotSignedInteger { op: &'static str, found: Type },
-    /// A shift was used on something that isn't an unsigned integer.
-    NotUnsignedInteger { op: &'static str, found: Type },
     /// An integer literal doesn't fit in its type, which holds `min` to
     /// `max`.
     IntOutOfRange {
@@ -406,9 +399,9 @@ pub enum CheckError {
         trait_name: String,
         expected: String,
     },
-    /// `&`, `|`, `!`, `==` or `!=` was used on a type that doesn't implement
-    /// the standard library's `And`, `Or`, `Not` or `Equal` trait, which
-    /// they call.
+    /// An operator was used on a type that doesn't implement the trait from
+    /// the standard library that it calls a function of, such as `Add` for
+    /// `+`.
     NotImplemented {
         op: &'static str,
         trait_name: &'static str,
@@ -558,21 +551,6 @@ impl fmt::Display for CheckError {
                 expected,
                 found,
             } => write!(f, "operator `{op}` expects `{expected}`, found `{found}`"),
-            Self::NotInteger { op, found } => {
-                write!(f, "operator `{op}` expects an integer, found `{found}`")
-            }
-            Self::NotSignedInteger { op, found } => {
-                write!(
-                    f,
-                    "operator `{op}` expects a signed integer, found `{found}`"
-                )
-            }
-            Self::NotUnsignedInteger { op, found } => {
-                write!(
-                    f,
-                    "operator `{op}` expects an unsigned integer, found `{found}`"
-                )
-            }
             Self::IntOutOfRange {
                 value,
                 ty,
@@ -3316,13 +3294,22 @@ impl<'a> Checker<'a> {
             self.error(span, CheckError::PrimitiveOutsideStdlib(shown));
             return;
         }
+        // Operators work on integers, which may be signed, `Bool`s and
+        // `ChoiceTag`s, and are named after the functions they call.
+        let signed = match &kind {
+            FnKind::Method(Some(ty)) => self.int_type(ty).is_some_and(|(_, signed)| signed),
+            _ => false,
+        };
+        let is_binary = |op: &BinOp| op.trait_function().1 == name;
+        let is_unary = |op: &UnOp| op.trait_function().1 == name;
         let primitive = match (owner, name) {
             (None, "exit") => ir::PrimitiveFn::Exit,
-            (Some("Bool"), "and") => ir::PrimitiveFn::BoolAnd,
-            (Some("Bool"), "or") => ir::PrimitiveFn::BoolOr,
-            (Some("Bool"), "not") => ir::PrimitiveFn::BoolNot,
-            (Some(_), "isEqual") => ir::PrimitiveFn::Equal,
-            (Some(_), "isNotEqual") => ir::PrimitiveFn::NotEqual,
+            (Some(_), _) if let Some(op) = BinOp::ALL.into_iter().find(is_binary) => {
+                ir::PrimitiveFn::Binary { op, signed }
+            }
+            (Some(_), _) if let Some(op) = UnOp::ALL.into_iter().find(is_unary) => {
+                ir::PrimitiveFn::Unary(op)
+            }
             (Some("Fn"), "call") => ir::PrimitiveFn::CallFn,
             (Some("ChoiceTag"), "new") => ir::PrimitiveFn::ChoiceTag,
             (Some("ChoiceOption"), "tag") => ir::PrimitiveFn::OptionTag,
@@ -4356,22 +4343,8 @@ impl<'a> Checker<'a> {
                     Typed::UNKNOWN
                 }
             },
-            // Operators always produce their result type, even if an operand
-            // is invalid, so one bad operand doesn't cause further errors.
-            ExprKind::Unary(op @ (UnOp::Neg | UnOp::BitNot), operand) => {
-                self.integer_unary(op, operand, expected)
-            }
-            ExprKind::Unary(UnOp::Not, operand) => self.not(operand),
-            ExprKind::Binary(lhs, op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), rhs) => {
-                self.comparison(lhs, op, rhs)
-            }
-            ExprKind::Binary(lhs, op @ (BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne), rhs) => {
-                self.trait_operator(lhs, op, rhs)
-            }
-            ExprKind::Binary(lhs, op @ (BinOp::ShiftLeft | BinOp::ShiftRight), rhs) => {
-                self.shift(lhs, op, rhs, expected)
-            }
-            ExprKind::Binary(lhs, op, rhs) => self.arithmetic(lhs, op, rhs, expected),
+            ExprKind::Unary(op, operand) => self.unary(*op, operand, expected),
+            ExprKind::Binary(lhs, op, rhs) => self.binary(lhs, *op, rhs, expected),
             ExprKind::Call { callee, args } => self.call(callee, args, span),
             ExprKind::Construct { ty, fields } => self.construct(ty, span, fields, expected),
             ExprKind::Paren(value) => match expected.and_then(|ty| self.elements(ty.id)) {
@@ -4480,126 +4453,29 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks the operands of a binary operator, where `expected` is the
-    /// type the operator is used as. Each operand is used as the other's
-    /// type, so `x + 1` takes the type of `x`. An operand made only of
-    /// integer literals has no type of its own, so it's checked second.
-    fn operands(&mut self, lhs: &Expr, rhs: &Expr, expected: Option<&Type>) -> (Typed, Typed) {
-        if has_own_type(lhs) || !has_own_type(rhs) {
-            let lhs = self.expr_as(lhs, expected);
-            let rhs = self.expr_as(rhs, lhs.ty.as_ref().or(expected));
-            (lhs, rhs)
-        } else {
-            let rhs = self.expr_as(rhs, expected);
-            let lhs = self.expr_as(lhs, rhs.ty.as_ref().or(expected));
-            (lhs, rhs)
-        }
-    }
-
-    /// Checks `-operand`, which negates a signed integer, or `.!operand`,
-    /// which flips the bits of any integer. Both produce another integer of
-    /// the same type.
-    fn integer_unary(&mut self, op: &UnOp, operand: &Expr, expected: Option<&Type>) -> Typed {
+    /// Checks `op operand`, which calls a function of a trait from the
+    /// standard library, as `UnOp::trait_function` says, such as
+    /// `operand.negate()` from `Negate` for `-operand`. The operand's type
+    /// must implement the trait, and the result is the function's. The
+    /// operand is used as `expected`, which is what the operator is used as.
+    fn unary(&mut self, op: UnOp, operand: &Expr, expected: Option<&Type>) -> Typed {
+        let (trait_name, method) = op.trait_function();
         let span = operand.span;
         let Typed { ty, expr } = self.expr_as(operand, expected);
-        let needs_signed = *op == UnOp::Neg;
-        match ty {
-            Some(ty)
-                if self
-                    .int_type(&ty)
-                    .is_some_and(|(_, signed)| signed || !needs_signed) =>
-            {
-                Typed {
-                    expr: expr.map(|operand| ir::Expr::Unary(op.clone(), Box::new(operand))),
-                    ty: Some(ty),
-                }
-            }
-            found => {
-                if let Some(found) = found {
-                    let op = op.symbol();
-                    self.error(
-                        span,
-                        if needs_signed {
-                            CheckError::NotSignedInteger { op, found }
-                        } else {
-                            CheckError::NotInteger { op, found }
-                        },
-                    );
-                }
-                Typed {
-                    ty: Some(self.int_type_for(expected)),
-                    expr: None,
-                }
-            }
-        }
-    }
-
-    /// Checks `lhs op rhs`, where `op` is `+`, `-`, `*`, `/`, `.&`, `.|` or
-    /// `.^`, whose operands are integers of the same type, which it produces. The first operand
-    /// that's an integer decides the type.
-    fn arithmetic(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
-        let spans = [lhs.span, rhs.span];
-        let (lhs, rhs) = self.operands(lhs, rhs, expected);
-        let ty = [&lhs.ty, &rhs.ty]
-            .into_iter()
-            .flatten()
-            .find(|ty| self.int_type(ty).is_some())
-            .cloned()
-            .unwrap_or_else(|| self.int_type_for(expected));
-        let op_symbol = op.symbol();
-        for (found, span) in [&lhs.ty, &rhs.ty].into_iter().zip(spans) {
-            let Some(found) = found else {
-                continue;
-            };
-            if self.int_type(found).is_none() {
-                let found = found.clone();
-                self.error(
-                    span,
-                    CheckError::NotInteger {
-                        op: op_symbol,
-                        found,
-                    },
-                );
-            } else if *found != ty {
-                self.error(
-                    span,
-                    CheckError::InvalidOperand {
-                        op: op_symbol,
-                        expected: ty.clone(),
-                        found: found.clone(),
-                    },
-                );
-            }
-        }
-
-        let (_, signed) = self.int_type(&ty).expect("found as an integer type");
-        let expr = lhs.expr.zip(rhs.expr).map(|(lhs, rhs)| ir::Expr::Binary {
-            lhs: Box::new(lhs),
-            op: op.clone(),
-            rhs: Box::new(rhs),
-            signed,
-        });
-        Typed { ty: Some(ty), expr }
-    }
-
-    /// Checks `!operand`, which calls `operand.not()` from the standard
-    /// library's `Not` trait, which the operand's type must implement. The
-    /// result is its implementation's `Output`.
-    fn not(&mut self, operand: &Expr) -> Typed {
-        let span = operand.span;
-        let Typed { ty, expr } = self.expr(operand);
         let function = ty
             .as_ref()
-            .and_then(|ty| self.operator_method("!", "Not", "not", ty, span));
+            .and_then(|ty| self.operator_method(op.symbol(), trait_name, method, ty, span));
         let expr = function
             .zip(expr)
             .map(|(function, operand)| ir::Expr::Call {
                 function,
                 args: vec![operand],
             });
-        // The result's type comes from `not`, so it's unknown without it.
+        // The result's type comes from the function, so it's unknown without
+        // it.
+        let returns = function.and_then(|function| self.functions[function].returns.clone());
         Typed {
-            ty: function.and_then(|function| self.functions[function].returns.clone()),
+            ty: returns.map(|returns| self.named_like(returns, ty.as_ref())),
             expr,
         }
     }
@@ -4650,29 +4526,27 @@ impl<'a> Checker<'a> {
         Some(found)
     }
 
-    /// Checks `lhs & rhs`, `lhs | rhs`, `lhs == rhs` or `lhs != rhs`, which
-    /// call `lhs.and(rhs)`, `lhs.or(rhs)`, `lhs.isEqual(to: rhs)` or
-    /// `lhs.isNotEqual(to: rhs)` from the standard library's `And`, `Or` or
-    /// `Equal` trait, which the type of `lhs` must implement. `rhs` must be
-    /// its implementation's `Rhs`, and the result is the method's.
-    fn trait_operator(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
-        let (trait_name, method) = match op {
-            BinOp::And => ("And", "and"),
-            BinOp::Or => ("Or", "or"),
-            BinOp::Eq => ("Equal", "isEqual"),
-            BinOp::Ne => ("Equal", "isNotEqual"),
-            _ => unreachable!("only `&`, `|`, `==` and `!=` call trait functions"),
+    /// Checks `lhs op rhs`, which calls a function of a trait from the
+    /// standard library, as `BinOp::trait_function` says, such as
+    /// `lhs.add(rhs)` from `Add` for `lhs + rhs`. The type of `lhs` must
+    /// implement the trait, `rhs` must be its implementation's `Rhs`, and the
+    /// result is the function's. Unless it's a comparison, the operands are
+    /// used as `expected`, which is what the operator is used as.
+    fn binary(&mut self, lhs: &Expr, op: BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
+        let (trait_name, method) = op.trait_function();
+        let (lhs_span, rhs_span) = (lhs.span, rhs.span);
+        let expected = expected.filter(|_| !op.is_comparison());
+        // An operand made only of integer literals has no type of its own, so
+        // in `0 == byte`, the `0` takes its type from `byte`. What a shift is
+        // shifted by doesn't have the type of what's shifted.
+        let is_shift = matches!(op, BinOp::ShiftLeft | BinOp::ShiftRight);
+        let (lhs, rhs_first) = if !is_shift && !has_own_type(lhs) && has_own_type(rhs) {
+            let rhs = self.expr_as(rhs, expected);
+            (self.expr_as(lhs, rhs.ty.as_ref().or(expected)), Some(rhs))
+        } else {
+            (self.expr_as(lhs, expected), None)
         };
         let op = op.symbol();
-        let (lhs_span, rhs_span) = (lhs.span, rhs.span);
-        // An operand made only of integer literals has no type of its own, so
-        // in `0 == byte`, the `0` takes its type from `byte`.
-        let (lhs, rhs_first) = if !has_own_type(lhs) && has_own_type(rhs) {
-            let rhs = self.expr(rhs);
-            (self.expr_as(lhs, rhs.ty.as_ref()), Some(rhs))
-        } else {
-            (self.expr(lhs), None)
-        };
         let signature = lhs
             .ty
             .as_ref()
@@ -4686,15 +4560,13 @@ impl<'a> Checker<'a> {
             .and_then(|(_, signature)| signature.params.first()?.ty.clone());
         let rhs = match rhs_first {
             Some(rhs) => rhs,
-            None => self.expr_as(rhs, param.as_ref()),
+            None => self.expr_as(rhs, param.as_ref().or(expected)),
         };
         let mut function = signature.as_ref().map(|&(function, _)| function);
         if let Some((param, found)) = param.zip(rhs.ty)
             && param != found
         {
-            // Named as the left operand is when it's the same type, such as
-            // `Int` rather than the `IntS64` its `impl` is for.
-            let expected = lhs.ty.clone().filter(|ty| *ty == param).unwrap_or(param);
+            let expected = self.named_like(param, lhs.ty.as_ref());
             self.error(
                 rhs_span,
                 CheckError::InvalidOperand {
@@ -4712,10 +4584,20 @@ impl<'a> Checker<'a> {
                 function,
                 args: vec![lhs, rhs],
             });
+        let returns = signature.and_then(|(_, signature)| signature.returns);
         Typed {
-            ty: signature.and_then(|(_, signature)| signature.returns),
+            ty: returns.map(|returns| self.named_like(returns, lhs.ty.as_ref())),
             expr,
         }
+    }
+
+    /// `ty`, named as `operand` is if it's the same type, such as `Int`
+    /// rather than the `IntS64` that an operator's `impl` is for.
+    fn named_like(&self, ty: Type, operand: Option<&Type>) -> Type {
+        operand
+            .filter(|operand| **operand == ty)
+            .cloned()
+            .unwrap_or(ty)
     }
 
     /// Checks a tuple built from `values`, labelled like the elements of its
@@ -4774,117 +4656,6 @@ impl<'a> Checker<'a> {
                 fields,
             });
         Typed { ty, expr }
-    }
-
-    /// Checks `lhs .< rhs` or `lhs .> rhs`, which shift the bits of an
-    /// unsigned integer, producing another of the same type. The amount to
-    /// shift by can be any integer type.
-    fn shift(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr, expected: Option<&Type>) -> Typed {
-        let op_symbol = op.symbol();
-        let (lhs_span, rhs_span) = (lhs.span, rhs.span);
-        let lhs = self.expr_as(lhs, expected);
-        let rhs = self.expr(rhs);
-        let ty = match lhs.ty {
-            Some(ty) if self.int_type(&ty).is_some_and(|(_, signed)| !signed) => Some(ty),
-            Some(found) => {
-                self.error(
-                    lhs_span,
-                    CheckError::NotUnsignedInteger {
-                        op: op_symbol,
-                        found,
-                    },
-                );
-                None
-            }
-            None => None,
-        };
-        let rhs_expr = match rhs.ty {
-            Some(ty) if self.int_type(&ty).is_some() => rhs.expr,
-            Some(found) => {
-                self.error(
-                    rhs_span,
-                    CheckError::NotInteger {
-                        op: op_symbol,
-                        found,
-                    },
-                );
-                None
-            }
-            None => None,
-        };
-
-        let expr = ty
-            .as_ref()
-            .and(lhs.expr.zip(rhs_expr))
-            .map(|(lhs, rhs)| ir::Expr::Binary {
-                lhs: Box::new(lhs),
-                op: op.clone(),
-                rhs: Box::new(rhs),
-                signed: false,
-            });
-        Typed {
-            ty: Some(ty.unwrap_or_else(|| self.int_type_for(expected))),
-            expr,
-        }
-    }
-
-    /// Checks `<`, `<=`, `>` or `>=`, which order two integers of the same
-    /// type, producing a `Bool`. The first operand whose type is known
-    /// decides what's compared.
-    fn comparison(&mut self, lhs: &Expr, op: &BinOp, rhs: &Expr) -> Typed {
-        let spans = [lhs.span, rhs.span];
-        let (lhs, rhs) = self.operands(lhs, rhs, None);
-        let bool_ty = self.std_type("Bool");
-        let op_symbol = op.symbol();
-        let compared = match lhs.ty.clone().or(rhs.ty.clone()) {
-            Some(ty) if self.int_type(&ty).is_some() => Some(ty),
-            Some(found) => {
-                // The first operand whose type is known decided what's compared.
-                let span = if lhs.ty.is_some() { spans[0] } else { spans[1] };
-                self.error(
-                    span,
-                    CheckError::NotInteger {
-                        op: op_symbol,
-                        found,
-                    },
-                );
-                None
-            }
-            None => None,
-        };
-        if let Some(compared) = &compared {
-            for (found, span) in [&lhs.ty, &rhs.ty].into_iter().zip(spans) {
-                if let Some(found) = found
-                    && found != compared
-                {
-                    self.error(
-                        span,
-                        CheckError::InvalidOperand {
-                            op: op_symbol,
-                            expected: compared.clone(),
-                            found: found.clone(),
-                        },
-                    );
-                }
-            }
-        }
-
-        let signed = compared
-            .as_ref()
-            .and_then(|ty| self.int_type(ty))
-            .is_some_and(|(_, signed)| signed);
-        let expr = compared
-            .and(lhs.expr.zip(rhs.expr))
-            .map(|(lhs, rhs)| ir::Expr::Binary {
-                lhs: Box::new(lhs),
-                op: op.clone(),
-                rhs: Box::new(rhs),
-                signed,
-            });
-        Typed {
-            ty: Some(bool_ty),
-            expr,
-        }
     }
 
     /// Checks the receiver of a field access or method call, which is followed
@@ -6130,18 +5901,26 @@ mod tests {
         check_top(&format!("fn body() {{\n{src}\n}}"))
     }
 
-    /// The error for an arithmetic operator `op` used on a `Bool`.
-    fn not_integer(op: &'static str) -> CheckError {
-        CheckError::NotInteger {
+    /// The error for the binary operator `op` used on a `Bool`, which doesn't
+    /// implement the trait it calls.
+    fn not_implemented(op: &'static str) -> CheckError {
+        let (trait_name, _) = BinOp::ALL
+            .into_iter()
+            .find(|found| found.symbol() == op)
+            .expect("`op` is a binary operator")
+            .trait_function();
+        CheckError::NotImplemented {
             op,
+            trait_name,
             found: ty("Bool"),
         }
     }
 
-    /// The error for `-` used on a `Bool`.
-    fn not_signed_integer() -> CheckError {
-        CheckError::NotSignedInteger {
+    /// The error for `-` used on a `Bool`, which can't be negated.
+    fn not_negatable() -> CheckError {
+        CheckError::NotImplemented {
             op: "-",
+            trait_name: "Negate",
             found: ty("Bool"),
         }
     }
@@ -6380,7 +6159,7 @@ mod tests {
     fn boolean_operators_produce_booleans() {
         assert_eq!(
             check_body("let x = (true | false) + 1"),
-            Err(vec![not_integer("+")])
+            Err(vec![not_implemented("+")])
         );
         assert_eq!(
             check_body("var n = 0\nn = !false"),
@@ -6396,10 +6175,7 @@ mod tests {
     fn rejects_mixing_negations() {
         // `-` needs a signed integer and `!` needs a `Bool`, so `-!x` and
         // `!-x` can never be valid.
-        assert_eq!(
-            check_body("let x = -!true"),
-            Err(vec![not_signed_integer()])
-        );
+        assert_eq!(check_body("let x = -!true"), Err(vec![not_negatable()]));
     }
 
     #[test]
@@ -6464,7 +6240,7 @@ mod tests {
     fn comparisons_produce_booleans() {
         assert_eq!(
             check_body("let x = (1 == 1) + 1"),
-            Err(vec![not_integer("+")])
+            Err(vec![not_implemented("+")])
         );
     }
 
@@ -6522,7 +6298,7 @@ mod tests {
     fn rejects_ordering_other_types() {
         assert_eq!(
             check_body("let x = true < false"),
-            Err(vec![not_integer("<")])
+            Err(vec![not_implemented("<")])
         );
         assert_eq!(
             check_body("let x = 1 <= true"),
@@ -6530,14 +6306,15 @@ mod tests {
         );
         assert_eq!(
             check_body("let x = Void.new() > Void.new()"),
-            Err(vec![CheckError::NotInteger {
+            Err(vec![CheckError::NotImplemented {
                 op: ">",
+                trait_name: "Order",
                 found: ty("Void"),
             }])
         );
         assert_eq!(
             messages("let x = true >= false"),
-            vec!["operator `>=` expects an integer, found `Bool`"]
+            vec!["operator `>=` expects a type that implements `Order`, found `Bool`"]
         );
     }
 
@@ -6549,7 +6326,7 @@ mod tests {
                 let b: IntS8 = .!small .& -1
                 let c: Int = .!1 .^ 2
                 let d: IntU8 = byte .< amount .> 1
-                let e: IntU8 = 1 .< small
+                let e: IntU8 = 1 .< amount
                 let f: IntU8 = byte + (1 .< 3)
                 let g: Bool = 3 .& 1 == 1
             }
@@ -6561,20 +6338,19 @@ mod tests {
     fn rejects_bitwise_operators_on_booleans() {
         assert_eq!(
             check_body("let x = true .& 1"),
-            Err(vec![not_integer(".&")])
+            Err(vec![not_implemented(".&")])
         );
         assert_eq!(
             check_body("let x = 1 .| false"),
-            Err(vec![not_integer(".|")])
+            Err(vec![invalid_operand(".|")])
         );
         assert_eq!(
             check_body("let x = true .^ true"),
-            Err(vec![not_integer(".^"), not_integer(".^")])
+            Err(vec![not_implemented(".^")])
         );
-        assert_eq!(check_body("let x = .!true"), Err(vec![not_integer(".!")]));
         assert_eq!(
             messages("let x = .!false"),
-            vec!["operator `.!` expects an integer, found `Bool`"]
+            vec!["operator `.!` expects a type that implements `BitNot`, found `Bool`"]
         );
     }
 
@@ -6589,15 +6365,17 @@ mod tests {
                     let c = true .< 1
                     let d = byte .> true
                     let e: IntU8 = small .< byte
+                    let f = byte .< byte
                 }
                 "
             ),
             [
-                "operator `.<` expects an unsigned integer, found `IntS8`",
-                "operator `.>` expects an unsigned integer, found `Int`",
-                "operator `.<` expects an unsigned integer, found `Bool`",
-                "operator `.>` expects an integer, found `Bool`",
-                "operator `.<` expects an unsigned integer, found `IntS8`",
+                "operator `.<` expects a type that implements `ShiftLeft`, found `IntS8`",
+                "operator `.>` expects a type that implements `ShiftRight`, found `Int`",
+                "operator `.<` expects a type that implements `ShiftLeft`, found `Bool`",
+                "operator `.>` expects `Int`, found `Bool`",
+                "operator `.<` expects a type that implements `ShiftLeft`, found `IntS8`",
+                "operator `.<` expects `Int`, found `IntU8`",
             ]
         );
     }
@@ -6607,7 +6385,7 @@ mod tests {
         assert_eq!(
             messages_top(
                 "
-                fn f(byte: IntU8, amount: IntU64) {
+                fn f(byte: IntU8, amount: Int) {
                     let a: IntU64 = byte .< amount
                 }
                 "
@@ -6637,16 +6415,22 @@ mod tests {
 
     #[test]
     fn rejects_arithmetic_on_booleans() {
-        assert_eq!(check_body("let x = true + 1"), Err(vec![not_integer("+")]));
-        assert_eq!(check_body("let x = 1 - false"), Err(vec![not_integer("-")]));
-        assert_eq!(check_body("let x = -true"), Err(vec![not_signed_integer()]));
+        assert_eq!(
+            check_body("let x = true + 1"),
+            Err(vec![not_implemented("+")])
+        );
+        assert_eq!(
+            check_body("let x = 1 - false"),
+            Err(vec![invalid_operand("-")])
+        );
+        assert_eq!(check_body("let x = -true"), Err(vec![not_negatable()]));
         assert_eq!(
             check_body("let x = 4 / (true)"),
-            Err(vec![not_integer("/")])
+            Err(vec![invalid_operand("/")])
         );
         assert_eq!(
             check_body("let b = true\nlet x = b * b"),
-            Err(vec![not_integer("*"), not_integer("*")])
+            Err(vec![not_implemented("*")])
         );
     }
 
@@ -6679,7 +6463,7 @@ mod tests {
         );
         assert_eq!(
             check_body("let x = -true\nlet y = x + 1"),
-            Err(vec![not_signed_integer()])
+            Err(vec![not_negatable()])
         );
     }
 
@@ -6695,7 +6479,7 @@ mod tests {
 
         assert_eq!(
             messages("let x = true + 1"),
-            ["operator `+` expects an integer, found `Bool`"]
+            ["operator `+` expects a type that implements `Add`, found `Bool`"]
         );
         assert_eq!(
             messages("var b = false\nb = 1"),
@@ -7359,7 +7143,7 @@ mod tests {
                 "
             ),
             [
-                "operator `+` expects an integer, found `Void`",
+                "operator `+` expects `Int`, found `Void`",
                 "cannot assign `Void` to `w`, which has type `Int`",
                 "`if` condition must be `Bool`, found `Void`",
             ]
@@ -7379,7 +7163,7 @@ mod tests {
                 "
             ),
             [
-                "operator `+` expects an integer, found `Bool`",
+                "operator `+` expects a type that implements `Add`, found `Bool`",
                 "cannot assign `Bool` to `y`, which has type `Int`",
             ]
         );
@@ -7714,7 +7498,7 @@ mod tests {
             ),
             [
                 "cannot assign `User` to `x`, which has type `Int`",
-                "operator `+` expects an integer, found `User`",
+                "operator `+` expects a type that implements `Add`, found `User`",
                 "`if` condition must be `Bool`, found `User`",
                 "argument `user` of `f` expects `User`, found `Int`",
                 "`f` must return `User`, found `Bool`",
@@ -8916,7 +8700,7 @@ mod tests {
         // Their types are known wherever they're used first.
         assert_eq!(
             messages_top("let a = b + 1\nlet b = true"),
-            ["operator `+` expects an integer, found `Bool`"]
+            ["operator `+` expects a type that implements `Add`, found `Bool`"]
         );
     }
 
@@ -9313,7 +9097,7 @@ mod tests {
             )),
             [
                 "cannot assign `User` to `x`, which has type `Int`",
-                "operator `+` expects an integer, found `User`",
+                "operator `+` expects a type that implements `Add`, found `User`",
             ]
         );
     }
@@ -9380,7 +9164,7 @@ mod tests {
             [
                 "field `age` of `User` expects `Int`, found `Bool`",
                 "field `isAdmin` of `User` expects `Bool`, found `Int`",
-                "operator `-` expects a signed integer, found `Bool`",
+                "operator `-` expects a type that implements `Negate`, found `Bool`",
             ]
         );
     }
@@ -9638,7 +9422,7 @@ mod tests {
                 }
                 "
             ),
-            ["operator `+` expects an integer, found `Bool`"]
+            ["operator `+` expects a type that implements `Add`, found `Bool`"]
         );
     }
 
@@ -10050,7 +9834,7 @@ mod tests {
             )),
             [
                 "cannot assign `Int` to `a`, which has type `Bool`",
-                "operator `+` expects an integer, found `Bool`",
+                "operator `+` expects a type that implements `Add`, found `Bool`",
                 "cannot assign `User` to `c`, which has type `Int`",
             ]
         );
@@ -10092,10 +9876,7 @@ mod tests {
                 }
                 "
             ),
-            [
-                "unknown type `Missing`",
-                "operator `+` expects an integer, found `Bool`",
-            ]
+            ["unknown type `Missing`"]
         );
     }
 
@@ -11285,10 +11066,7 @@ mod tests {
             ";
         assert_eq!(
             messages_top(src),
-            [
-                "operator `+` expects an integer, found `Bool`",
-                "`bumped` must return `Bool`, found `Int`",
-            ]
+            ["operator `+` expects a type that implements `Add`, found `Bool`"]
         );
     }
 
@@ -13325,7 +13103,7 @@ primitive Float"
             messages_top(src),
             [
                 "argument to `small` should be labelled `b`, found `c`",
-                "operator `+` expects an integer, found `Bool`",
+                "operator `+` expects `Int`, found `Bool`",
                 "argument `a` of `small` expects `IntU8`, found `Int`",
                 "argument to `small` should be labelled `b`, found `c`",
                 "`missing` is not declared",
@@ -13970,8 +13748,7 @@ primitive Float"
                 "`T` is already declared",
                 "`Box<T, T>` already has a field `value`",
                 "unknown type `Missing`",
-                "operator `+` expects an integer, found `T`",
-                "`next` must return `T`, found `Int`",
+                "operator `+` expects a type that implements `Add`, found `T`",
             ]
         );
     }
@@ -14530,7 +14307,7 @@ primitive Float"
                 }
                 "
             ),
-            ["operator `-` expects a signed integer, found `IntU8`"]
+            ["operator `-` expects a type that implements `Negate`, found `IntU8`"]
         );
     }
 }
