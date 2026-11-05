@@ -68,19 +68,6 @@ impl fmt::Display for ImportPath {
     }
 }
 
-impl ImportPath {
-    /// Adds `segment` to the end of a path that starts with a directory.
-    pub fn push(&mut self, segment: String) {
-        match self {
-            Self::Absolute(segments)
-            | Self::Relative(segments)
-            | Self::Parent(_, segments)
-            | Self::Package(segments) => segments.push(segment),
-            Self::Named(_) => unreachable!("a name alone doesn't start with a directory"),
-        }
-    }
-}
-
 /// What a `use` imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Import {

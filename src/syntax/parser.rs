@@ -198,6 +198,61 @@ where
         })
 }
 
+/// The file or module that `path` in a `use` refers to, or `None` if it isn't
+/// a path. `/dir/other` starts from the root, `./dir/other` from the current
+/// directory, `../dir/other` from the one above it, and `stdlib/core` from a
+/// package. Ending in a slash, as in `/dir/`, `./`, `../` or `stdlib/`, is a
+/// module: every file in a directory and its subdirectories. A name alone,
+/// as in `other`, is a file, so that the checker can explain why it isn't
+/// found.
+fn import(path: &str) -> Option<Import> {
+    let after_up = path.trim_start_matches("../");
+    let up = (path.len() - after_up.len()) / 3;
+    let (rest, start): (_, Box<dyn FnOnce(Vec<String>) -> ImportPath>) = if up > 0 {
+        (
+            after_up,
+            Box::new(move |segments| ImportPath::Parent(up, segments)),
+        )
+    } else if let Some(rest) = path.strip_prefix("./") {
+        (rest, Box::new(ImportPath::Relative))
+    } else if let Some(rest) = path.strip_prefix('/') {
+        (rest, Box::new(ImportPath::Absolute))
+    } else {
+        (path, Box::new(ImportPath::Package))
+    };
+    let (names, is_module) = match rest.strip_suffix('/') {
+        Some(names) => (names, true),
+        None => (rest, rest.is_empty()),
+    };
+    // Each directory and file is named like anything else, so `..` can only
+    // be at the start.
+    let is_name = |name: &str| {
+        matches!(
+            &lexer::tokens(name).collect::<Vec<_>>()[..],
+            [(Token::Ident(_), _)]
+        )
+    };
+    let segments = match names {
+        "" => vec![],
+        names => names
+            .split('/')
+            .map(|name| is_name(name).then(|| name.to_string()))
+            .collect::<Option<_>>()?,
+    };
+    let path = match start(segments) {
+        // Only a module can be just a package's name.
+        ImportPath::Package(mut segments) if !is_module && segments.len() == 1 => {
+            ImportPath::Named(segments.remove(0))
+        }
+        path => path,
+    };
+    Some(if is_module {
+        Import::Module(path)
+    } else {
+        Import::File { path, alias: None }
+    })
+}
+
 fn program_parser<'tok, 'src: 'tok, I>() -> impl Parser<'tok, I, Program, Extra<'tok, 'src>>
 where
     I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
@@ -228,39 +283,7 @@ where
     // except that `_: Int` has neither a label nor a name. A generic type is
     // given its arguments, as in `Optional<Int>`, and in a generic type's
     // `impl`, `Self.T` is what its parameter `T` stands for.
-    let type_name = recursive(|type_name| {
-        let args = type_name
-            .clone()
-            .separated_by(just(Token::Comma))
-            .at_least(1)
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::Lt), just(Token::Gt));
-        let element = just(Token::Underscore)
-            .ignore_then(ident.or_not())
-            .map(|name| (None, name))
-            .or(ident
-                .then(ident)
-                .map(|(label, name)| (Some(label), Some(name))))
-            .or(ident.map(|name| (Some(name.clone()), Some(name))))
-            .then_ignore(just(Token::Colon))
-            .then(type_name)
-            .map(|((label, name), ty)| TupleElement { label, name, ty });
-        let self_param = just(Token::SelfType)
-            .ignore_then(just(Token::Dot))
-            .ignore_then(ident)
-            .map_with(|param, e| TypeName::SelfParam(param, Span::from(e.span())));
-        self_param
-            .or(name
-                .clone()
-                .then(args.or_not())
-                .map(|(name, args)| match args {
-                    Some(args) => TypeName::Generic { name, args },
-                    None => TypeName::Named(name),
-                }))
-            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
-            .labelled("type")
-    })
-    .boxed();
+    let mut type_name = Recursive::declare();
     let type_args = type_name
         .clone()
         .separated_by(just(Token::Comma))
@@ -275,6 +298,26 @@ where
             Some(args) => TypeName::Generic { name, args },
             None => TypeName::Named(name),
         });
+    let element = just(Token::Underscore)
+        .ignore_then(ident.or_not())
+        .map(|name| (None, name))
+        .or(ident
+            .then(ident)
+            .map(|(label, name)| (Some(label), Some(name))))
+        .or(ident.map(|name| (Some(name.clone()), Some(name))))
+        .then_ignore(just(Token::Colon))
+        .then(type_name.clone())
+        .map(|((label, name), ty)| TupleElement { label, name, ty });
+    let self_param = just(Token::SelfType)
+        .ignore_then(just(Token::Dot))
+        .ignore_then(ident)
+        .map_with(|param, e| TypeName::SelfParam(param, Span::from(e.span())));
+    type_name.define(
+        self_param
+            .or(named_type.clone())
+            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
+            .labelled("type"),
+    );
 
     // Unary and binary operators applied to `atom`, which is the tightest
     // binding part of an expression.
@@ -786,83 +829,57 @@ where
         (function, block)
     };
 
-    // Where a path starts from, and the directories it goes through.
-    let directories = ident.then_ignore(just(Token::Slash)).repeated();
-    let up = just(Token::Dot)
-        .then(just(Token::Dot))
-        .then(just(Token::Slash))
-        .repeated()
-        .at_least(1)
-        .count();
-    let start = choice((
-        just(Token::Slash)
-            .ignore_then(directories.clone().collect())
-            .map(ImportPath::Absolute),
-        just(Token::Dot)
-            .then(just(Token::Slash))
-            .ignore_then(directories.clone().collect())
-            .map(ImportPath::Relative),
-        up.then(directories.clone().collect())
-            .map(|(up, segments)| ImportPath::Parent(up, segments)),
-        directories.at_least(1).collect().map(ImportPath::Package),
-    ));
-    // `as` only means this here, so it can still be used as a name or label, as
-    // in `isSame(as: other)`.
+    // `use /dir/other`, which can have an alias, as in `use /dir/other as
+    // renamed`, or `use /dir/`, for a module. `as` only means this here, so
+    // it can still be used as a name or label, as in `isSame(as: other)`.
+    // The path is one token, so anything else after it on the line means it
+    // contains a space or comment.
+    let path = select! { Token::Path(path) => path }
+        .map_with(|path, e| (path, e.span()))
+        .labelled("path");
     let alias = just(Token::Ident("as")).ignore_then(ident).or_not();
-    // A name after a final slash would be part of the path, so a module with an
-    // alias would look like a file with a space in its path, followed by a name.
-    let aliased_module = start
-        .clone()
-        .map(Import::Module)
-        .then_ignore(just(Token::Ident("as")))
-        .then_ignore(ident)
-        .then_ignore(just(Token::Newline).ignored().or(end()).rewind())
-        .validate(|import, e, emitter| {
-            emitter.emit(Rich::custom(
-                e.span(),
-                format!("`{import}` is a module, so it can't have an alias"),
-            ));
-            import
-        });
-    // `/dir/other`, `./dir/other`, `../dir/other`, `stdlib/core` or `other` is a
-    // file, which can have an alias, as in `/dir/other as renamed`. Ending in a
-    // slash, as in `/dir/`, `./dir/`, `../dir/`, `stdlib/`, `./`, `../` or `/`, is
-    // a module: every file in a directory and its subdirectories.
-    let import = start
-        .then(ident.or_not())
-        .map(|(mut path, name)| match name {
-            Some(name) => {
-                path.push(name);
-                Import::File { path, alias: None }
-            }
-            None => Import::Module(path),
-        })
-        .or(ident.map(|name| Import::File {
-            path: ImportPath::Named(name),
-            alias: None,
-        }))
-        // Spaces and comments aren't tokens, so the only sign of one inside a
-        // path is that the path's source is longer than the path.
-        .validate(|import, e, emitter| {
-            let span: SimpleSpan = e.span();
-            if span.into_range().len() > import.to_string().len() {
-                emitter.emit(Rich::custom(span, "paths can't contain spaces or comments"));
-            }
-            import
-        })
-        .labelled("path")
-        .then(alias)
-        // A module never has an alias here, since any name after its final
-        // slash is part of the path instead.
-        .map(|(import, alias)| match import {
-            Import::File { path, .. } => Import::File { path, alias },
-            directory => directory,
-        });
+    let rest_of_line = any()
+        .and_is(just(Token::Newline).not())
+        .map_with(|_, e| e.span())
+        .repeated()
+        .collect::<Vec<SimpleSpan>>();
     let use_ = just(Token::Use)
-        .ignore_then(aliased_module.or(import))
-        .map_with(|import, e| Stmt {
-            kind: StmtKind::Use(import),
-            span: Span::from(e.span()),
+        .ignore_then(path)
+        .then(alias)
+        .then(rest_of_line)
+        .validate(|(((path, path_span), alias), rest), e, emitter| {
+            if let (Some(first), Some(last)) = (rest.first(), rest.last()) {
+                let message = match alias {
+                    None => "paths can't contain spaces or comments",
+                    Some(_) => "expected the end of the line after the alias",
+                };
+                emitter.emit(Rich::custom((first.start..last.end).into(), message));
+            }
+            let import = match (import(path), alias) {
+                (Some(Import::File { path, .. }), alias) => Import::File { path, alias },
+                (Some(module @ Import::Module(_)), None) => module,
+                (Some(module @ Import::Module(_)), Some(_)) => {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        format!("`{module}` is a module, so it can't have an alias"),
+                    ));
+                    module
+                }
+                (None, _) => {
+                    emitter.emit(Rich::custom(
+                        path_span,
+                        format!(
+                            "`{path}` isn't a path, such as `./dir/other`, `../other`, \
+                             `/dir/` or `stdlib/core`"
+                        ),
+                    ));
+                    Import::Module(ImportPath::Named(path.to_string()))
+                }
+            };
+            Stmt {
+                kind: StmtKind::Use(import),
+                span: Span::from(e.span()),
+            }
         });
 
     // `impl Type { fn ... }`, with one function per line, like a block. Each
