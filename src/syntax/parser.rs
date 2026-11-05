@@ -121,14 +121,7 @@ fn fold_binary<'src, I: Input<'src>, E: ParserExtra<'src, I>>(
 
 /// Whether `expr` is a comparison that isn't in brackets.
 fn is_comparison(expr: &Expr) -> bool {
-    matches!(
-        expr.kind,
-        ExprKind::Binary(
-            _,
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
-            _
-        )
-    )
+    matches!(expr.kind, ExprKind::Binary(_, op, _) if op.is_comparison())
 }
 
 /// The type written `Void`, which is what's meant where no type is written, at
@@ -205,6 +198,61 @@ where
         })
 }
 
+/// The file or module that `path` in a `use` refers to, or `None` if it isn't
+/// a path. `/dir/other` starts from the root, `./dir/other` from the current
+/// directory, `../dir/other` from the one above it, and `stdlib/core` from a
+/// package. Ending in a slash, as in `/dir/`, `./`, `../` or `stdlib/`, is a
+/// module: every file in a directory and its subdirectories. A name alone,
+/// as in `other`, is a file, so that the checker can explain why it isn't
+/// found.
+fn import(path: &str) -> Option<Import> {
+    let after_up = path.trim_start_matches("../");
+    let up = (path.len() - after_up.len()) / 3;
+    let (rest, start): (_, Box<dyn FnOnce(Vec<String>) -> ImportPath>) = if up > 0 {
+        (
+            after_up,
+            Box::new(move |segments| ImportPath::Parent(up, segments)),
+        )
+    } else if let Some(rest) = path.strip_prefix("./") {
+        (rest, Box::new(ImportPath::Relative))
+    } else if let Some(rest) = path.strip_prefix('/') {
+        (rest, Box::new(ImportPath::Absolute))
+    } else {
+        (path, Box::new(ImportPath::Package))
+    };
+    let (names, is_module) = match rest.strip_suffix('/') {
+        Some(names) => (names, true),
+        None => (rest, rest.is_empty()),
+    };
+    // Each directory and file is named like anything else, so `..` can only
+    // be at the start.
+    let is_name = |name: &str| {
+        matches!(
+            &lexer::tokens(name).collect::<Vec<_>>()[..],
+            [(Token::Ident(_), _)]
+        )
+    };
+    let segments = match names {
+        "" => vec![],
+        names => names
+            .split('/')
+            .map(|name| is_name(name).then(|| name.to_string()))
+            .collect::<Option<_>>()?,
+    };
+    let path = match start(segments) {
+        // Only a module can be just a package's name.
+        ImportPath::Package(mut segments) if !is_module && segments.len() == 1 => {
+            ImportPath::Named(segments.remove(0))
+        }
+        path => path,
+    };
+    Some(if is_module {
+        Import::Module(path)
+    } else {
+        Import::File { path, alias: None }
+    })
+}
+
 fn program_parser<'tok, 'src: 'tok, I>() -> impl Parser<'tok, I, Program, Extra<'tok, 'src>>
 where
     I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
@@ -235,39 +283,7 @@ where
     // except that `_: Int` has neither a label nor a name. A generic type is
     // given its arguments, as in `Optional<Int>`, and in a generic type's
     // `impl`, `Self.T` is what its parameter `T` stands for.
-    let type_name = recursive(|type_name| {
-        let args = type_name
-            .clone()
-            .separated_by(just(Token::Comma))
-            .at_least(1)
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::Lt), just(Token::Gt));
-        let element = just(Token::Underscore)
-            .ignore_then(ident.or_not())
-            .map(|name| (None, name))
-            .or(ident
-                .then(ident)
-                .map(|(label, name)| (Some(label), Some(name))))
-            .or(ident.map(|name| (Some(name.clone()), Some(name))))
-            .then_ignore(just(Token::Colon))
-            .then(type_name)
-            .map(|((label, name), ty)| TupleElement { label, name, ty });
-        let self_param = just(Token::SelfType)
-            .ignore_then(just(Token::Dot))
-            .ignore_then(ident)
-            .map_with(|param, e| TypeName::SelfParam(param, Span::from(e.span())));
-        self_param
-            .or(name
-                .clone()
-                .then(args.or_not())
-                .map(|(name, args)| match args {
-                    Some(args) => TypeName::Generic { name, args },
-                    None => TypeName::Named(name),
-                }))
-            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
-            .labelled("type")
-    })
-    .boxed();
+    let mut type_name = Recursive::declare();
     let type_args = type_name
         .clone()
         .separated_by(just(Token::Comma))
@@ -282,6 +298,26 @@ where
             Some(args) => TypeName::Generic { name, args },
             None => TypeName::Named(name),
         });
+    let element = just(Token::Underscore)
+        .ignore_then(ident.or_not())
+        .map(|name| (None, name))
+        .or(ident
+            .then(ident)
+            .map(|(label, name)| (Some(label), Some(name))))
+        .or(ident.map(|name| (Some(name.clone()), Some(name))))
+        .then_ignore(just(Token::Colon))
+        .then(type_name.clone())
+        .map(|((label, name), ty)| TupleElement { label, name, ty });
+    let self_param = just(Token::SelfType)
+        .ignore_then(just(Token::Dot))
+        .ignore_then(ident)
+        .map_with(|param, e| TypeName::SelfParam(param, Span::from(e.span())));
+    type_name.define(
+        self_param
+            .or(named_type.clone())
+            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
+            .labelled("type"),
+    );
 
     // Unary and binary operators applied to `atom`, which is the tightest
     // binding part of an expression.
@@ -392,7 +428,9 @@ where
         _ => ExprKind::Tuple(values),
     });
 
-    // `Type { field: value, ... }`. Every field must be labelled.
+    // `Self { field: value, ... }`. Every field must be labelled. Only `Self`
+    // can be constructed, so in `if done { ... }`, the `{` always starts the
+    // `if`'s block.
     let field_value = ident
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
@@ -401,10 +439,9 @@ where
             value,
             span: Span::from(e.span()),
         });
-    let construct = named_type
-        .clone()
-        .then(comma_list(field_value, Token::LBrace, Token::RBrace))
-        .map(|(ty, fields)| ExprKind::Construct { ty, fields });
+    let construct = just(Token::SelfType)
+        .ignore_then(comma_list(field_value, Token::LBrace, Token::RBrace))
+        .map(ExprKind::Construct);
 
     // `Optional<Int>` before a `.`, as in `Optional<Int>.none`. In `a < b`,
     // there's no `>` and `.`, so it's a comparison.
@@ -448,25 +485,8 @@ where
 
     expr.define(operators(with_members(
         literal
-            .or(self_value.clone())
-            .or(construct)
-            .or(generic_type.clone())
-            .or(name_or_call.clone())
-            .or(parenthesised.clone())
-            .map_with(|kind, e| Expr {
-                kind,
-                span: Span::from(e.span()),
-            })
-            .labelled("expression")
-            .boxed(),
-    )));
-
-    // An `if` condition, or the value of a `match`, can't construct a group
-    // outside of parentheses or arguments, since in `if done { ... }`, the
-    // `{` starts the `if`'s block rather than constructing `done`.
-    let condition = operators(with_members(
-        literal
             .or(self_value)
+            .or(construct)
             .or(generic_type)
             .or(name_or_call)
             .or(parenthesised)
@@ -476,7 +496,7 @@ where
             })
             .labelled("expression")
             .boxed(),
-    ));
+    )));
 
     // `_`, `let name`, a literal, a tuple of patterns, or `Type.option` with
     // an optional pattern for its value, as in `Shape.circle(let radius)`.
@@ -703,7 +723,7 @@ where
                 just(Token::Else).ignore_then(block.clone().or(if_.map(|stmt| vec![stmt])));
 
             just(Token::If)
-                .ignore_then(condition.clone())
+                .ignore_then(expr.clone())
                 .map_with(|cond, e| (cond, Span::from(e.span())))
                 .then(block.clone())
                 .then(else_block.or_not())
@@ -727,7 +747,7 @@ where
         // Like a block, one option per line with blank lines allowed, and the
         // `{` on the same line as `match`.
         let match_ = just(Token::Match)
-            .ignore_then(condition.clone())
+            .ignore_then(expr.clone())
             .map_with(|value, e| (value, Span::from(e.span())))
             .then(
                 newlines
@@ -809,83 +829,57 @@ where
         (function, block)
     };
 
-    // Where a path starts from, and the directories it goes through.
-    let directories = ident.then_ignore(just(Token::Slash)).repeated();
-    let up = just(Token::Dot)
-        .then(just(Token::Dot))
-        .then(just(Token::Slash))
-        .repeated()
-        .at_least(1)
-        .count();
-    let start = choice((
-        just(Token::Slash)
-            .ignore_then(directories.clone().collect())
-            .map(ImportPath::Absolute),
-        just(Token::Dot)
-            .then(just(Token::Slash))
-            .ignore_then(directories.clone().collect())
-            .map(ImportPath::Relative),
-        up.then(directories.clone().collect())
-            .map(|(up, segments)| ImportPath::Parent(up, segments)),
-        directories.at_least(1).collect().map(ImportPath::Package),
-    ));
-    // `as` only means this here, so it can still be used as a name or label, as
-    // in `isSame(as: other)`.
+    // `use /dir/other`, which can have an alias, as in `use /dir/other as
+    // renamed`, or `use /dir/`, for a module. `as` only means this here, so
+    // it can still be used as a name or label, as in `isSame(as: other)`.
+    // The path is one token, so anything else after it on the line means it
+    // contains a space or comment.
+    let path = select! { Token::Path(path) => path }
+        .map_with(|path, e| (path, e.span()))
+        .labelled("path");
     let alias = just(Token::Ident("as")).ignore_then(ident).or_not();
-    // A name after a final slash would be part of the path, so a module with an
-    // alias would look like a file with a space in its path, followed by a name.
-    let aliased_module = start
-        .clone()
-        .map(Import::Module)
-        .then_ignore(just(Token::Ident("as")))
-        .then_ignore(ident)
-        .then_ignore(just(Token::Newline).ignored().or(end()).rewind())
-        .validate(|import, e, emitter| {
-            emitter.emit(Rich::custom(
-                e.span(),
-                format!("`{import}` is a module, so it can't have an alias"),
-            ));
-            import
-        });
-    // `/dir/other`, `./dir/other`, `../dir/other`, `stdlib/core` or `other` is a
-    // file, which can have an alias, as in `/dir/other as renamed`. Ending in a
-    // slash, as in `/dir/`, `./dir/`, `../dir/`, `stdlib/`, `./`, `../` or `/`, is
-    // a module: every file in a directory and its subdirectories.
-    let import = start
-        .then(ident.or_not())
-        .map(|(mut path, name)| match name {
-            Some(name) => {
-                path.push(name);
-                Import::File { path, alias: None }
-            }
-            None => Import::Module(path),
-        })
-        .or(ident.map(|name| Import::File {
-            path: ImportPath::Named(name),
-            alias: None,
-        }))
-        // Spaces and comments aren't tokens, so the only sign of one inside a
-        // path is that the path's source is longer than the path.
-        .validate(|import, e, emitter| {
-            let span: SimpleSpan = e.span();
-            if span.into_range().len() > import.to_string().len() {
-                emitter.emit(Rich::custom(span, "paths can't contain spaces or comments"));
-            }
-            import
-        })
-        .labelled("path")
-        .then(alias)
-        // A module never has an alias here, since any name after its final
-        // slash is part of the path instead.
-        .map(|(import, alias)| match import {
-            Import::File { path, .. } => Import::File { path, alias },
-            directory => directory,
-        });
+    let rest_of_line = any()
+        .and_is(just(Token::Newline).not())
+        .map_with(|_, e| e.span())
+        .repeated()
+        .collect::<Vec<SimpleSpan>>();
     let use_ = just(Token::Use)
-        .ignore_then(aliased_module.or(import))
-        .map_with(|import, e| Stmt {
-            kind: StmtKind::Use(import),
-            span: Span::from(e.span()),
+        .ignore_then(path)
+        .then(alias)
+        .then(rest_of_line)
+        .validate(|(((path, path_span), alias), rest), e, emitter| {
+            if let (Some(first), Some(last)) = (rest.first(), rest.last()) {
+                let message = match alias {
+                    None => "paths can't contain spaces or comments",
+                    Some(_) => "expected the end of the line after the alias",
+                };
+                emitter.emit(Rich::custom((first.start..last.end).into(), message));
+            }
+            let import = match (import(path), alias) {
+                (Some(Import::File { path, .. }), alias) => Import::File { path, alias },
+                (Some(module @ Import::Module(_)), None) => module,
+                (Some(module @ Import::Module(_)), Some(_)) => {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        format!("`{module}` is a module, so it can't have an alias"),
+                    ));
+                    module
+                }
+                (None, _) => {
+                    emitter.emit(Rich::custom(
+                        path_span,
+                        format!(
+                            "`{path}` isn't a path, such as `./dir/other`, `../other`, \
+                             `/dir/` or `stdlib/core`"
+                        ),
+                    ));
+                    Import::Module(ImportPath::Named(path.to_string()))
+                }
+            };
+            Stmt {
+                kind: StmtKind::Use(import),
+                span: Span::from(e.span()),
+            }
         });
 
     // `impl Type { fn ... }`, with one function per line, like a block. Each
@@ -1185,7 +1179,7 @@ mod tests {
             "a.b.c",
             "a.f(to: 1).b",
             "-a.b",
-            "Point { x: 1 }",
+            "Self { x: 1 }",
             "Box<Int>.none",
         ] {
             assert_eq!(spanned_value(value), value);
@@ -1233,12 +1227,12 @@ mod tests {
         assert_eq!(text(src, args[0].value.span), "1 + 2");
         assert_eq!(text(src, args[1].span), "3");
 
-        let src = "let x = Point { x: 1, y: 2 }";
+        let src = "let x = Self { x: 1, y: 2 }";
         let mut program = parse_spanned(src);
         let StmtKind::Decl { value, .. } = program.remove(0).kind else {
             panic!("expected a declaration");
         };
-        let ExprKind::Construct { fields, .. } = value.kind else {
+        let ExprKind::Construct(fields) = value.kind else {
             panic!("expected a group being constructed");
         };
         assert_eq!(text(src, fields[1].span), "y: 2");
@@ -1662,10 +1656,6 @@ mod tests {
 
     #[test]
     fn parses_generic_types_in_expressions() {
-        let int_box = || TypeName::Generic {
-            name: Name::new("Box"),
-            args: vec![TypeName::new("Int")],
-        };
         assert_eq!(
             parse_expr("Optional<Int>.none"),
             field_access(
@@ -1676,18 +1666,7 @@ mod tests {
                 "none"
             )
         );
-        assert_eq!(
-            parse_expr("Box<Int> { value: 1 }"),
-            expr_node(ExprKind::Construct {
-                ty: int_box(),
-                fields: vec![FieldValue {
-                    name: "value".to_string(),
-                    value: expr_node(ExprKind::Int(1)),
-                    span: Span::default()
-                }],
-            })
-        );
-        // Without a `.` or `{` after the `>`, they're comparisons.
+        // Without a `.` after the `>`, they're comparisons.
         assert_eq!(parse_expr("a < b"), *bin(var("a"), BinOp::Lt, var("b")));
         assert_eq!(
             parse_expr("f(a < b, c > d)"),
@@ -3207,25 +3186,6 @@ mod tests {
     }
 
     #[test]
-    fn match_values_need_parentheses_to_construct() {
-        // The `{` starts the options, not a constructor.
-        assert_eq!(
-            parse_body("match s {}"),
-            Ok(vec![stmt_node(StmtKind::Match {
-                value: *var("s"),
-                arms: vec![],
-            })])
-        );
-        assert_eq!(
-            parse_body("match (S {}) {}"),
-            Ok(vec![stmt_node(StmtKind::Match {
-                value: expr_node(ExprKind::Paren(Box::new(construct(Name::new("S"), vec![])))),
-                arms: vec![],
-            })])
-        );
-    }
-
-    #[test]
     fn rejects_malformed_matches() {
         for src in [
             // Missing parts.
@@ -3603,120 +3563,103 @@ mod tests {
         }
     }
 
-    fn construct(ty: Name, fields: Vec<FieldValue>) -> Expr {
-        expr_node(ExprKind::Construct {
-            ty: TypeName::Named(ty),
-            fields,
-        })
+    fn construct(fields: Vec<FieldValue>) -> Expr {
+        expr_node(ExprKind::Construct(fields))
     }
 
     #[test]
     fn parses_constructors() {
         assert_eq!(
-            parse_expr("User { age: 42, isAdmin: true }"),
-            construct(
-                Name::new("User"),
-                vec![
-                    field_value("age", expr_node(ExprKind::Int(42))),
-                    field_value("isAdmin", expr_node(ExprKind::Bool(true))),
-                ],
-            )
+            parse_expr("Self { age: 42, isAdmin: true }"),
+            construct(vec![
+                field_value("age", expr_node(ExprKind::Int(42))),
+                field_value("isAdmin", expr_node(ExprKind::Bool(true))),
+            ],)
         );
+        assert_eq!(parse_expr("Self {}"), construct(vec![]));
         assert_eq!(
-            parse_expr("Empty {}"),
-            construct(Name::new("Empty"), vec![])
-        );
-        assert_eq!(
-            parse_expr("user::User {age:1+2,isAdmin:f()}"),
-            construct(
-                qualified("user", "User"),
-                vec![
-                    field_value("age", *bin(int(1), BinOp::Add, int(2))),
-                    field_value("isAdmin", *call("f", vec![])),
-                ],
-            )
+            parse_expr("Self {age:1+2,isAdmin:f()}"),
+            construct(vec![
+                field_value("age", *bin(int(1), BinOp::Add, int(2))),
+                field_value("isAdmin", *call("f", vec![])),
+            ],)
         );
     }
 
     #[test]
     fn constructors_nest_and_bind_tightest() {
         assert_eq!(
-            parse_expr("-Team { lead: User { age: 1 } } * 2"),
+            parse_expr("-Self { lead: Self { age: 1 } } * 2"),
             *bin(
-                neg(Box::new(construct(
-                    Name::new("Team"),
-                    vec![field_value(
-                        "lead",
-                        construct(
-                            Name::new("User"),
-                            vec![field_value("age", expr_node(ExprKind::Int(1)))]
-                        ),
-                    )],
-                ))),
+                neg(Box::new(construct(vec![field_value(
+                    "lead",
+                    construct(vec![field_value("age", expr_node(ExprKind::Int(1)))]),
+                )],))),
                 BinOp::Mul,
                 int(2),
             )
         );
         assert_eq!(
-            parse_expr("f(user: User {})"),
-            *call(
-                "f",
-                vec![arg(Some("user"), construct(Name::new("User"), vec![]))]
-            )
+            parse_expr("f(user: Self {})"),
+            *call("f", vec![arg(Some("user"), construct(vec![]))])
         );
     }
 
     #[test]
-    fn if_conditions_need_parentheses_to_construct() {
-        // The `{` starts the block, not a constructor.
+    fn conditions_are_any_expression() {
+        // Only `Self` can be constructed, so after any other value, the `{`
+        // starts the block or the options.
         assert_eq!(
             parse_body("if done {}"),
             Ok(vec![if_(*var("done"), vec![], None)])
         );
         assert_eq!(
-            parse_body("if (Flag {}) {}"),
-            Ok(vec![if_(
-                *paren(Box::new(construct(Name::new("Flag"), vec![]))),
-                vec![],
-                None
-            )])
+            parse_body("match s {}"),
+            Ok(vec![stmt_node(StmtKind::Match {
+                value: *var("s"),
+                arms: vec![],
+            })])
+        );
+        let on = || construct(vec![field_value("on", expr_node(ExprKind::Bool(true)))]);
+        assert_eq!(
+            parse_body("if Self { on: true } {}"),
+            Ok(vec![if_(on(), vec![], None)])
         );
         assert_eq!(
-            parse_body("if f(flag: Flag {}) {}"),
+            parse_body("if f(flag: Self { on: true }) {}"),
             Ok(vec![if_(
-                *call(
-                    "f",
-                    vec![arg(Some("flag"), construct(Name::new("Flag"), vec![]))]
-                ),
+                *call("f", vec![arg(Some("flag"), on())]),
                 vec![],
                 None,
             )])
         );
-        assert!(parse_body("if Flag { on: true } {}").is_err());
     }
 
     #[test]
     fn rejects_constructor_statements() {
         // Only calls can be statements.
-        assert!(parse_body("User {}").is_err());
-        assert!(parse_body("User { age: 1 }").is_err());
+        assert!(parse_body("Self {}").is_err());
+        assert!(parse_body("Self { age: 1 }").is_err());
     }
 
     #[test]
     fn rejects_malformed_constructors() {
         for src in [
-            "x = User {",
-            "x = User { age }",
-            "x = User { age: }",
-            "x = User { 42 }",
-            "x = User { age = 42 }",
-            "x = User { age: 1,, }",
-            "x = User { age: 1 isAdmin: true }",
-            "x = User { , }",
-            "x = User { _: 1 }",
-            "x = User\n{}",
+            "x = Self {",
+            "x = Self { age }",
+            "x = Self { age: }",
+            "x = Self { 42 }",
+            "x = Self { age = 42 }",
+            "x = Self { age: 1,, }",
+            "x = Self { age: 1 isAdmin: true }",
+            "x = Self { , }",
+            "x = Self { _: 1 }",
+            "x = Self\n{}",
             "x = 1 {}",
-            "x = (User) {}",
+            "x = (Self) {}",
+            // Only `Self` can be constructed.
+            "x = User { age: 1 }",
+            "x = Box<Int> { value: 1 }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
@@ -3725,24 +3668,21 @@ mod tests {
     #[test]
     fn parses_multiline_constructors() {
         let user = || {
-            construct(
-                Name::new("User"),
-                vec![
-                    field_value("age", expr_node(ExprKind::Int(42))),
-                    field_value("isAdmin", expr_node(ExprKind::Bool(true))),
-                ],
-            )
+            construct(vec![
+                field_value("age", expr_node(ExprKind::Int(42))),
+                field_value("isAdmin", expr_node(ExprKind::Bool(true))),
+            ])
         };
         assert_eq!(
             parse_body(
                 "
-                let a = User {
+                let a = Self {
                     age: 42,
                     isAdmin: true
                 }
-                let b = User { age: 42,
+                let b = Self { age: 42,
                     isAdmin: true }
-                let c = User {
+                let c = Self {
 
                     // The age in years.
                     age: 42, /* Never negative. */
@@ -3757,10 +3697,7 @@ mod tests {
                 decl(Mutability::Let, "c", None, user()),
             ])
         );
-        assert_eq!(
-            parse_expr("Empty {\n\n}"),
-            construct(Name::new("Empty"), vec![])
-        );
+        assert_eq!(parse_expr("Self {\n\n}"), construct(vec![]));
     }
 
     #[test]
@@ -3768,11 +3705,11 @@ mod tests {
         assert_eq!(
             parse_body(
                 "
-                let t = Team {
-                    lead: User {
+                let t = Self {
+                    lead: Self {
                         age: 30
                     },
-                    size: f(x: Point {
+                    size: f(x: Self {
                         x: 1
                     })
                 }
@@ -3782,31 +3719,22 @@ mod tests {
                 Mutability::Let,
                 "t",
                 None,
-                construct(
-                    Name::new("Team"),
-                    vec![
-                        field_value(
-                            "lead",
-                            construct(
-                                Name::new("User"),
-                                vec![field_value("age", expr_node(ExprKind::Int(30)))]
-                            ),
+                construct(vec![
+                    field_value(
+                        "lead",
+                        construct(vec![field_value("age", expr_node(ExprKind::Int(30)))]),
+                    ),
+                    field_value(
+                        "size",
+                        *call(
+                            "f",
+                            vec![arg(
+                                Some("x"),
+                                construct(vec![field_value("x", expr_node(ExprKind::Int(1)))]),
+                            )],
                         ),
-                        field_value(
-                            "size",
-                            *call(
-                                "f",
-                                vec![arg(
-                                    Some("x"),
-                                    construct(
-                                        Name::new("Point"),
-                                        vec![field_value("x", expr_node(ExprKind::Int(1)))]
-                                    ),
-                                )],
-                            ),
-                        ),
-                    ],
-                ),
+                    ),
+                ],),
             )])
         );
     }
@@ -3816,28 +3744,28 @@ mod tests {
         for src in [
             // Fields still need commas between them.
             "
-            x = User {
+            x = Self {
                 age: 42
                 isAdmin: true
             }
             ",
             // The comma must come straight after the value.
             "
-            x = User {
+            x = Self {
                 age: 42
                 , isAdmin: true
             }
             ",
             // A field can't be split across lines.
             "
-            x = User {
+            x = Self {
                 age:
                     42
             }
             ",
-            // The `{` must be on the same line as the type.
+            // The `{` must be on the same line as `Self`.
             "
-            x = User
+            x = Self
             {
                 age: 42
             }
@@ -3899,7 +3827,7 @@ mod tests {
                     a: g(
                         1
                     ),
-                    b: User {
+                    b: Self {
                         age: h(
                             c: 2
                         )
@@ -3921,16 +3849,10 @@ mod tests {
                             ),
                             arg(
                                 Some("b"),
-                                construct(
-                                    Name::new("User"),
-                                    vec![field_value(
-                                        "age",
-                                        *call(
-                                            "h",
-                                            vec![arg(Some("c"), expr_node(ExprKind::Int(2)))]
-                                        ),
-                                    )],
-                                ),
+                                construct(vec![field_value(
+                                    "age",
+                                    *call("h", vec![arg(Some("c"), expr_node(ExprKind::Int(2)))]),
+                                )],),
                             ),
                         ],
                     ),
@@ -3987,8 +3909,8 @@ mod tests {
     fn allows_trailing_commas() {
         assert_eq!(parse_expr("f(a: 1,)"), parse_expr("f(a: 1)"));
         assert_eq!(
-            parse_expr("User { age: 1, }"),
-            parse_expr("User { age: 1 }")
+            parse_expr("Self { age: 1, }"),
+            parse_expr("Self { age: 1 }")
         );
         assert_eq!(
             parse_body(
@@ -4006,7 +3928,7 @@ mod tests {
     #[test]
     fn warns_about_trailing_commas_on_one_line() {
         assert_eq!(
-            warnings("f(a: 1,)\nx = User { age: 1, }"),
+            warnings("f(a: 1,)\nx = Self { age: 1, }"),
             [
                 WarningKind::RedundantTrailingComma,
                 WarningKind::RedundantTrailingComma,
@@ -4033,7 +3955,7 @@ mod tests {
                     a: 1,
                     b: 2
                 )
-                x = User {
+                x = Self {
                     age: 1
                 }
                 "
@@ -4057,14 +3979,14 @@ mod tests {
                 )
                 f(a: 1,
                     b: 2)
-                x = User {
+                x = Self {
                     age: 1,
 
                 }
                 f()
                 f(
                 )
-                x = Empty {}
+                x = Self {}
                 "
             ),
             []
@@ -4117,7 +4039,7 @@ mod tests {
     fn warnings_from_abandoned_parses_are_dropped() {
         // `f(b: 1,)` is parsed while trying to read a constructor, which then
         // fails at `c`, so its warning is dropped along with it.
-        let (result, warnings) = parse_with_warnings("let x = User { a: f(b: 1,), c }");
+        let (result, warnings) = parse_with_warnings("let x = Self { a: f(b: 1,), c }");
         assert!(result.is_err());
         assert_eq!(warnings, []);
     }
@@ -4349,8 +4271,8 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_expr("User {}.f()"),
-            method_call(construct(Name::new("User"), vec![]), "f", vec![])
+            parse_expr("Self {}.f()"),
+            method_call(construct(vec![]), "f", vec![])
         );
         assert_eq!(
             parse_expr(
@@ -4669,7 +4591,7 @@ mod tests {
             "trait And { fn and(_ rhs: Self) -> Bool fn or() }",
             "trait other::And {}",
             "impl Custom with {}",
-            "impl Custom with And, Or {}",
+            "impl Custom with And, Self {}",
             "impl Custom with And with Or {}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
@@ -4686,14 +4608,11 @@ mod tests {
                 mutability: Mutability::Let,
                 name: "p".to_string(),
                 ty: Some(TypeName::new("Self")),
-                value: construct(
-                    Name::new("Self"),
-                    vec![FieldValue {
-                        name: "x".to_string(),
-                        value: *int(1),
-                        span: Span::default()
-                    }],
-                ),
+                value: construct(vec![FieldValue {
+                    name: "x".to_string(),
+                    value: *int(1),
+                    span: Span::default()
+                }],),
             })])
         );
         assert_eq!(
@@ -4734,12 +4653,9 @@ mod tests {
             field_access(expr_node(ExprKind::SelfValue), "age")
         );
         assert_eq!(
-            parse_expr("User { age: 1 }.age"),
+            parse_expr("Self { age: 1 }.age"),
             field_access(
-                construct(
-                    Name::new("User"),
-                    vec![field_value("age", expr_node(ExprKind::Int(1)))]
-                ),
+                construct(vec![field_value("age", expr_node(ExprKind::Int(1)))]),
                 "age"
             )
         );

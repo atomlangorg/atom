@@ -20,9 +20,10 @@
 // Whole numbers, such as `42`. Unsigned integers (`IntU`) hold 0 to 2^N - 1,
 // and signed integers (`IntS`) hold -2^(N-1) to 2^(N-1) - 1, where N is the
 // number of bits. Arithmetic that goes outside a type's range stops the
-// program. Only unsigned integers can be shifted, with `.<` and `.>`, which
-// stop the program if the amount isn't from 0 to N - 1, or if `.<` shifts
-// off a `1`.
+// program, and so does dividing by zero. Only signed integers can be negated,
+// and only unsigned integers can be shifted, with `.<` and `.>`, by an `Int`,
+// which stops the program if the amount isn't from 0 to N - 1, or if `.<`
+// shifts off a `1`.
 primitive IntU8
 primitive IntU16
 primitive IntU32
@@ -46,7 +47,7 @@ group Void {}
 impl Void {
     // Creates a `Void`, for when one is needed as a value.
     static fn new() -> Void {
-        return Void {}
+        return Self {}
     }
 }
 
@@ -98,8 +99,118 @@ trait Equal {
     }
 }
 
+// Types that `<`, `<=`, `>` and `>=` can be used on, which call `isLess`,
+// `isLessOrEqual`, `isGreater` and `isGreaterOrEqual`, as in `a < b`, where `b`
+// is an `Rhs`.
+trait Order {
+    alias Rhs
+
+    fn isLess(than rhs: Rhs) -> Bool
+    fn isLessOrEqual(to rhs: Rhs) -> Bool
+    fn isGreater(than rhs: Rhs) -> Bool
+    fn isGreaterOrEqual(to rhs: Rhs) -> Bool
+}
+
+// Types that `+` can be used on, which calls `add`, as in `a + b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Add {
+    alias Rhs
+    alias Output
+
+    fn add(_ rhs: Rhs) -> Output
+}
+
+// Types that `-` can be used on, which calls `subtract`, as in `a - b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Subtract {
+    alias Rhs
+    alias Output
+
+    fn subtract(_ rhs: Rhs) -> Output
+}
+
+// Types that `*` can be used on, which calls `multiply`, as in `a * b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Multiply {
+    alias Rhs
+    alias Output
+
+    fn multiply(by rhs: Rhs) -> Output
+}
+
+// Types that `/` can be used on, which calls `divide`, as in `a / b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Divide {
+    alias Rhs
+    alias Output
+
+    fn divide(by rhs: Rhs) -> Output
+}
+
+// Types that `.&` can be used on, which calls `bitAnd`, as in `a .& b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait BitAnd {
+    alias Rhs
+    alias Output
+
+    fn bitAnd(_ rhs: Rhs) -> Output
+}
+
+// Types that `.|` can be used on, which calls `bitOr`, as in `a .| b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait BitOr {
+    alias Rhs
+    alias Output
+
+    fn bitOr(_ rhs: Rhs) -> Output
+}
+
+// Types that `.^` can be used on, which calls `bitXor`, as in `a .^ b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait BitXor {
+    alias Rhs
+    alias Output
+
+    fn bitXor(_ rhs: Rhs) -> Output
+}
+
+// Types that `.<` can be used on, which calls `shiftLeft`, as in `a .< b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait ShiftLeft {
+    alias Rhs
+    alias Output
+
+    fn shiftLeft(by amount: Rhs) -> Output
+}
+
+// Types that `.>` can be used on, which calls `shiftRight`, as in `a .> b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait ShiftRight {
+    alias Rhs
+    alias Output
+
+    fn shiftRight(by amount: Rhs) -> Output
+}
+
+// Types that `-` can be used on before a value, which calls `negate`, as in
+// `-a`, where the result is an `Output`.
+trait Negate {
+    alias Output
+
+    fn negate() -> Output
+}
+
+// Types that `.!` can be used on before a value, which calls `bitNot`, as in
+// `.!a`, where the result is an `Output`.
+trait BitNot {
+    alias Output
+
+    fn bitNot() -> Output
+}
+
 // Each `impl` infers its trait's aliases from its signatures, such as
-// `alias Rhs = Self` and `alias Output = Bool` from `and`.
+// `alias Rhs = Self` and `alias Output = Bool` from `and`. `Bool`s are equal if
+// they hold the same value.
 impl Bool with And {
     // `true` if both are `true`.
     primitive fn and(_ rhs: Self) -> Bool
@@ -115,10 +226,64 @@ impl Bool with Not {
     primitive fn not() -> Bool
 }
 
-// Integers and `Bool`s are equal if they hold the same value.
+impl Bool with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
+// Integers are equal if they hold the same value, and are ordered by their
+// values. Their operators work on two of the same type, except that shifts
+// are by an `Int`.
 impl IntU8 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
+impl IntU8 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntU8 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntU8 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntU8 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntU8 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntU8 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntU8 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntU8 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntU8 with ShiftLeft {
+    primitive fn shiftLeft(by amount: Int) -> Self
+}
+
+impl IntU8 with ShiftRight {
+    primitive fn shiftRight(by amount: Int) -> Self
+}
+
+impl IntU8 with BitNot {
+    primitive fn bitNot() -> Self
 }
 
 impl IntU16 with Equal {
@@ -126,9 +291,103 @@ impl IntU16 with Equal {
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
+impl IntU16 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntU16 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntU16 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntU16 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntU16 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntU16 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntU16 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntU16 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntU16 with ShiftLeft {
+    primitive fn shiftLeft(by amount: Int) -> Self
+}
+
+impl IntU16 with ShiftRight {
+    primitive fn shiftRight(by amount: Int) -> Self
+}
+
+impl IntU16 with BitNot {
+    primitive fn bitNot() -> Self
+}
+
 impl IntU32 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
+impl IntU32 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntU32 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntU32 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntU32 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntU32 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntU32 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntU32 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntU32 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntU32 with ShiftLeft {
+    primitive fn shiftLeft(by amount: Int) -> Self
+}
+
+impl IntU32 with ShiftRight {
+    primitive fn shiftRight(by amount: Int) -> Self
+}
+
+impl IntU32 with BitNot {
+    primitive fn bitNot() -> Self
 }
 
 impl IntU64 with Equal {
@@ -136,9 +395,99 @@ impl IntU64 with Equal {
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
+impl IntU64 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntU64 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntU64 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntU64 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntU64 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntU64 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntU64 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntU64 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntU64 with ShiftLeft {
+    primitive fn shiftLeft(by amount: Int) -> Self
+}
+
+impl IntU64 with ShiftRight {
+    primitive fn shiftRight(by amount: Int) -> Self
+}
+
+impl IntU64 with BitNot {
+    primitive fn bitNot() -> Self
+}
+
 impl IntS8 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
+impl IntS8 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntS8 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntS8 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntS8 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntS8 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntS8 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntS8 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntS8 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntS8 with Negate {
+    primitive fn negate() -> Self
+}
+
+impl IntS8 with BitNot {
+    primitive fn bitNot() -> Self
 }
 
 impl IntS16 with Equal {
@@ -146,9 +495,95 @@ impl IntS16 with Equal {
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
+impl IntS16 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntS16 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntS16 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntS16 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntS16 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntS16 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntS16 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntS16 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntS16 with Negate {
+    primitive fn negate() -> Self
+}
+
+impl IntS16 with BitNot {
+    primitive fn bitNot() -> Self
+}
+
 impl IntS32 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
+impl IntS32 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntS32 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntS32 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntS32 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntS32 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntS32 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntS32 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntS32 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntS32 with Negate {
+    primitive fn negate() -> Self
+}
+
+impl IntS32 with BitNot {
+    primitive fn bitNot() -> Self
 }
 
 impl IntS64 with Equal {
@@ -156,17 +591,54 @@ impl IntS64 with Equal {
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
-impl Bool with Equal {
-    primitive fn isEqual(to rhs: Self) -> Bool
-    primitive fn isNotEqual(to rhs: Self) -> Bool
+impl IntS64 with Order {
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntS64 with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntS64 with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntS64 with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntS64 with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntS64 with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntS64 with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntS64 with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntS64 with Negate {
+    primitive fn negate() -> Self
+}
+
+impl IntS64 with BitNot {
+    primitive fn bitNot() -> Self
 }
 
 // Types whose values can be called like functions, which calls `call`, as in
-// `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. If `Input` is a
-// tuple, the arguments are its elements, so a tuple is never unpacked into
-// them. Otherwise, the only argument is the `Input`, as in `negate(3)`. A
-// `ChoiceOption` always has one argument, which is its `Input`, even if that's
-// a tuple.
+// `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. The arguments
+// are always built into a tuple, which must be the `Input`, so a tuple is
+// never unpacked into them. A `ChoiceOption` always has one argument, which
+// is its `Input`, even if that's a tuple.
 trait Call {
     alias Input
     alias Output
@@ -175,13 +647,12 @@ trait Call {
 }
 
 // A function, which is what naming a function or static function refers to
-// when it's used as a value, as in `add` or `Int.zero`. `Input` is the type of
-// its only parameter if that has no label and isn't a tuple, and otherwise a
-// tuple of its parameters, as in
-// `Fn<(a: Int, b: Int), Int>` for `fn add(a: Int, b: Int) -> Int`, or
-// `Fn<(_: (a: Int, b: Int)), Int>` for
-// `fn sum(_ pair: (a: Int, b: Int)) -> Int`. Calling a function by name uses
-// `Call`, so `add(a: 3, b: 5)` is `add.call(input: (a: 3, b: 5))`.
+// when it's used as a value, as in `add` or `Int.zero`. `Input` is a tuple of
+// its parameters, as in `Fn<(a: Int, b: Int), Int>` for
+// `fn add(a: Int, b: Int) -> Int`, or `Fn<(_: Int), Int>` for
+// `fn negate(_ value: Int) -> Int`. A function called by name is called
+// directly, and as a value it uses `Call`, so `adder(a: 3, b: 5)`, where
+// `adder` is `add`, is `adder.call(input: (a: 3, b: 5))`.
 primitive Fn<Input, Output>
 
 impl Fn with Call {

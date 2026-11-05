@@ -65,7 +65,7 @@ pub enum Primitive {
     Tag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     /// Its full name, such as `/main::f`, `/main::f::nested`, or
     /// `/main::Int.doubled` for a method from an `impl Int` in `/main`.
@@ -80,7 +80,7 @@ pub struct Function {
     pub body: Body,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Body {
     /// Every path through the statements ends with a `return`, or a call to
     /// a function that never returns.
@@ -93,17 +93,19 @@ pub enum Body {
 pub enum PrimitiveFn {
     /// Stops the program with exit code 1.
     Exit,
-    /// `Bool.and`, which is `true` if both `Bool`s are.
-    BoolAnd,
-    /// `Bool.or`, which is `true` if either `Bool` is.
-    BoolOr,
-    /// `Bool.not`, which is `true` if the `Bool` isn't.
-    BoolNot,
-    /// `isEqual` on an integer or `Bool`, which is whether two of the same
-    /// type are equal.
-    Equal,
-    /// `isNotEqual` on an integer or `Bool`, the opposite of `Equal`.
-    NotEqual,
+    /// The function that a binary operator calls on two integers, `Bool`s or
+    /// `ChoiceTag`s of the same type, such as `add` for `+`. Shifts are only
+    /// on unsigned integers, by an integer of any type.
+    Binary {
+        op: BinOp,
+        /// Whether the operands are signed integers, which decides when
+        /// arithmetic overflows, how it divides, and how integers are
+        /// ordered.
+        signed: bool,
+    },
+    /// The function that an operator before a value calls on an integer or a
+    /// `Bool`, such as `negate` for `-`, which is only on signed integers.
+    Unary(UnOp),
     /// `Fn.call`, which calls the function that the `Fn` points to with the
     /// input.
     CallFn,
@@ -125,7 +127,7 @@ pub struct Global {
     pub value: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     /// Stores a value in a local, which is how both declarations and
     /// assignments compile.
@@ -150,7 +152,7 @@ pub enum Stmt {
     Expr(Expr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub body: Vec<Stmt>,
@@ -158,7 +160,7 @@ pub struct MatchArm {
 
 /// What a value is matched against, which gives the locals it binds their
 /// values when it matches.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Pattern {
     Any,
     /// Matches anything, storing it in the local at this index.
@@ -176,7 +178,7 @@ pub enum Pattern {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     /// An integer of the integer type at an index into `Program::types`.
     /// `value` is its bits, so a negative value is in two's complement, and
@@ -190,20 +192,6 @@ pub enum Expr {
     Local(usize),
     /// An index into `Program::globals`.
     Global(usize),
-    /// An operator on integers or `Bool`s. `-` is only used on signed
-    /// integers.
-    Unary(UnOp, Box<Expr>),
-    /// An operator on integers or `Bool`s. Shifts are only used on unsigned
-    /// integers, and their `rhs` can be any integer type.
-    Binary {
-        lhs: Box<Expr>,
-        op: BinOp,
-        rhs: Box<Expr>,
-        /// Whether the operands are signed integers, which decides when
-        /// arithmetic overflows, how it divides, and how integers are
-        /// ordered.
-        signed: bool,
-    },
     /// Calls the function at an index into `Program::functions`. A method's
     /// receiver is its first argument.
     Call {
@@ -234,4 +222,7 @@ pub enum Expr {
         receiver: Box<Expr>,
         index: usize,
     },
+    /// Where the checker found a mistake. A program with mistakes is never
+    /// compiled, so the back end never sees one.
+    Error,
 }
