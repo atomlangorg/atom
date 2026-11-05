@@ -65,7 +65,7 @@ pub enum Primitive {
     Tag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     /// Its full name, such as `/main::f`, `/main::f::nested`, or
     /// `/main::Int.doubled` for a method from an `impl Int` in `/main`.
@@ -80,7 +80,7 @@ pub struct Function {
     pub body: Body,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Body {
     /// Every path through the statements ends with a `return`, or a call to
     /// a function that never returns.
@@ -127,7 +127,7 @@ pub struct Global {
     pub value: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     /// Stores a value in a local, which is how both declarations and
     /// assignments compile.
@@ -152,7 +152,7 @@ pub enum Stmt {
     Expr(Expr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub body: Vec<Stmt>,
@@ -160,7 +160,7 @@ pub struct MatchArm {
 
 /// What a value is matched against, which gives the locals it binds their
 /// values when it matches.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Pattern {
     Any,
     /// Matches anything, storing it in the local at this index.
@@ -178,7 +178,7 @@ pub enum Pattern {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     /// An integer of the integer type at an index into `Program::types`.
     /// `value` is its bits, so a negative value is in two's complement, and
