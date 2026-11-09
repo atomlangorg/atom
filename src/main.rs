@@ -309,7 +309,7 @@ mod tests {
             "x".to_string(),
         )];
         assert_eq!(file_source(&files, "/dir/other"), "x");
-        assert!(file_source(&files, "stdlib/core").contains("primitive"));
+        assert!(file_source(&files, "stdlib/bool").contains("primitive"));
     }
 
     #[test]

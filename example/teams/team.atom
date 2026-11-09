@@ -7,7 +7,7 @@ group Team {
 
 impl Team {
     static fn new(ledBy lead: User, size: Int) -> Team {
-        return Team { lead: lead, size: size }
+        return Self { lead: lead, size: size }
     }
 }
 

@@ -1,0 +1,166 @@
+/*
+ * Copyright 2026 George Elsham
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// The traits whose functions operators call, such as `Add` for `+`, which
+// any type can implement.
+
+// Types that `&` can be used on, which calls `and`, as in `a & b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait And {
+    alias Rhs
+    alias Output
+
+    fn and(_ rhs: Rhs) -> Output
+}
+
+// Types that `|` can be used on, which calls `or`, as in `a | b`, where `b` is
+// an `Rhs`, and the result is an `Output`.
+trait Or {
+    alias Rhs
+    alias Output
+
+    fn or(_ rhs: Rhs) -> Output
+}
+
+// Types that `!` can be used on, which calls `not`, as in `!a`, where the
+// result is an `Output`.
+trait Not {
+    alias Output
+
+    fn not() -> Output
+}
+
+// Types that `==` and `!=` can be used on, which call `isEqual` and
+// `isNotEqual`, as in `a == b`, where `b` is an `Rhs`. `isNotEqual` is the
+// opposite of `isEqual` unless it's implemented too.
+trait Equal {
+    alias Rhs
+
+    fn isEqual(to rhs: Rhs) -> Bool
+
+    fn isNotEqual(to rhs: Rhs) -> Bool {
+        return !self.isEqual(to: rhs)
+    }
+}
+
+// Types that `<`, `<=`, `>` and `>=` can be used on, which call `isLess`,
+// `isLessOrEqual`, `isGreater` and `isGreaterOrEqual`, as in `a < b`, where `b`
+// is an `Rhs`.
+trait Order {
+    alias Rhs
+
+    fn isLess(than rhs: Rhs) -> Bool
+    fn isLessOrEqual(to rhs: Rhs) -> Bool
+    fn isGreater(than rhs: Rhs) -> Bool
+    fn isGreaterOrEqual(to rhs: Rhs) -> Bool
+}
+
+// Types that `+` can be used on, which calls `add`, as in `a + b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Add {
+    alias Rhs
+    alias Output
+
+    fn add(_ rhs: Rhs) -> Output
+}
+
+// Types that `-` can be used on, which calls `subtract`, as in `a - b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Subtract {
+    alias Rhs
+    alias Output
+
+    fn subtract(_ rhs: Rhs) -> Output
+}
+
+// Types that `*` can be used on, which calls `multiply`, as in `a * b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Multiply {
+    alias Rhs
+    alias Output
+
+    fn multiply(by rhs: Rhs) -> Output
+}
+
+// Types that `/` can be used on, which calls `divide`, as in `a / b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait Divide {
+    alias Rhs
+    alias Output
+
+    fn divide(by rhs: Rhs) -> Output
+}
+
+// Types that `-` can be used on before a value, which calls `negate`, as in
+// `-a`, where the result is an `Output`.
+trait Negate {
+    alias Output
+
+    fn negate() -> Output
+}
+
+// Types that `.&` can be used on, which calls `bitAnd`, as in `a .& b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait BitAnd {
+    alias Rhs
+    alias Output
+
+    fn bitAnd(_ rhs: Rhs) -> Output
+}
+
+// Types that `.|` can be used on, which calls `bitOr`, as in `a .| b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait BitOr {
+    alias Rhs
+    alias Output
+
+    fn bitOr(_ rhs: Rhs) -> Output
+}
+
+// Types that `.^` can be used on, which calls `bitXor`, as in `a .^ b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait BitXor {
+    alias Rhs
+    alias Output
+
+    fn bitXor(_ rhs: Rhs) -> Output
+}
+
+// Types that `.<` can be used on, which calls `shiftLeft`, as in `a .< b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait ShiftLeft {
+    alias Rhs
+    alias Output
+
+    fn shiftLeft(by amount: Rhs) -> Output
+}
+
+// Types that `.>` can be used on, which calls `shiftRight`, as in `a .> b`, where `b`
+// is an `Rhs`, and the result is an `Output`.
+trait ShiftRight {
+    alias Rhs
+    alias Output
+
+    fn shiftRight(by amount: Rhs) -> Output
+}
+
+// Types that `.!` can be used on before a value, which calls `bitNot`, as in
+// `.!a`, where the result is an `Output`.
+trait BitNot {
+    alias Output
+
+    fn bitNot() -> Output
+}

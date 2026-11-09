@@ -1,0 +1,41 @@
+/*
+ * Copyright 2026 George Elsham
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// `true` or `false`.
+primitive Bool
+
+// Each `impl` infers its trait's aliases from its signatures, such as
+// `alias Rhs = Self` and `alias Output = Bool` from `and`. `Bool`s are equal if
+// they hold the same value.
+impl Bool with And {
+    // `true` if both are `true`.
+    primitive fn and(_ rhs: Self) -> Bool
+}
+
+impl Bool with Or {
+    // `true` if either is `true`.
+    primitive fn or(_ rhs: Self) -> Bool
+}
+
+impl Bool with Not {
+    // `true` if it's `false`, and `false` if it's `true`.
+    primitive fn not() -> Bool
+}
+
+impl Bool with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}

@@ -14,16 +14,55 @@
  * limitations under the License.
  */
 
-use std::{fmt, ops::Range};
+use std::{fmt, iter, ops::Range};
 
 use logos::{FilterResult, Lexer, Logos};
 
 /// Lexes `src` into tokens and their spans. Input the lexer doesn't recognise
-/// becomes `Token::Error`.
+/// becomes `Token::Error`. The path after a `use` is a single `Token::Path`.
 pub fn tokens(src: &str) -> impl Iterator<Item = (Token<'_>, Range<usize>)> {
-    Token::lexer(src)
-        .spanned()
-        .map(|(tok, span)| (tok.unwrap_or(Token::Error), span))
+    let mut lex = Token::lexer(src);
+    let mut after_use = false;
+    iter::from_fn(move || {
+        if std::mem::take(&mut after_use)
+            && let Some(path) = path(&mut lex)
+        {
+            return Some(path);
+        }
+        let tok = lex.next()?.unwrap_or(Token::Error);
+        after_use = tok == Token::Use;
+        Some((tok, lex.span()))
+    })
+}
+
+/// Lexes the path after a `use`, which has just been lexed, if there's one
+/// on the same line. Like any token, it can come after spaces and comments.
+/// Paths can't contain them, so it ends at the first one, or at the end of
+/// the line.
+fn path<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Option<(Token<'src>, Range<usize>)> {
+    let rest = lex.remainder();
+    let mut start = 0;
+    loop {
+        let after_spaces = rest[start..].trim_start_matches([' ', '\t', '\r', '\x0c']);
+        start = rest.len() - after_spaces.len();
+        match after_spaces.strip_prefix("/*").and_then(block_comment_len) {
+            Some(len) if !after_spaces[..2 + len].contains('\n') => start += 2 + len,
+            _ => break,
+        }
+    }
+    let path = &rest[start..];
+    let len = path
+        .char_indices()
+        .find(|&(index, c)| {
+            c.is_whitespace() || path[index..].starts_with("/*") || path[index..].starts_with("//")
+        })
+        .map_or(path.len(), |(index, _)| index);
+    if len == 0 {
+        return None;
+    }
+    let offset = lex.span().end + start;
+    lex.bump(start + len);
+    Some((Token::Path(&path[..len]), offset..offset + len))
 }
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash)]
@@ -85,6 +124,9 @@ pub enum Token<'src> {
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'src str),
+    /// The path after `use`, such as `./dir/other` or `/dir/`, which is lexed
+    /// by `tokens` as one token.
+    Path(&'src str),
 
     #[token("+")]
     Plus,
@@ -166,7 +208,23 @@ pub enum Token<'src> {
 /// comment, it never hides the end of a statement. A comment that is never
 /// closed is an error.
 fn block_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<(), ()> {
-    let rest = lex.remainder().as_bytes();
+    let Some(len) = block_comment_len(lex.remainder()) else {
+        lex.bump(lex.remainder().len());
+        return FilterResult::Error(());
+    };
+    lex.bump(len);
+    if lex.slice().contains('\n') {
+        FilterResult::Emit(())
+    } else {
+        FilterResult::Skip
+    }
+}
+
+/// The length of the rest of a `/* ... */` comment after its opening `/*`,
+/// which is `rest` up to and including its closing `*/`, or `None` if it's
+/// never closed.
+fn block_comment_len(rest: &str) -> Option<usize> {
+    let rest = rest.as_bytes();
     let mut depth = 1;
     let mut i = 0;
     while i < rest.len() {
@@ -179,20 +237,13 @@ fn block_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> FilterResult<(), (
                 depth -= 1;
                 i += 2;
                 if depth == 0 {
-                    lex.bump(i);
-                    return if lex.slice().contains('\n') {
-                        FilterResult::Emit(())
-                    } else {
-                        FilterResult::Skip
-                    };
+                    return Some(i);
                 }
             }
             _ => i += 1,
         }
     }
-
-    lex.bump(rest.len());
-    FilterResult::Error(())
+    None
 }
 
 impl fmt::Display for Token<'_> {
@@ -218,7 +269,7 @@ impl fmt::Display for Token<'_> {
             Self::Static => write!(f, "static"),
             Self::SelfValue => write!(f, "self"),
             Self::SelfType => write!(f, "Self"),
-            Self::Ident(name) => write!(f, "{name}"),
+            Self::Ident(name) | Self::Path(name) => write!(f, "{name}"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
             Self::Star => write!(f, "*"),
@@ -600,19 +651,39 @@ mod tests {
 
     #[test]
     fn lexes_use_paths() {
+        // As one token each, up to the first space or comment.
         assert_eq!(
-            lex("use ./dir/other\nuse /main"),
+            lex("use ./dir/other\nuse /main as m\nuse ../a.b/ c"),
             vec![
                 Token::Use,
-                Token::Dot,
-                Token::Slash,
-                Token::Ident("dir"),
-                Token::Slash,
-                Token::Ident("other"),
+                Token::Path("./dir/other"),
                 Token::Newline,
                 Token::Use,
+                Token::Path("/main"),
+                Token::Ident("as"),
+                Token::Ident("m"),
+                Token::Newline,
+                Token::Use,
+                Token::Path("../a.b/"),
+                Token::Ident("c"),
+            ]
+        );
+        assert_eq!(
+            tokens("use  /a").map(|(_, span)| span).collect::<Vec<_>>(),
+            [0..3, 5..7]
+        );
+        // Only after `use`.
+        assert_eq!(
+            lex("a/b\nuse\n/b"),
+            vec![
+                Token::Ident("a"),
                 Token::Slash,
-                Token::Ident("main"),
+                Token::Ident("b"),
+                Token::Newline,
+                Token::Use,
+                Token::Newline,
+                Token::Slash,
+                Token::Ident("b"),
             ]
         );
     }
@@ -798,11 +869,21 @@ mod tests {
     fn slash_star_is_always_a_comment() {
         assert_eq!(
             lex("use ./a/* note */"),
-            vec![Token::Use, Token::Dot, Token::Slash, Token::Ident("a")]
+            vec![Token::Use, Token::Path("./a")]
         );
         assert_eq!(
             lex("use /* note */ ./a"),
-            vec![Token::Use, Token::Dot, Token::Slash, Token::Ident("a")]
+            vec![Token::Use, Token::Path("./a")]
+        );
+        assert_eq!(
+            lex("use /* note\n */ ./a"),
+            vec![
+                Token::Use,
+                Token::Newline,
+                Token::Dot,
+                Token::Slash,
+                Token::Ident("a")
+            ]
         );
         assert_eq!(
             lex("x = a/* note */\nuser /* note */"),
@@ -817,13 +898,7 @@ mod tests {
         assert_eq!(lex("/* use ./a */"), vec![]);
         assert_eq!(
             lex("use ./a/*"),
-            vec![
-                Token::Use,
-                Token::Dot,
-                Token::Slash,
-                Token::Ident("a"),
-                Token::Error
-            ]
+            vec![Token::Use, Token::Path("./a"), Token::Error]
         );
     }
 }
