@@ -90,7 +90,7 @@ const NO_ERRORS: &str = "the program has no errors";
 const STDLIB_PACKAGE: &str = "stdlib";
 
 /// The source of each file of the standard library, by its path within it.
-const STDLIB_FILES: [(&str, &str); 16] = [
+const STDLIB_FILES: [(&str, &str); 17] = [
     ("operators", include_str!("../../stdlib/operators.atom")),
     ("bool", include_str!("../../stdlib/bool.atom")),
     ("int", include_str!("../../stdlib/int.atom")),
@@ -106,6 +106,7 @@ const STDLIB_FILES: [(&str, &str); 16] = [
     ("never", include_str!("../../stdlib/never.atom")),
     ("exit", include_str!("../../stdlib/exit.atom")),
     ("call", include_str!("../../stdlib/call.atom")),
+    ("functions", include_str!("../../stdlib/functions.atom")),
     ("choices", include_str!("../../stdlib/choices.atom")),
 ];
 

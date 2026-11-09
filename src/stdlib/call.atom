@@ -25,16 +25,3 @@ trait Call {
 
     fn call(input: Input) -> Output
 }
-
-// A function, which is what naming a function or static function refers to
-// when it's used as a value, as in `add` or `Int.zero`. `Input` is a tuple of
-// its parameters, as in `Fn<(a: Int, b: Int), Int>` for
-// `fn add(a: Int, b: Int) -> Int`, or `Fn<(_: Int), Int>` for
-// `fn negate(_ value: Int) -> Int`. A function called by name is called
-// directly, and as a value it uses `Call`, so `adder(a: 3, b: 5)`, where
-// `adder` is `add`, is `adder.call(input: (a: 3, b: 5))`.
-primitive Fn<Input, Output>
-
-impl Fn with Call {
-    primitive fn call(input: Self.Input) -> Self.Output
-}
