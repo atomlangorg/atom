@@ -1825,6 +1825,39 @@ mod tests {
     }
 
     #[test]
+    fn options_can_hold_tuples_and_empty_tuples() {
+        let src = "
+            choice Thing {
+                first: Int
+                second: (a: Int, b: Int)
+                third: ()
+            }
+
+            fn value(of thing: Thing) -> Int {
+                match thing {
+                    Thing.first(let a) => {
+                        return a
+                    }
+                    Thing.second((a: let a, b: let b)) => {
+                        return a * 10 + b
+                    }
+                    Thing.third(()) => {
+                        return 5
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let first = value(of: Thing.first(1))
+                let second = value(of: Thing.second((a: 2, b: 3)))
+                let third = value(of: Thing.third(()))
+                return first * 1000 + second * 10 + third
+            }
+            ";
+        assert_eq!(run(src), 1235);
+    }
+
+    #[test]
     fn tags_tell_options_apart() {
         let src = format!(
             "
