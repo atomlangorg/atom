@@ -1690,7 +1690,7 @@ mod tests {
                 Shape.circle(radius: let radius) => {
                     return radius
                 }
-                Shape.empty => {
+                Shape.empty() => {
                     return 100
                 }
                 Shape.flag(isOn: let flag) => {
@@ -1808,13 +1808,13 @@ mod tests {
                     Shape.pair(a: let a, b: let b) => {
                         total = total + a * 10 + b
                     }
-                    Shape.empty => {}
+                    Shape.empty() => {}
                 }
                 match stored {
                     Shape.pair(a: let a, b: let b) => {
                         total = total + a * 1000 + b * 100
                     }
-                    Shape.empty => {}
+                    Shape.empty() => {}
                 }
                 return total
             }
@@ -1908,7 +1908,7 @@ mod tests {
                         Optional.some(value: let found) => {
                             return Self { value: found }
                         }
-                        Optional.none => {
+                        Optional.none() => {
                             return Self { value: value }
                         }
                     }
@@ -1920,7 +1920,7 @@ mod tests {
                     Optional.some(value: let found) => {
                         return found
                     }
-                    Optional.none => {
+                    Optional.none() => {
                         return 0
                     }
                 }
@@ -1954,7 +1954,7 @@ mod tests {
                     Optional.some(value: let found) => {
                         return found
                     }
-                    Optional.none => {
+                    Optional.none() => {
                         return fallback
                     }
                 }
@@ -2091,7 +2091,7 @@ mod tests {
                     Shape.circle(radius: let radius) => {{
                         result = radius * 10
                     }}
-                    Shape.empty => {{
+                    Shape.empty() => {{
                         result = 1
                     }}
                     Shape.flag(isOn: let flag) => {{
@@ -2128,10 +2128,10 @@ mod tests {
                         Shape.circle(radius: let radius) => {{
                             return radius
                         }}
-                        Shape.empty => {{
+                        Shape.empty() => {{
                             return 0
                         }}
-                        Shape.flag => {{
+                        Shape.flag(isOn: _) => {{
                             return 1
                         }}
                     }}
@@ -2178,10 +2178,10 @@ mod tests {
                             Shape.circle(radius: let radius) => {{
                                 return radius
                             }}
-                            Shape.empty => {{
+                            Shape.empty() => {{
                                 return 0
                             }}
-                            Shape.flag => {{
+                            Shape.flag(isOn: _) => {{
                                 return 0
                             }}
                         }}
@@ -2215,10 +2215,10 @@ mod tests {
                     Figure.circle(radius: let radius) => {{
                         return radius
                     }}
-                    Shape.empty => {{
+                    Shape.empty() => {{
                         return 0
                     }}
-                    Figure.flag => {{
+                    Figure.flag(isOn: _) => {{
                         return 1
                     }}
                 }}
@@ -2823,7 +2823,7 @@ mod tests {
                     Shape.pair(left: _, right: _) => {
                         return 7
                     }
-                    Shape.empty => {
+                    Shape.empty() => {
                         return 0
                     }
                 }
@@ -2925,7 +2925,7 @@ mod tests {
                     Optional.some(value: let found) => {
                         return found
                     }
-                    Optional.none => {
+                    Optional.none() => {
                         return fallback
                     }
                 }
@@ -3114,7 +3114,7 @@ mod tests {
                     Maybe.one(function: let found) => {
                         return a + b + c + d + found(10000)
                     }
-                    Maybe.none => {
+                    Maybe.none() => {
                         return 0
                     }
                 }

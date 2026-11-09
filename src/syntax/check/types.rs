@@ -34,22 +34,25 @@ impl<'a> Checker<'a> {
             TypeName::Named(name) => self.resolve_named_type(name),
             TypeName::Generic { name, args } => self.generic_type(name, args),
             TypeName::SelfParam(param, span) => self.self_param(param, *span),
-            TypeName::Tuple(elements) => {
-                // Every element is resolved, so each one's errors are found.
-                let elements: Vec<_> = elements
-                    .iter()
-                    .map(|element| {
-                        Some(TupleElementType {
-                            label: element.label.clone(),
-                            name: element.name.clone(),
-                            ty: self.resolve_type(&element.ty)?,
-                        })
-                    })
-                    .collect();
-                let elements = elements.into_iter().collect::<Option<_>>()?;
-                Some(self.tuple_type(elements))
-            }
+            TypeName::Tuple(elements) => self.resolve_tuple(elements),
         }
+    }
+    /// Finds the tuple type with `elements`, reporting an error if any of
+    /// their types can't be found.
+    pub(super) fn resolve_tuple(&mut self, elements: &[ast::TupleElement]) -> Option<Type> {
+        // Every element is resolved, so each one's errors are found.
+        let elements: Vec<_> = elements
+            .iter()
+            .map(|element| {
+                Some(TupleElementType {
+                    label: element.label.clone(),
+                    name: element.name.clone(),
+                    ty: self.resolve_type(&element.ty)?,
+                })
+            })
+            .collect();
+        let elements = elements.into_iter().collect::<Option<_>>()?;
+        Some(self.tuple_type(elements))
     }
     /// The tuple type with `elements`, which is created the first time it's
     /// needed.
@@ -616,7 +619,7 @@ impl<'a> Checker<'a> {
             }
             signatures.push(OptionSignature {
                 name: &option.name,
-                ty: self.resolve_type(&option.ty),
+                ty: self.resolve_tuple(&option.values),
             });
         }
         self.types[id].kind = TypeKind::Choice(signatures);

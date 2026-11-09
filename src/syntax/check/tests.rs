@@ -1591,8 +1591,8 @@ fn evaluating_never_anywhere_in_a_statement_ends_its_path() {
         }
         fn matches() -> Int {
             match answer(exit()) {
-                Answer.yes => {}
-                Answer.no => {}
+                Answer.yes() => {}
+                Answer.no() => {}
             }
         }
         fn uses_a_never(never: Never) -> Int {
@@ -3062,7 +3062,7 @@ fn errors_point_at_the_first_line_of_statements_with_blocks() {
             }
             fn f(answer: Answer) {
                 match answer {
-                    Answer.yes => {}
+                    Answer.yes() => {}
                 }
             }
             "
@@ -4548,7 +4548,7 @@ fn self_type_is_the_type_of_its_impl() {
                     Self.circle(radius: let radius) => {
                         return radius
                     }
-                    Self.dot => {
+                    Self.dot() => {
                         return 0
                     }
                 }
@@ -6427,11 +6427,11 @@ fn options_and_tags_cannot_be_matched() {
             {SHAPE}
             fn f() {{
                 match Shape.empty.tag() {{
-                    Shape.empty => {{}}
+                    Shape.empty() => {{}}
                     _ => {{}}
                 }}
                 match Shape.empty {{
-                    Shape.empty => {{}}
+                    Shape.empty() => {{}}
                     _ => {{}}
                 }}
             }}
@@ -6773,7 +6773,7 @@ fn accepts_match() {
                     area = radius * radius * 3
                 }}
                 // The value doesn't have to be matched.
-                Shape.empty => {{}}
+                Shape.empty() => {{}}
                 Shape.nothing() => {{}}
             }}
             return area
@@ -6795,7 +6795,7 @@ fn match_bindings_have_their_options_types() {
                         let wrong: Bool = value
                     }}
                     Shape.empty() => {{}}
-                    Shape.nothing => {{}}
+                    Shape.nothing() => {{}}
                 }}
             }}
             "
@@ -6815,8 +6815,8 @@ fn match_bindings_are_constants_in_their_own_option() {
                     Shape.circle(radius: let radius) => {{
                         radius = 1
                     }}
-                    Shape.empty => {{}}
-                    Shape.nothing => {{
+                    Shape.empty() => {{}}
+                    Shape.nothing() => {{
                         let x = radius
                     }}
                 }}
@@ -6962,9 +6962,9 @@ fn matches_bind_and_compare_values() {
                 (Shape.circle(radius: let radius), let scale) => {{
                     return radius * scale
                 }}
-                (Shape.empty, _) => {{}}
-                (Shape.nothing, 3) => {{}}
-                (Shape.nothing, _) => {{}}
+                (Shape.empty(), _) => {{}}
+                (Shape.nothing(), 3) => {{}}
+                (Shape.nothing(), _) => {{}}
             }}
             match true {{
                 true => {{}}
@@ -7012,11 +7012,10 @@ fn matches_report_the_values_they_miss() {
         messages_top(&src),
         [
             "`match` is missing the patterns `(a: true, b: false)` and `(a: false, b: _)`",
-            "`match` is missing the patterns `(Shape.circle, _)`, `(Shape.empty, _)` and `(Shape.nothing, _)`",
+            "`match` is missing the patterns `(Shape.circle(radius: _), _)`, `(Shape.empty(), _)` and `(Shape.nothing(), _)`",
             "`match` is missing the pattern `_`",
             "`match` is missing the pattern `(a: false, b: _)`",
-            // An option's value is shown only if part of it is matched.
-            "`match` is missing the patterns `Switch.set(isOn: false, count: _)` and `Switch.unset`",
+            "`match` is missing the patterns `Switch.set(isOn: false, count: _)` and `Switch.unset()`",
         ]
     );
 }
@@ -7064,7 +7063,7 @@ fn patterns_must_match_their_types() {
                 (a: true, b: 256) => {{}}
                 (a: let x, b: let x) => {{}}
                 (a: _, b: true) => {{}}
-                Shape.empty => {{}}
+                Shape.empty() => {{}}
             }}
             match shape {{
                 Shape.circle(radius: true) => {{}}
@@ -7147,7 +7146,7 @@ fn destructuring_must_match_every_value() {
         [
             "pattern `(x: 0, y: let y)` doesn't match every value, such as `(x: _, y: _)`, so it can only be used in a `match`",
             "pattern `(x: let x, y: true)` doesn't match every value, such as `(x: _, y: false)`, so it can only be used in a `match`",
-            "pattern `(Shape.circle(radius: let r))` doesn't match every value, such as `(Shape.empty)`, so it can only be used in a `match`",
+            "pattern `(Shape.circle(radius: let r))` doesn't match every value, such as `(Shape.empty())`, so it can only be used in a `match`",
             "pattern `(let a, let b)` can't match `(x: Int, y: Bool)`",
             "pattern `(x: let c)` can't match `(x: Int, y: Bool)`",
             "`missing` is not declared",
@@ -7822,7 +7821,7 @@ fn generic_types_can_be_used_with_any_arguments() {
                     return x + first.get()
                 }}
                 Optional<(x: Int, y: Bool)>.some(value: _) => {{}}
-                Optional.none => {{}}
+                Optional.none() => {{}}
             }}
             return Box<Int>.of(1).value
         }}
@@ -7855,7 +7854,7 @@ fn generic_arguments_are_inferred_where_they_are_known() {
                 Optional.some(value: let found) => {{
                     let flag: Bool = found.get()
                 }}
-                Optional.none => {{}}
+                Optional.none() => {{}}
             }}
             return Box.of(some == none())
         }}
@@ -7875,7 +7874,7 @@ fn generic_arguments_are_inferred_where_they_are_known() {
                 let a = Optional.none
                 let b = Box.of()
                 match 1 {{
-                    Optional.none => {{}}
+                    Optional.none() => {{}}
                     _ => {{}}
                 }}
             }}
@@ -8085,13 +8084,13 @@ fn rejects_wrong_options_in_match() {
             }}
             fn f(shape: Shape) {{
                 match shape {{
-                    Other.circle => {{}}
-                    Shape.square => {{}}
-                    Missing.circle => {{}}
-                    Shape.circle => {{}}
+                    Other.circle(radius: _) => {{}}
+                    Shape.square(size: _) => {{}}
+                    Missing.circle(radius: _) => {{}}
+                    Shape.circle(radius: _) => {{}}
                     Shape.circle(radius: let radius) => {{}}
-                    Shape.empty => {{}}
-                    Shape.nothing => {{}}
+                    Shape.empty() => {{}}
+                    Shape.nothing() => {{}}
                 }}
             }}
             "
@@ -8114,18 +8113,18 @@ fn match_needs_every_option() {
             {SHAPE}
             fn f(shape: Shape) {{
                 match shape {{
-                    Shape.empty => {{}}
+                    Shape.empty() => {{}}
                 }}
                 match shape {{
-                    Shape.empty => {{}}
-                    Shape.circle => {{}}
+                    Shape.empty() => {{}}
+                    Shape.circle(radius: _) => {{}}
                 }}
             }}
             "
         )),
         [
-            "`match` is missing the patterns `Shape.circle` and `Shape.nothing`",
-            "`match` is missing the pattern `Shape.nothing`",
+            "`match` is missing the patterns `Shape.circle(radius: _)` and `Shape.nothing()`",
+            "`match` is missing the pattern `Shape.nothing()`",
         ]
     );
 }
@@ -8140,14 +8139,14 @@ fn match_returns_if_every_option_does() {
                 Shape.circle(radius: let radius) => {{
                     return radius
                 }}
-                Shape.empty => {{
+                Shape.empty() => {{
                     if true {{
                         return 1
                     }} else {{
                         return 2
                     }}
                 }}
-                Shape.nothing => {{
+                Shape.nothing() => {{
                     return 3
                 }}
             }}
@@ -8167,8 +8166,8 @@ fn match_returns_if_every_option_does() {
                     Shape.circle(radius: let radius) => {{
                         return radius
                     }}
-                    Shape.empty => {{}}
-                    Shape.nothing => {{
+                    Shape.empty() => {{}}
+                    Shape.nothing() => {{
                         return 3
                     }}
                 }}
@@ -8315,10 +8314,10 @@ fn aliases_of_choices_have_their_options() {
                 Figure.circle(radius: let radius) => {{
                     return radius
                 }}
-                Shape.empty => {{
+                Shape.empty() => {{
                     return 0
                 }}
-                Figure.nothing => {{
+                Figure.nothing() => {{
                     return 0
                 }}
             }}
@@ -8335,16 +8334,16 @@ fn aliases_of_choices_have_their_options() {
             alias Figure = Shape
             fn f(figure: Figure) {{
                 match figure {{
-                    Figure.circle => {{}}
-                    Shape.circle => {{}}
-                    Shape.empty => {{}}
-                    Shape.nothing => {{}}
+                    Figure.circle(radius: _) => {{}}
+                    Shape.circle(radius: _) => {{}}
+                    Shape.empty() => {{}}
+                    Shape.nothing() => {{}}
                 }}
             }}
             "
         )),
         [
-            "pattern `Shape.circle` can't be reached, since the patterns before it match everything it does"
+            "pattern `Shape.circle(radius: _)` can't be reached, since the patterns before it match everything it does"
         ]
     );
 }

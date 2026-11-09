@@ -34,7 +34,8 @@ pub(super) enum Ctor {
     Bool(bool),
     /// A tuple, whose parts are its elements.
     Tuple,
-    /// The option of a choice at this index, whose part is its value.
+    /// The option of a choice at this index, whose parts are the elements of
+    /// its value.
     Option(usize),
 }
 
@@ -42,17 +43,14 @@ pub(super) enum Ctor {
 pub(super) fn bindings(pattern: &Pattern) -> Vec<(&str, Span)> {
     match &pattern.kind {
         PatternKind::Binding(name) => vec![(name, pattern.span)],
-        PatternKind::Tuple(elements) => elements
+        PatternKind::Tuple(elements)
+        | PatternKind::Option {
+            values: elements, ..
+        } => elements
             .iter()
             .flat_map(|element| bindings(&element.pattern))
             .collect(),
-        PatternKind::Option {
-            value: Some(value), ..
-        } => bindings(value),
-        PatternKind::Any
-        | PatternKind::Int { .. }
-        | PatternKind::Bool(_)
-        | PatternKind::Option { .. } => vec![],
+        PatternKind::Any | PatternKind::Int { .. } | PatternKind::Bool(_) => vec![],
     }
 }
 
@@ -66,11 +64,7 @@ impl<'a> Checker<'a> {
         ty: Option<&Type>,
     ) -> (Option<ir::Pattern>, Space) {
         let Some(ty) = ty else {
-            // The values it binds are still declared, so their uses aren't
-            // reported as undeclared.
-            for (binding, span) in bindings(pattern) {
-                self.declare_local(binding, span, Mutability::Let, None);
-            }
+            self.declare_bindings(pattern);
             return (None, Space::Any);
         };
         let mismatch = |checker: &mut Self| {
@@ -81,9 +75,7 @@ impl<'a> Checker<'a> {
                     ty: ty.clone(),
                 },
             );
-            for (binding, span) in bindings(pattern) {
-                checker.declare_local(binding, span, Mutability::Let, None);
-            }
+            checker.declare_bindings(pattern);
             (None, Space::Any)
         };
         match &pattern.kind {
@@ -127,53 +119,80 @@ impl<'a> Checker<'a> {
                 Space::Ctor(Ctor::Bool(*value), vec![]),
             ),
             PatternKind::Bool(_) => mismatch(self),
-            PatternKind::Tuple(elements) => {
-                // The labels must be the ones the tuple is built with.
-                let types = self.elements(ty.id).map(<[_]>::to_vec).filter(|types| {
-                    types.len() == elements.len()
-                        && types
-                            .iter()
-                            .zip(elements)
-                            .all(|(ty, element)| ty.label == element.label)
-                });
-                let Some(types) = types else {
-                    return mismatch(self);
-                };
-                let mut lowered = vec![];
-                let mut spaces = vec![];
-                for (element, element_ty) in elements.iter().zip(&types) {
-                    let (pattern, space) = self.pattern(&element.pattern, Some(&element_ty.ty));
-                    lowered.push(pattern);
-                    spaces.push(space);
-                }
-                let lowered = lowered.into_iter().collect::<Option<_>>();
-                (
+            PatternKind::Tuple(elements) => match self.tuple_pattern(elements, ty) {
+                Some((lowered, spaces)) => (
                     lowered.map(ir::Pattern::Tuple),
                     Space::Ctor(Ctor::Tuple, spaces),
-                )
-            }
+                ),
+                None => mismatch(self),
+            },
             PatternKind::Option {
                 ty: type_name,
                 option,
-                value,
+                values,
             } => {
                 let found = self.option_pattern(ty, type_name, option, pattern.span);
-                let value_ty = found.as_ref().and_then(|(_, value_ty)| value_ty.as_ref());
-                let (value, space) = match value {
-                    Some(value) => self.pattern(value, value_ty),
-                    None => (Some(ir::Pattern::Any), Space::Any),
-                };
-                let Some((index, _)) = found else {
+                let Some((index, value_ty)) = found else {
+                    self.declare_bindings(pattern);
                     return (None, Space::Any);
                 };
-                (
-                    value.map(|value| ir::Pattern::Option {
-                        index,
-                        value: Box::new(value),
-                    }),
-                    Space::Ctor(Ctor::Option(index), vec![space]),
-                )
+                let ctor = Ctor::Option(index);
+                // If its value's type is unknown, it's already been reported.
+                let Some(value_ty) = value_ty else {
+                    self.declare_bindings(pattern);
+                    return (None, Space::Ctor(ctor, vec![]));
+                };
+                let Some((lowered, spaces)) = self.tuple_pattern(values, &value_ty) else {
+                    self.error(
+                        pattern.span,
+                        CheckError::PatternMismatch {
+                            pattern: ast::show_tuple(values),
+                            ty: value_ty.clone(),
+                        },
+                    );
+                    self.declare_bindings(pattern);
+                    let parts = self.ctor_types(ty, &ctor).len();
+                    return (None, Space::Ctor(ctor, vec![Space::Any; parts]));
+                };
+                // Its value is still matched as a tuple.
+                let lowered = lowered.map(|values| ir::Pattern::Option {
+                    index,
+                    value: Box::new(ir::Pattern::Tuple(values)),
+                });
+                (lowered, Space::Ctor(ctor, spaces))
             }
+        }
+    }
+    /// Checks the tuple pattern with `elements` against a value of type `ty`,
+    /// as `pattern` does, returning what its elements compile to and which
+    /// values they match, or `None` if `ty` isn't a tuple with its labels.
+    pub(super) fn tuple_pattern(
+        &mut self,
+        elements: &'a [ast::TuplePattern],
+        ty: &Type,
+    ) -> Option<(Option<Vec<ir::Pattern>>, Vec<Space>)> {
+        // The labels must be the ones the tuple is built with.
+        let types = self.elements(ty.id).map(<[_]>::to_vec).filter(|types| {
+            types.len() == elements.len()
+                && types
+                    .iter()
+                    .zip(elements)
+                    .all(|(ty, element)| ty.label == element.label)
+        })?;
+        let mut lowered = vec![];
+        let mut spaces = vec![];
+        for (element, element_ty) in elements.iter().zip(&types) {
+            let (pattern, space) = self.pattern(&element.pattern, Some(&element_ty.ty));
+            lowered.push(pattern);
+            spaces.push(space);
+        }
+        Some((lowered.into_iter().collect(), spaces))
+    }
+    /// Declares the values that `pattern` binds, without types, for when it
+    /// has an error, so their uses aren't reported as undeclared.
+    pub(super) fn declare_bindings(&mut self, pattern: &'a Pattern) {
+        for (binding, span) in bindings(pattern) {
+            self.declare_local(binding, span, Mutability::Let, None);
         }
     }
     /// Finds the option called `option` of `type_name`, which must be `ty`,
@@ -405,21 +424,21 @@ impl<'a> Checker<'a> {
     }
     /// The types of the parts of a value of `ty` made with `ctor`.
     pub(super) fn ctor_types(&self, ty: &Type, ctor: &Ctor) -> Vec<Type> {
+        self.ctor_tuple(ty, ctor)
+            .and_then(|tuple| self.elements(tuple.id))
+            .unwrap_or_default()
+            .iter()
+            .map(|element| element.ty.clone())
+            .collect()
+    }
+    /// The tuple whose elements are the parts of a value of `ty` made with
+    /// `ctor`, which is `ty` itself or an option's value, or `None` if it has
+    /// no parts. An option whose type is unknown has already been reported.
+    pub(super) fn ctor_tuple(&self, ty: &Type, ctor: &Ctor) -> Option<Type> {
         match ctor {
-            Ctor::Int(_) | Ctor::Bool(_) => vec![],
-            Ctor::Tuple => self
-                .elements(ty.id)
-                .unwrap_or_default()
-                .iter()
-                .map(|element| element.ty.clone())
-                .collect(),
-            // An option whose type is unknown has already been reported.
-            Ctor::Option(index) => vec![
-                self.options(ty.id).unwrap_or_default()[*index]
-                    .ty
-                    .clone()
-                    .unwrap_or_else(|| self.std_type("Void")),
-            ],
+            Ctor::Int(_) | Ctor::Bool(_) => None,
+            Ctor::Tuple => Some(ty.clone()),
+            Ctor::Option(index) => self.options(ty.id)?[*index].ty.clone(),
         }
     }
     /// How values of `ty` matching `space` are written as a pattern.
@@ -427,38 +446,30 @@ impl<'a> Checker<'a> {
         let Space::Ctor(ctor, parts) = space else {
             return "_".to_string();
         };
-        let part_tys = self.ctor_types(ty, ctor);
+        let tuple = self.ctor_tuple(ty, ctor);
+        let elements = tuple
+            .as_ref()
+            .and_then(|tuple| self.elements(tuple.id))
+            .unwrap_or_default();
+        let shown: Vec<_> = elements
+            .iter()
+            .zip(parts)
+            .map(|(element, part)| {
+                let part = self.show_space(part, &element.ty);
+                match &element.label {
+                    Some(label) => format!("{label}: {part}"),
+                    None => part,
+                }
+            })
+            .collect();
+        let shown = format!("({})", shown.join(", "));
         match ctor {
             Ctor::Int(value) => value.to_string(),
             Ctor::Bool(value) => value.to_string(),
-            Ctor::Tuple => {
-                let elements: Vec<_> = self
-                    .elements(ty.id)
-                    .unwrap_or_default()
-                    .iter()
-                    .zip(parts.iter().zip(&part_tys))
-                    .map(|(element, (part, part_ty))| {
-                        let part = self.show_space(part, part_ty);
-                        match &element.label {
-                            Some(label) => format!("{label}: {part}"),
-                            None => part,
-                        }
-                    })
-                    .collect();
-                format!("({})", elements.join(", "))
-            }
+            Ctor::Tuple => shown,
             Ctor::Option(index) => {
                 let option = self.options(ty.id).unwrap_or_default()[*index].name;
-                // Its value is a tuple, whose brackets are the option's, and
-                // which is left out if it matches anything.
-                match &parts[0] {
-                    Space::Ctor(Ctor::Tuple, elements)
-                        if !elements.iter().all(|element| matches!(element, Space::Any)) =>
-                    {
-                        format!("{ty}.{option}{}", self.show_space(&parts[0], &part_tys[0]))
-                    }
-                    _ => format!("{ty}.{option}"),
-                }
+                format!("{ty}.{option}{shown}")
             }
         }
     }

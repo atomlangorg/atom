@@ -619,9 +619,9 @@ pub struct Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
     pub name: String,
-    /// The type of the value it holds, which is always a tuple of what's
-    /// written in its brackets, such as `(radius: Int)`, or `()`.
-    pub ty: TypeName,
+    /// The elements of the tuple it holds, as in `(radius: Int)`, which
+    /// each have a label.
+    pub values: Vec<TupleElement>,
     pub span: Span,
 }
 
@@ -652,14 +652,14 @@ pub enum PatternKind {
     /// `(label: pattern, ...)`: matches a tuple whose elements each match,
     /// with the labels its type builds it with.
     Tuple(Vec<TuplePattern>),
-    /// `Type.option` or `Type.option(label: pattern, ...)`: matches the
-    /// option of a choice, and if given, its value against the tuple pattern
-    /// in brackets, which is always `PatternKind::Tuple`. The type is a name,
-    /// which can be given generic arguments.
+    /// `Type.option(label: pattern, ...)`: matches the option of a choice
+    /// whose value matches the tuple pattern in brackets, as in
+    /// `Shape.circle(radius: _)`. The type is a name, which can be given
+    /// generic arguments.
     Option {
         ty: TypeName,
         option: String,
-        value: Option<Box<Pattern>>,
+        values: Vec<TuplePattern>,
     },
 }
 
@@ -672,22 +672,24 @@ impl fmt::Display for Pattern {
                 write!(f, "{}{value}", if *negative { "-" } else { "" })
             }
             PatternKind::Bool(value) => write!(f, "{value}"),
-            PatternKind::Tuple(elements) => {
-                let elements: Vec<_> = elements
-                    .iter()
-                    .map(|element| match &element.label {
-                        Some(label) => format!("{label}: {}", element.pattern),
-                        None => element.pattern.to_string(),
-                    })
-                    .collect();
-                write!(f, "({})", elements.join(", "))
+            PatternKind::Tuple(elements) => write!(f, "{}", show_tuple(elements)),
+            PatternKind::Option { ty, option, values } => {
+                write!(f, "{ty}.{option}{}", show_tuple(values))
             }
-            PatternKind::Option { ty, option, value } => match value {
-                Some(value) => write!(f, "{ty}.{option}{value}"),
-                None => write!(f, "{ty}.{option}"),
-            },
         }
     }
+}
+
+/// How the tuple pattern with `elements` is written, as in `(x: 0, _)`.
+pub fn show_tuple(elements: &[TuplePattern]) -> String {
+    let elements: Vec<_> = elements
+        .iter()
+        .map(|element| match &element.label {
+            Some(label) => format!("{label}: {}", element.pattern),
+            None => element.pattern.to_string(),
+        })
+        .collect();
+    format!("({})", elements.join(", "))
 }
 
 /// An element of a tuple pattern, such as `x: let x` or `_`.
