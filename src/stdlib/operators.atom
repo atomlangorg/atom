@@ -104,6 +104,14 @@ trait Divide {
     fn divide(by rhs: Rhs) -> Output
 }
 
+// Types that `-` can be used on before a value, which calls `negate`, as in
+// `-a`, where the result is an `Output`.
+trait Negate {
+    alias Output
+
+    fn negate() -> Output
+}
+
 // Types that `.&` can be used on, which calls `bitAnd`, as in `a .& b`, where `b`
 // is an `Rhs`, and the result is an `Output`.
 trait BitAnd {
@@ -147,14 +155,6 @@ trait ShiftRight {
     alias Output
 
     fn shiftRight(by amount: Rhs) -> Output
-}
-
-// Types that `-` can be used on before a value, which calls `negate`, as in
-// `-a`, where the result is an `Output`.
-trait Negate {
-    alias Output
-
-    fn negate() -> Output
 }
 
 // Types that `.!` can be used on before a value, which calls `bitNot`, as in
