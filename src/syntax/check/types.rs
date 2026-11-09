@@ -618,7 +618,7 @@ impl<'a> Checker<'a> {
                 );
             }
             signatures.push(OptionSignature {
-                name: &option.name,
+                decl: option,
                 ty: self.resolve_tuple(&option.values),
             });
         }

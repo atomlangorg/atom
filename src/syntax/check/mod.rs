@@ -78,7 +78,7 @@ mod traits;
 mod types;
 
 pub use errors::{CheckError, MemberKind};
-use exprs::{Member, Receiver, Typed, call, chosen, split};
+use exprs::{Member, Receiver, Typed, call, split};
 use patterns::Space;
 use types::int_range;
 
@@ -271,9 +271,28 @@ struct FieldSignature<'a> {
 
 #[derive(Debug, Clone)]
 struct OptionSignature<'a> {
-    name: &'a str,
+    /// Where it's declared, which gives its name and the labels of its value.
+    decl: &'a ChoiceOption,
     /// The type of the value it holds, or `None` if it's unknown.
     ty: Option<Type>,
+}
+
+/// A static member of a type that's called with arguments: one of its static
+/// functions, or one of its options, which creates it.
+#[derive(Debug, Clone)]
+enum StaticCallee {
+    Function(FnRef),
+    /// The option of the choice at this index.
+    Option(usize),
+}
+
+impl StaticCallee {
+    fn kind(&self) -> MemberKind {
+        match self {
+            Self::Function(_) => MemberKind::StaticFunction,
+            Self::Option(_) => MemberKind::Option,
+        }
+    }
 }
 
 /// Everything known about a type, which `Type::id` indexes.

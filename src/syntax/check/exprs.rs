@@ -18,19 +18,6 @@
 
 use super::*;
 
-/// `value`, the checked value for the option at `option` of the choice with
-/// id `choice`, as the choice.
-pub(super) fn chosen(choice: usize, option: usize, value: Typed) -> Typed {
-    Typed {
-        ty: value.ty,
-        expr: ir::Expr::Choose {
-            choice,
-            option,
-            value: Box::new(value.expr),
-        },
-    }
-}
-
 /// What `.member` is used on.
 pub(super) enum Receiver {
     /// A value of the type, for its fields and methods, along with what it
@@ -550,12 +537,21 @@ impl<'a> Checker<'a> {
         let index = *self.types[owner].statics.get(name)?;
         Some(FnRef { index, args })
     }
+    /// Finds the static function or option of `ty` called `name`. They never
+    /// share a name, since declaring one as the other is an error.
+    pub(super) fn static_callee(&self, ty: &Type, name: &str) -> Option<StaticCallee> {
+        if let Some(function) = self.static_function(ty, name) {
+            return Some(StaticCallee::Function(function));
+        }
+        let (index, _) = self.option(ty, name)?;
+        Some(StaticCallee::Option(index))
+    }
     /// Finds the option of `ty` called `name`, if `ty` is a choice, returning
     /// its index in the order they're declared, and the type of the value it
     /// holds, which is `None` if it's unknown.
     pub(super) fn option(&self, ty: &Type, name: &str) -> Option<(usize, Option<Type>)> {
         let options = self.options(ty.id)?;
-        let index = options.iter().position(|option| option.name == name)?;
+        let index = options.iter().position(|option| option.decl.name == name)?;
         Some((index, options[index].ty.clone()))
     }
     /// The `Base` and `Value` of `ty`, if it's made from `ChoiceOption`.
@@ -572,14 +568,14 @@ impl<'a> Checker<'a> {
     /// out an option or static function with that name.
     pub(super) fn no_member(&self, ty: Type, name: &str) -> CheckError {
         let member = name.to_string();
-        let kind = if self.option(&ty, name).is_some() {
-            MemberKind::Option
-        } else if self.static_function(&ty, name).is_some() {
-            MemberKind::StaticFunction
-        } else {
-            return CheckError::NoMember { ty, member };
-        };
-        CheckError::NeedsType { ty, member, kind }
+        match self.static_callee(&ty, name) {
+            Some(callee) => CheckError::NeedsType {
+                ty,
+                member,
+                kind: callee.kind(),
+            },
+            None => CheckError::NoMember { ty, member },
+        }
     }
     /// The error for `name` not being an option or static function of `ty`,
     /// which points out a field or method with that name.
@@ -640,18 +636,20 @@ impl<'a> Checker<'a> {
                 },
                 None => self.no_member(ty, field),
             },
-            // Naming an option doesn't create the choice, but gives its
-            // `ChoiceOption`.
-            Receiver::Type(ty) if let Some((option, value_ty)) = self.option(&ty, field) => {
-                let template = self.std_template("ChoiceOption");
-                return Typed {
-                    ty: value_ty.and_then(|value| self.instance(template, vec![ty, value], span)),
-                    expr: ir::Expr::Tag(option),
-                };
-            }
-            Receiver::Type(ty) => match self.static_function(&ty, field) {
-                Some(found) => {
+            Receiver::Type(ty) => match self.static_callee(&ty, field) {
+                Some(StaticCallee::Function(found)) => {
                     return self.function_value(found, span);
+                }
+                // Naming an option doesn't create the choice, but gives its
+                // `ChoiceOption`.
+                Some(StaticCallee::Option(index)) => {
+                    let template = self.std_template("ChoiceOption");
+                    let value_ty = self.options(ty.id).unwrap_or_default()[index].ty.clone();
+                    return Typed {
+                        ty: value_ty
+                            .and_then(|value| self.instance(template, vec![ty, value], span)),
+                        expr: ir::Expr::Tag(index),
+                    };
                 }
                 None => self.no_static_function(ty, field),
             },

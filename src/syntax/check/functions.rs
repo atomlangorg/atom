@@ -47,14 +47,8 @@ impl<'a> Checker<'a> {
             // Methods must be unique across every file, since a call can't
             // say which file's method it means.
             let existing = if is_static {
-                match (
-                    self.option(self_ty, name),
-                    self.static_function(self_ty, name),
-                ) {
-                    (Some(_), _) => Some(MemberKind::Option),
-                    (None, Some(_)) => Some(MemberKind::StaticFunction),
-                    (None, None) => None,
-                }
+                self.static_callee(self_ty, name)
+                    .map(|callee| callee.kind())
             } else {
                 match self.member(self_ty, name) {
                     Some(Member::Field(..)) => Some(MemberKind::Field),

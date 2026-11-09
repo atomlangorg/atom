@@ -468,7 +468,7 @@ impl<'a> Checker<'a> {
             Ctor::Bool(value) => value.to_string(),
             Ctor::Tuple => shown,
             Ctor::Option(index) => {
-                let option = self.options(ty.id).unwrap_or_default()[*index].name;
+                let option = &self.options(ty.id).unwrap_or_default()[*index].decl.name;
                 format!("{ty}.{option}{shown}")
             }
         }
