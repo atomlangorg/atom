@@ -45,6 +45,10 @@ impl IntS64 with Divide {
     primitive fn divide(by rhs: Self) -> Self
 }
 
+impl IntS64 with Negate {
+    primitive fn negate() -> Self
+}
+
 impl IntS64 with BitAnd {
     primitive fn bitAnd(_ rhs: Self) -> Self
 }
@@ -55,10 +59,6 @@ impl IntS64 with BitOr {
 
 impl IntS64 with BitXor {
     primitive fn bitXor(_ rhs: Self) -> Self
-}
-
-impl IntS64 with Negate {
-    primitive fn negate() -> Self
 }
 
 impl IntS64 with BitNot {
