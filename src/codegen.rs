@@ -1658,9 +1658,9 @@ mod tests {
     /// A choice for tests, with options holding values of different types.
     const SHAPE: &str = "
         choice Shape {
-            circle: Int
-            empty
-            flag: Bool
+            circle(radius: Int)
+            empty()
+            flag(isOn: Bool)
         }
         ";
 
@@ -1669,10 +1669,9 @@ mod tests {
         let src = format!(
             "
             {SHAPE}
-            let circle = Shape.circle(3)
-            let flag = Shape.flag(true)
+            let circle = Shape.circle(radius: 3)
+            let flag = Shape.flag(isOn: true)
             let empty = Shape.empty()
-            let emptyWithValue = Shape.empty(())
             fn main() -> Int {{
                 return 0
             }}
@@ -1681,7 +1680,6 @@ mod tests {
         assert_eq!(read_choice(&src, "circle", "Shape", 64), (0, 3));
         assert_eq!(read_choice(&src, "flag", "Shape", 8), (2, 1));
         assert_eq!(read_choice(&src, "empty", "Shape", 8).0, 1);
-        assert_eq!(read_choice(&src, "emptyWithValue", "Shape", 8).0, 1);
     }
 
     /// Returns which of `SHAPE`'s options `shape` is, and its value, for
@@ -1689,13 +1687,13 @@ mod tests {
     const DESCRIBE_SHAPE: &str = "
         fn describe(shape: Shape) -> Int {
             match shape {
-                Shape.circle(let radius) => {
+                Shape.circle(radius: let radius) => {
                     return radius
                 }
                 Shape.empty => {
                     return 100
                 }
-                Shape.flag(let flag) => {
+                Shape.flag(isOn: let flag) => {
                     if flag {
                         return 200
                     }
@@ -1712,7 +1710,7 @@ mod tests {
             {SHAPE}
             {DESCRIBE_SHAPE}
             group Maker {{
-                let make: ChoiceOption<Shape, Int>
+                let make: ChoiceOption<Shape, (radius: Int)>
             }}
 
             impl Maker {{
@@ -1721,21 +1719,21 @@ mod tests {
                 }}
             }}
 
-            fn make(from option: ChoiceOption<Shape, Int>) -> Shape {{
-                return option(4)
+            fn make(from option: ChoiceOption<Shape, (radius: Int)>) -> Shape {{
+                return option(radius: 4)
             }}
 
             fn main() -> Int {{
                 let circle = Shape.circle
                 let empty = Shape.empty
-                let a = describe(shape: circle(1))
-                let b = describe(shape: circle.call(input: 2))
+                let a = describe(shape: circle(radius: 1))
+                let b = describe(shape: circle.call(input: (radius: 2)))
                 let c = describe(shape: make(from: Shape.circle))
-                let d = describe(shape: Maker.new().make(8))
+                let d = describe(shape: Maker.new().make(radius: 8))
                 let e = describe(shape: empty())
-                let f = describe(shape: empty(()))
+                let f = describe(shape: empty.call(input: ()))
                 let stored = Shape.flag
-                let g = describe(shape: stored(true))
+                let g = describe(shape: stored(isOn: true))
                 return a + b + c + d + e + f + g
             }}
             "
@@ -1747,22 +1745,22 @@ mod tests {
     fn stored_options_can_be_chosen_while_running() {
         let src = "
             choice Number {
-                small: Int
-                large: Int
+                small(amount: Int)
+                large(amount: Int)
             }
 
             fn read(number: Number) -> Int {
                 match number {
-                    Number.small(let value) => {
+                    Number.small(amount: let value) => {
                         return value
                     }
-                    Number.large(let value) => {
+                    Number.large(amount: let value) => {
                         return value * 100
                     }
                 }
             }
 
-            fn pick(large: Bool) -> ChoiceOption<Number, Int> {
+            fn pick(large: Bool) -> ChoiceOption<Number, (amount: Int)> {
                 if large {
                     return Number.large
                 }
@@ -1772,7 +1770,7 @@ mod tests {
             fn main() -> Int {
                 let large = pick(large: true)
                 let small = pick(large: false)
-                return read(number: large(2)) + read(number: small(3))
+                return read(number: large(amount: 2)) + read(number: small(amount: 3))
             }
             ";
         assert_eq!(run(src), 203);
@@ -1784,7 +1782,7 @@ mod tests {
             "
             {SHAPE}
             let option = Shape.flag
-            let flag = option(true)
+            let flag = option(isOn: true)
             fn main() -> Int {{
                 return 0
             }}
@@ -1797,23 +1795,23 @@ mod tests {
     fn options_can_hold_tuples_when_stored() {
         let src = "
             choice Shape {
-                empty
-                pair: (a: Int, b: Int)
+                empty()
+                pair(a: Int, b: Int)
             }
 
             fn main() -> Int {
-                let direct = Shape.pair((a: 1, b: 2))
+                let direct = Shape.pair(a: 1, b: 2)
                 let pair = Shape.pair
-                let stored = pair((a: 3, b: 4))
+                let stored = pair(a: 3, b: 4)
                 var total = 0
                 match direct {
-                    Shape.pair((a: let a, b: let b)) => {
+                    Shape.pair(a: let a, b: let b) => {
                         total = total + a * 10 + b
                     }
                     Shape.empty => {}
                 }
                 match stored {
-                    Shape.pair((a: let a, b: let b)) => {
+                    Shape.pair(a: let a, b: let b) => {
                         total = total + a * 1000 + b * 100
                     }
                     Shape.empty => {}
@@ -1825,32 +1823,32 @@ mod tests {
     }
 
     #[test]
-    fn options_can_hold_tuples_and_empty_tuples() {
+    fn options_can_hold_any_number_of_values() {
         let src = "
             choice Thing {
-                first: Int
-                second: (a: Int, b: Int)
-                third: ()
+                first(a: Int)
+                second(a: Int, b: Int)
+                third()
             }
 
             fn value(of thing: Thing) -> Int {
                 match thing {
-                    Thing.first(let a) => {
+                    Thing.first(a: let a) => {
                         return a
                     }
-                    Thing.second((a: let a, b: let b)) => {
+                    Thing.second(a: let a, b: let b) => {
                         return a * 10 + b
                     }
-                    Thing.third(()) => {
+                    Thing.third() => {
                         return 5
                     }
                 }
             }
 
             fn main() -> Int {
-                let first = value(of: Thing.first(1))
-                let second = value(of: Thing.second((a: 2, b: 3)))
-                let third = value(of: Thing.third(()))
+                let first = value(of: Thing.first(a: 1))
+                let second = value(of: Thing.second(a: 2, b: 3))
+                let third = value(of: Thing.third())
                 return first * 1000 + second * 10 + third
             }
             ";
@@ -1870,14 +1868,14 @@ mod tests {
             }}
 
             fn main() -> Int {{
-                let shape = Shape.flag(true)
+                let shape = Shape.flag(isOn: true)
                 let tag: ChoiceTag<Shape> = ChoiceTag.new(of: shape)
                 let option = Shape.flag
                 let a = score(matched: tag == Shape.flag.tag(), worth: 1)
                 let b = score(matched: tag == Shape.circle.tag(), worth: 2)
                 let c = score(matched: tag != Shape.circle.tag(), worth: 4)
                 let d = score(matched: tag != option.tag(), worth: 8)
-                let e = score(matched: tag == ChoiceTag.new(of: option(false)), worth: 16)
+                let e = score(matched: tag == ChoiceTag.new(of: option(isOn: false)), worth: 16)
                 let f = score(matched: ChoiceTag<Shape>.new(of: Shape.empty()) == Shape.empty.tag(), worth: 32)
                 let read = ChoiceTag<Shape>.new
                 let g = score(matched: read(of: shape) == tag, worth: 64)
@@ -1892,8 +1890,8 @@ mod tests {
     fn generic_arguments_inferred_from_calls_compile() {
         let src = "
             choice Optional<T> {
-                none
-                some: T
+                none()
+                some(value: T)
             }
 
             group Box<T> {
@@ -1907,7 +1905,7 @@ mod tests {
 
                 static fn holding(_ value: Self.T, fallback: Optional<Self.T>) -> Self {
                     match fallback {
-                        Optional.some(let found) => {
+                        Optional.some(value: let found) => {
                             return Self { value: found }
                         }
                         Optional.none => {
@@ -1919,7 +1917,7 @@ mod tests {
 
             fn read(optional: Optional<Int>) -> Int {
                 match optional {
-                    Optional.some(let found) => {
+                    Optional.some(value: let found) => {
                         return found
                     }
                     Optional.none => {
@@ -1931,9 +1929,9 @@ mod tests {
             fn main() -> Int {
                 let a = Box.of(1).value
                 let b = Box.of(Box.of(20)).value.value
-                let c = read(optional: Optional.some(300))
-                let d = Box.holding(0, fallback: Optional.some(4000)).value
-                let shape = Optional.some(true)
+                let c = read(optional: Optional.some(value: 300))
+                let d = Box.holding(0, fallback: Optional.some(value: 4000)).value
+                let shape = Optional.some(value: true)
                 if ChoiceTag.new(of: shape) == Optional<Bool>.some.tag() {
                     return a + b + c + d
                 }
@@ -1947,13 +1945,13 @@ mod tests {
     fn generic_choices_have_options_and_tags() {
         let src = "
             choice Optional<T> {
-                none
-                some: T
+                none()
+                some(value: T)
             }
 
             fn unwrap(_ value: Optional<Int>, or fallback: Int) -> Int {
                 match value {
-                    Optional.some(let found) => {
+                    Optional.some(value: let found) => {
                         return found
                     }
                     Optional.none => {
@@ -1963,11 +1961,11 @@ mod tests {
             }
 
             fn main() -> Int {
-                let some: ChoiceOption<Optional<Int>, Int> = Optional.some
+                let some: ChoiceOption<Optional<Int>, (value: Int)> = Optional.some
                 let none: ChoiceOption<Optional<Int>, Void> = Optional.none
-                let a = unwrap(some(5), or: 0)
+                let a = unwrap(some(value: 5), or: 0)
                 let b = unwrap(none(), or: 7)
-                if ChoiceTag<Optional<Int>>.new(of: some(1)) == Optional<Int>.some.tag() {
+                if ChoiceTag<Optional<Int>>.new(of: some(value: 1)) == Optional<Int>.some.tag() {
                     return a * 10 + b
                 }
                 return 0
@@ -1980,20 +1978,20 @@ mod tests {
     fn options_and_tags_work_as_top_level_values() {
         let src = "
             choice Shape {
-                square: Int
-                circle: Bool
-                other
+                square(size: Int)
+                circle(isFilled: Bool)
+                other()
             }
 
-            let a: ChoiceOption<Shape, Int> = Shape.square
+            let a: ChoiceOption<Shape, (size: Int)> = Shape.square
             let b: ChoiceTag<Shape> = Shape.square.tag()
-            let c: Shape = Shape.square(5)
-            let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(5))
+            let c: Shape = Shape.square(size: 5)
+            let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(size: 5))
 
             let n: ChoiceOption<Shape, Void> = Shape.other
             let o: ChoiceTag<Shape> = Shape.other.tag()
             let p: Shape = Shape.other()
-            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(()))
+            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other())
 
             fn main() -> Int {
                 return 0
@@ -2020,12 +2018,12 @@ mod tests {
             }}
 
             choice Drawing {{
-                shape: Shape
-                point: Point
+                shape(of: Shape)
+                point(at: Point)
             }}
 
-            let shape = Drawing.shape(Shape.flag(false))
-            let point = Drawing.point(Point.at(x: 7, y: 8))
+            let shape = Drawing.shape(of: Shape.flag(isOn: false))
+            let point = Drawing.point(at: Point.at(x: 7, y: 8))
             fn main() -> Int {{
                 return 0
             }}
@@ -2043,7 +2041,7 @@ mod tests {
             {SHAPE}
             impl Shape {{
                 static fn unit() -> Shape {{
-                    return Shape.circle(1)
+                    return Shape.circle(radius: 1)
                 }}
 
                 fn sides() -> Int {{
@@ -2071,7 +2069,7 @@ mod tests {
 
             fn main() -> Int {{
                 choice Local {{
-                    only
+                    only()
                 }}
                 let local = Local.only()
                 let canvas = Canvas.of(keep(Shape.unit()))
@@ -2090,13 +2088,13 @@ mod tests {
             fn describe(_ shape: Shape) -> Int {{
                 var result = 0
                 match shape {{
-                    Shape.circle(let radius) => {{
+                    Shape.circle(radius: let radius) => {{
                         result = radius * 10
                     }}
                     Shape.empty => {{
                         result = 1
                     }}
-                    Shape.flag(let flag) => {{
+                    Shape.flag(isOn: let flag) => {{
                         if flag {{
                             result = 2
                         }} else {{
@@ -2108,10 +2106,10 @@ mod tests {
             }}
 
             fn main() -> Int {{
-                let a = describe(Shape.circle(5))
+                let a = describe(Shape.circle(radius: 5))
                 let b = describe(Shape.empty())
-                let c = describe(Shape.flag(true))
-                let d = describe(Shape.flag(false))
+                let c = describe(Shape.flag(isOn: true))
+                let d = describe(Shape.flag(isOn: false))
                 return a * 1000 + b * 100 + c * 10 + d
             }}
             "
@@ -2127,7 +2125,7 @@ mod tests {
             impl Shape {{
                 fn size() -> Int {{
                     match self {{
-                        Shape.circle(let radius) => {{
+                        Shape.circle(radius: let radius) => {{
                             return radius
                         }}
                         Shape.empty => {{
@@ -2145,7 +2143,7 @@ mod tests {
             }}
 
             fn main() -> Int {{
-                return Shape.circle(7).size() * 10 + Shape.flag(true).size()
+                return Shape.circle(radius: 7).size() * 10 + Shape.flag(isOn: true).size()
             }}
             "
         );
@@ -2169,15 +2167,15 @@ mod tests {
             }}
 
             choice Drawing {{
-                shape: Shape
-                point: Point
+                shape(of: Shape)
+                point(at: Point)
             }}
 
             fn total(of drawing: Drawing) -> Int {{
                 match drawing {{
-                    Drawing.shape(let shape) => {{
+                    Drawing.shape(of: let shape) => {{
                         match shape {{
-                            Shape.circle(let radius) => {{
+                            Shape.circle(radius: let radius) => {{
                                 return radius
                             }}
                             Shape.empty => {{
@@ -2188,15 +2186,15 @@ mod tests {
                             }}
                         }}
                     }}
-                    Drawing.point(let point) => {{
+                    Drawing.point(at: let point) => {{
                         return point.x + point.y
                     }}
                 }}
             }}
 
             fn main() -> Int {{
-                let circle = total(of: Drawing.shape(Shape.circle(4)))
-                let point = total(of: Drawing.point(Point.at(x: 20, y: 30)))
+                let circle = total(of: Drawing.shape(of: Shape.circle(radius: 4)))
+                let point = total(of: Drawing.point(at: Point.at(x: 20, y: 30)))
                 return circle + point
             }}
             "
@@ -2214,7 +2212,7 @@ mod tests {
 
             fn size(of figure: Figure) -> Size {{
                 match figure {{
-                    Figure.circle(let radius) => {{
+                    Figure.circle(radius: let radius) => {{
                         return radius
                     }}
                     Shape.empty => {{
@@ -2228,7 +2226,7 @@ mod tests {
 
             fn main() -> Int {{
                 alias Total = Size
-                let total: Total = size(of: Figure.circle(40)) + size(of: Shape.flag(true))
+                let total: Total = size(of: Figure.circle(radius: 40)) + size(of: Shape.flag(isOn: true))
                 return total
             }}
             "
@@ -2784,14 +2782,14 @@ mod tests {
         // Each `describe` returns which arm matched, and the values it bound.
         let src = "
             choice Inner {
-                circle: Int
-                empty
+                circle(radius: Int)
+                empty()
             }
 
             choice Shape {
-                circle: Int
-                pair: (left: Inner, right: Int)
-                empty
+                circle(radius: Int)
+                pair(left: Inner, right: Int)
+                empty()
             }
 
             fn describe(_ point: (x: Int, y: Bool)) -> Int {
@@ -2813,16 +2811,16 @@ mod tests {
 
             fn size(of shape: Shape) -> Int {
                 match shape {
-                    Shape.circle(0) => {
+                    Shape.circle(radius: 0) => {
                         return 100
                     }
-                    Shape.circle(let radius) => {
+                    Shape.circle(radius: let radius) => {
                         return radius
                     }
-                    Shape.pair((left: Inner.circle(let r), right: let n)) => {
+                    Shape.pair(left: Inner.circle(radius: let r), right: let n) => {
                         return r * n
                     }
-                    Shape.pair(_) => {
+                    Shape.pair(left: _, right: _) => {
                         return 7
                     }
                     Shape.empty => {
@@ -2854,9 +2852,9 @@ mod tests {
                 let a = describe((x: 0, y: true)) + describe((x: 20, y: true))
                 let b = describe((x: -1, y: false)) + describe((x: 5, y: false))
                 // 100 + 9 + 30 + 7 + 0 = 146
-                let c = size(of: Shape.circle(0)) + size(of: Shape.circle(9))
-                let d = size(of: Shape.pair((left: Inner.circle(6), right: 5)))
-                let e = size(of: Shape.pair((left: Inner.empty(), right: 5))) + size(of: Shape.empty())
+                let c = size(of: Shape.circle(radius: 0)) + size(of: Shape.circle(radius: 9))
+                let d = size(of: Shape.pair(left: Inner.circle(radius: 6), right: 5))
+                let e = size(of: Shape.pair(left: Inner.empty(), right: 5)) + size(of: Shape.empty())
                 // 1 + 2 + 3 = 6
                 let f = count(255) + count(0) + count(9)
                 return a + b + c + d + e + f
@@ -2889,8 +2887,8 @@ mod tests {
     fn generic_types_are_compiled_for_each_use() {
         let src = "
             choice Optional<T> {
-                none
-                some: T
+                none()
+                some(value: T)
             }
 
             group Box<T> {
@@ -2907,7 +2905,7 @@ mod tests {
                 }
 
                 fn maybe() -> Optional<Self.T> {
-                    return Optional.some(self.value)
+                    return Optional.some(value: self.value)
                 }
             }
 
@@ -2924,7 +2922,7 @@ mod tests {
 
             fn unwrap(_ value: Optional<Int>, or fallback: Int) -> Int {
                 match value {
-                    Optional.some(let found) => {
+                    Optional.some(value: let found) => {
                         return found
                     }
                     Optional.none => {
@@ -2934,7 +2932,7 @@ mod tests {
             }
 
             fn main() -> Int {
-                let a: Optional<Int> = Optional.some(40)
+                let a: Optional<Int> = Optional.some(value: 40)
                 let b = Optional<Int>.none()
                 let boxed: Box<Bool> = Box.of(true)
                 let count = Box<Int>.of(1).get()
@@ -3075,8 +3073,8 @@ mod tests {
     fn fn_values_can_be_passed_stored_and_returned() {
         let src = "
             choice Maybe {
-                one: Fn<(_: Int), Int>
-                none
+                one(function: Fn<(_: Int), Int>)
+                none()
             }
 
             group Tools {
@@ -3112,8 +3110,8 @@ mod tests {
                 let b = function(10)
                 let c = applying(Tools.new().double, to: 100)
                 let d = Tools.new().double(1000)
-                match Maybe.one(inc) {
-                    Maybe.one(let found) => {
+                match Maybe.one(function: inc) {
+                    Maybe.one(function: let found) => {
                         return a + b + c + d + found(10000)
                     }
                     Maybe.none => {

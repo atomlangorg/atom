@@ -449,9 +449,15 @@ impl<'a> Checker<'a> {
             }
             Ctor::Option(index) => {
                 let option = self.options(ty.id).unwrap_or_default()[*index].name;
+                // Its value is a tuple, whose brackets are the option's, and
+                // which is left out if it matches anything.
                 match &parts[0] {
-                    Space::Any => format!("{ty}.{option}"),
-                    value => format!("{ty}.{option}({})", self.show_space(value, &part_tys[0])),
+                    Space::Ctor(Ctor::Tuple, elements)
+                        if !elements.iter().all(|element| matches!(element, Space::Any)) =>
+                    {
+                        format!("{ty}.{option}{}", self.show_space(&parts[0], &part_tys[0]))
+                    }
+                    _ => format!("{ty}.{option}"),
                 }
             }
         }

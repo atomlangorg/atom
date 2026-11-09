@@ -29,10 +29,10 @@ impl ChoiceTag with Equal {
 }
 
 // An option of the choice `Base` that holds a `Value`, which is what naming an
-// option refers to, as in `Shape.circle`. `Base` must be a choice. Calling it
-// creates the choice, so `Shape.circle(3)` is `Shape.circle.call(input: 3)`,
-// and if `Value` is `Void` it can be left out, so `Shape.empty()` is
-// `Shape.empty(())`.
+// option refers to, as in `Shape.circle`. `Base` must be a choice, and `Value`
+// is the tuple of what the option is declared with. Calling it creates the
+// choice, so `Shape.circle(radius: 3)` is
+// `Shape.circle.call(input: (radius: 3))`.
 primitive ChoiceOption<Base, Value>
 
 impl ChoiceOption {

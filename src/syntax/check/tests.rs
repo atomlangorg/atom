@@ -1557,8 +1557,8 @@ fn evaluating_never_anywhere_in_a_statement_ends_its_path() {
     // finish being evaluated, and they're never called.
     let src = "
         choice Answer {
-            yes: Void
-            no: Void
+            yes()
+            no()
         }
         fn describe(_ never: Never) -> Int {
             match never {}
@@ -3057,8 +3057,8 @@ fn errors_point_at_the_first_line_of_statements_with_blocks() {
         pointed_at_top(
             "
             choice Answer {
-                yes
-                no
+                yes()
+                no()
             }
             fn f(answer: Answer) {
                 match answer {
@@ -4520,8 +4520,8 @@ fn self_type_is_the_type_of_its_impl() {
             let x: Int
         }
         choice Shape {
-            circle: Int
-            dot: Void
+            circle(radius: Int)
+            dot()
         }
 
         impl Point {
@@ -4545,7 +4545,7 @@ fn self_type_is_the_type_of_its_impl() {
         impl Shape {
             fn size() -> Int {
                 match self {
-                    Self.circle(let radius) => {
+                    Self.circle(radius: let radius) => {
                         return radius
                     }
                     Self.dot => {
@@ -4555,7 +4555,7 @@ fn self_type_is_the_type_of_its_impl() {
             }
 
             static fn unit() -> Self {
-                return Self.circle(1)
+                return Self.circle(radius: 1)
             }
         }
 
@@ -6079,12 +6079,13 @@ fn unknown_impl_types_do_not_report_constructors() {
     );
 }
 
-/// A choice for tests, with options holding values of different types.
+/// A choice for tests, with options holding values of different types, and
+/// two holding none.
 const SHAPE: &str = "
     choice Shape {
-        circle: Int
-        empty
-        nothing: Void
+        circle(radius: Int)
+        empty()
+        nothing()
     }
     ";
 
@@ -6093,16 +6094,15 @@ fn accepts_choices() {
     let src = format!(
         "
         {SHAPE}
-        let a: Shape = Shape.circle(3)
+        let a: Shape = Shape.circle(radius: 3)
         let b: Shape = Shape.empty()
-        let c: Shape = Shape.empty(())
-        let d: Shape = Shape.nothing()
+        let c: Shape = Shape.nothing()
         fn f() -> Shape {{
             choice Inner {{
-                only
+                only()
             }}
             let inner: Inner = Inner.only()
-            return Shape.circle(1 + 2)
+            return Shape.circle(radius: 1 + 2)
         }}
         "
     );
@@ -6119,7 +6119,7 @@ fn options_can_be_used_anywhere() {
                 "/main",
                 "
                 use /shapes
-                let a = Shape.circle(1)
+                let a = Shape.circle(radius: 1)
                 fn f() -> Shape {
                     return Shape.empty()
                 }
@@ -6138,7 +6138,7 @@ fn choices_can_have_impls() {
         {SHAPE}
         impl Shape {{
             static fn unit() -> Shape {{
-                return Shape.circle(1)
+                return Shape.circle(radius: 1)
             }}
 
             // Methods are used on values, so they can share names with
@@ -6159,19 +6159,23 @@ fn rejects_wrong_option_values() {
         messages_top(&format!(
             "
             {SHAPE}
-            let a = Shape.circle(true)
-            let b = Shape.circle(value: 1)
-            let c = Shape.circle()
-            let d = Shape.circle(1, 2)
-            let e = Shape.empty(1)
+            let a = Shape.circle(radius: true)
+            let b = Shape.circle(1)
+            let c = Shape.circle(size: 1)
+            let d = Shape.circle()
+            let e = Shape.circle(radius: 1, 2)
+            let f = Shape.empty(1)
+            let g = Shape.empty(())
             "
         )),
         [
-            "argument `value` of `Shape.circle` expects `Int`, found `Bool`",
-            "argument to `Shape.circle` should not have a label, found `value`",
+            "argument `radius` of `Shape.circle` expects `Int`, found `Bool`",
+            "argument to `Shape.circle` is missing the label `radius`",
+            "argument to `Shape.circle` should be labelled `radius`, found `size`",
             "`Shape.circle` takes 1 argument, found 0",
             "`Shape.circle` takes 1 argument, found 2",
-            "argument `value` of `Shape.empty` expects `Void`, found `Int`",
+            "`Shape.empty` takes 0 arguments, found 1",
+            "`Shape.empty` takes 0 arguments, found 1",
         ]
     );
 }
@@ -6188,9 +6192,9 @@ fn naming_an_option_does_not_create_the_choice() {
             "
         )),
         [
-            "cannot assign `ChoiceOption<Shape, Int>` to `a`, which has type `Shape`",
-            "cannot assign `ChoiceOption<Shape, Void>` to `b`, which has type `Shape`",
-            "cannot assign `ChoiceOption<Shape, Int>` to `c`, which has type `ChoiceOption<Shape, Bool>`",
+            "cannot assign `ChoiceOption<Shape, (radius: Int)>` to `a`, which has type `Shape`",
+            "cannot assign `ChoiceOption<Shape, ()>` to `b`, which has type `Shape`",
+            "cannot assign `ChoiceOption<Shape, (radius: Int)>` to `c`, which has type `ChoiceOption<Shape, Bool>`",
         ]
     );
 }
@@ -6199,20 +6203,20 @@ fn naming_an_option_does_not_create_the_choice() {
 fn options_are_values_with_tags() {
     let src = "
         choice Shape {
-            square: Int
-            circle: Bool
-            other
+            square(size: Int)
+            circle(filled: Bool)
+            other()
         }
 
-        let a: ChoiceOption<Shape, Int> = Shape.square
+        let a: ChoiceOption<Shape, (size: Int)> = Shape.square
         let b: ChoiceTag<Shape> = Shape.square.tag()
-        let c: Shape = Shape.square(5)
-        let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(5))
+        let c: Shape = Shape.square(size: 5)
+        let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(size: 5))
 
         let n: ChoiceOption<Shape, Void> = Shape.other
         let o: ChoiceTag<Shape> = Shape.other.tag()
         let p: Shape = Shape.other()
-        let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(()))
+        let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other())
         ";
     assert_eq!(check_top(src), Ok(()));
 }
@@ -6223,24 +6227,23 @@ fn options_can_be_called_like_other_values() {
         "
         {SHAPE}
         group Maker {{
-            let make: ChoiceOption<Shape, Int>
+            let make: ChoiceOption<Shape, (radius: Int)>
         }}
 
-        fn make(with option: ChoiceOption<Shape, Int>) -> Shape {{
-            return option(1)
+        fn make(with option: ChoiceOption<Shape, (radius: Int)>) -> Shape {{
+            return option(radius: 1)
         }}
 
         fn f(maker: Maker) {{
             let circle = Shape.circle
-            let a: Shape = circle(1)
-            let b: Shape = circle.call(input: 1)
-            let c: Shape = Shape.circle.call(input: 1)
+            let a: Shape = circle(radius: 1)
+            let b: Shape = circle.call(input: (radius: 1))
+            let c: Shape = Shape.circle.call(input: (radius: 1))
             let d: Shape = make(with: Shape.circle)
-            let e: Shape = maker.make(1)
+            let e: Shape = maker.make(radius: 1)
             let empty = Shape.empty
             let g: Shape = empty()
-            let h: Shape = empty(())
-            let i: Shape = empty.call(input: ())
+            let h: Shape = empty.call(input: ())
         }}
         "
     );
@@ -6255,39 +6258,44 @@ fn rejects_wrong_values_for_stored_options() {
             {SHAPE}
             fn f() {{
                 let circle = Shape.circle
-                let a = circle(true)
-                let b = circle(value: 1)
+                let a = circle(radius: true)
+                let b = circle(1)
                 let c = circle()
-                let d = circle(1, 2)
+                let d = circle(radius: 1, 2)
                 let empty = Shape.empty
                 let e = empty(1)
+                let f = empty(())
             }}
             "
         )),
         [
-            "argument `value` of `circle` expects `Int`, found `Bool`",
-            "argument to `circle` should not have a label, found `value`",
-            "`circle` takes 1 argument, found 0",
-            "`circle` takes 1 argument, found 2",
-            "argument `value` of `empty` expects `Void`, found `Int`",
+            "`circle` is called with `(radius: Int)`, but was given `(radius: Bool)`",
+            "`circle` is called with `(radius: Int)`, but was given `(_: Int)`",
+            "`circle` is called with `(radius: Int)`, but was given `()`",
+            "`circle` is called with `(radius: Int)`, but was given `(radius: Int, _: Int)`",
+            "`empty` is called with `()`, but was given `(_: Int)`",
+            "`empty` is called with `()`, but was given `(_: ())`",
         ]
     );
 }
 
 #[test]
-fn options_take_tuples_as_one_argument() {
+fn options_take_each_of_their_values_as_an_argument() {
+    // Their value is built from the arguments, so a tuple isn't unpacked
+    // into them.
     let pair = "
         choice Shape {
-            pair: (a: Int, b: Int)
+            pair(a: Int, b: Int)
         }
         ";
     let src = format!(
         "
         {pair}
         fn f() {{
-            let a: Shape = Shape.pair((a: 1, b: 2))
+            let a: Shape = Shape.pair(a: 1, b: 2)
             let pair = Shape.pair
-            let b: Shape = pair((a: 1, b: 2))
+            let b: Shape = pair(a: 1, b: 2)
+            let c: Shape = pair.call(input: (a: 1, b: 2))
         }}
         "
     );
@@ -6297,15 +6305,15 @@ fn options_take_tuples_as_one_argument() {
             "
             {pair}
             fn f() {{
-                let a = Shape.pair(a: 1, b: 2)
+                let a = Shape.pair((a: 1, b: 2))
                 let pair = Shape.pair
-                let b = pair(a: 1, b: 2)
+                let b = pair((a: 1, b: 2))
             }}
             "
         )),
         [
-            "`Shape.pair` takes 1 argument, found 2",
-            "`pair` takes 1 argument, found 2",
+            "`Shape.pair` takes 2 arguments, found 1",
+            "`pair` is called with `(a: Int, b: Int)`, but was given `(_: (a: Int, b: Int))`",
         ]
     );
 }
@@ -6352,9 +6360,9 @@ fn options_of_generic_choices_infer_their_arguments() {
         "
         {GENERICS}
         let a: ChoiceOption<Optional<Int>, Void> = Optional.none
-        let b: ChoiceOption<Optional<Int>, Int> = Optional.some
+        let b: ChoiceOption<Optional<Int>, (value: Int)> = Optional.some
         let c: Optional<Int> = Optional.none()
-        let d: Optional<Int> = Optional<Int>.some(1)
+        let d: Optional<Int> = Optional<Int>.some(value: 1)
         let e: ChoiceTag<Optional<Int>> = Optional<Int>.none.tag()
         "
     );
@@ -6368,7 +6376,7 @@ fn options_of_generic_choices_infer_their_arguments() {
             "
         )),
         [
-            "cannot assign `ChoiceOption<Optional<Int>, Void>` to `a`, which has type `Optional<Int>`",
+            "cannot assign `ChoiceOption<Optional<Int>, ()>` to `a`, which has type `Optional<Int>`",
             "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
         ]
     );
@@ -6394,7 +6402,7 @@ fn tags_can_be_compared() {
             "
             {SHAPE}
             choice Other {{
-                only
+                only()
             }}
             let a = Shape.empty.tag() == Other.only.tag()
             let b = Shape.empty.tag() == Shape.empty
@@ -6404,7 +6412,7 @@ fn tags_can_be_compared() {
         )),
         [
             "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceTag<Other>`",
-            "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceOption<Shape, Void>`",
+            "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceOption<Shape, ()>`",
             "cannot assign `Int` to `c`, which has type `ChoiceTag<Shape>`",
             "cannot assign `ChoiceTag<Other>` to `d`, which has type `ChoiceTag<Shape>`",
         ]
@@ -6431,7 +6439,7 @@ fn options_and_tags_cannot_be_matched() {
         )),
         [
             "`match` is on `ChoiceTag<Shape>`, so it can't match an option of `Shape`",
-            "`match` is on `ChoiceOption<Shape, Void>`, so it can't match an option of `Shape`",
+            "`match` is on `ChoiceOption<Shape, ()>`, so it can't match an option of `Shape`",
         ]
     );
 }
@@ -6475,7 +6483,7 @@ fn tags_and_options_can_have_impls() {
         }}
 
         let a: Bool = Shape.empty.tag().isSame(as: ChoiceTag.from(value: Shape.empty()))
-        let b: Shape = Shape.circle.make(with: 1)
+        let b: Shape = Shape.circle.make(with: (radius: 1))
         "
     );
     assert_eq!(check_top(&src), Ok(()));
@@ -6491,32 +6499,32 @@ fn tag_types_can_be_used_anywhere() {
         }
 
         choice Nested {
-            tag: ChoiceTag<Nested>
-            other: ChoiceTag<Later>
+            tag(value: ChoiceTag<Nested>)
+            other(value: ChoiceTag<Later>)
         }
 
         choice Generic<T> {
-            value: T
-            tag: ChoiceTag<Generic<T>>
+            value(value: T)
+            tag(value: ChoiceTag<Generic<T>>)
         }
 
         let a: ShapeTag = Shape.empty.tag()
 
         fn f() {
             choice Local {
-                only
-                tag: ChoiceTag<Local>
+                only()
+                tag(value: ChoiceTag<Local>)
             }
             let tag: ChoiceTag<Local> = Local.only.tag()
             let b: ChoiceTag<Generic<Int>> = Generic<Int>.value.tag()
         }
 
         choice Shape {
-            empty
+            empty()
         }
 
         choice Later {
-            empty
+            empty()
         }
         ";
     assert_eq!(check_top(src), Ok(()));
@@ -6529,7 +6537,7 @@ fn rejects_wrong_values_for_tags() {
             "
             {SHAPE}
             choice Other {{
-                only
+                only()
             }}
             let a = ChoiceTag<Shape>.new(of: Other.only())
             let b = ChoiceTag<Shape>.new(Shape.empty())
@@ -6597,8 +6605,8 @@ fn tags_are_available_from_any_file() {
 fn choices_have_no_reserved_names() {
     let src = "
         choice Shape {
-            tag: Int
-            Tag
+            tag(id: Int)
+            Tag()
         }
 
         impl Shape {
@@ -6609,7 +6617,7 @@ fn choices_have_no_reserved_names() {
 
         trait Choice {}
 
-        let a: Int = Shape.tag(1).tag()
+        let a: Int = Shape.tag(id: 1).tag()
         let b: ChoiceTag<Shape> = Shape.tag.tag()
         ";
     assert_eq!(check_top(src), Ok(()));
@@ -6630,7 +6638,7 @@ fn rejects_unknown_options() {
         messages_top(&format!(
             "
             {SHAPE}
-            let a = Shape.square(1)
+            let a = Shape.square(size: 1)
             let b = Shape.square
             "
         )),
@@ -6649,7 +6657,7 @@ fn options_are_used_on_types_not_values() {
             {SHAPE}
             let shape = Shape.empty()
             let a = shape.empty
-            let b = shape.circle(1)
+            let b = shape.circle(radius: 1)
             "
         )),
         [
@@ -6682,12 +6690,12 @@ fn option_names_are_unique() {
         messages_top(
             "
             choice Shape {
-                circle: Int
-                circle: Bool
+                circle(radius: Int)
+                circle(filled: Bool)
             }
             impl Shape {
                 static fn circle() -> Shape {
-                    return Shape.circle(1)
+                    return Shape.circle(radius: 1)
                 }
             }
             "
@@ -6705,15 +6713,15 @@ fn rejects_recursive_choices() {
         check_top(
             "
             choice List {
-                empty
-                node: List
+                empty()
+                node(next: List)
             }
             group Node {
                 let next: Link
             }
             choice Link {
-                none
-                some: Node
+                none()
+                some(node: Node)
             }
             "
         ),
@@ -6731,9 +6739,9 @@ fn unknown_option_types_do_not_cascade() {
         check_top(
             "
             choice Shape {
-                circle: Circle
+                circle(radius: Circle)
             }
-            let a = Shape.circle(1)
+            let a = Shape.circle(radius: 1)
             "
         ),
         Err(vec![CheckError::UnknownType("Circle".to_string())])
@@ -6761,14 +6769,12 @@ fn accepts_match() {
         fn area(of shape: Shape) -> Int {{
             var area = 0
             match shape {{
-                Shape.circle(let radius) => {{
+                Shape.circle(radius: let radius) => {{
                     area = radius * radius * 3
                 }}
-                // The value doesn't have to be given a name.
+                // The value doesn't have to be matched.
                 Shape.empty => {{}}
-                Shape.nothing(let nothing) => {{
-                    let void: Void = nothing
-                }}
+                Shape.nothing() => {{}}
             }}
             return area
         }}
@@ -6785,21 +6791,16 @@ fn match_bindings_have_their_options_types() {
             {SHAPE}
             fn f(shape: Shape) {{
                 match shape {{
-                    Shape.circle(let value) => {{
+                    Shape.circle(radius: let value) => {{
                         let wrong: Bool = value
                     }}
-                    Shape.empty(let value) => {{
-                        let wrong: Int = value
-                    }}
+                    Shape.empty() => {{}}
                     Shape.nothing => {{}}
                 }}
             }}
             "
         )),
-        [
-            "cannot assign `Int` to `wrong`, which has type `Bool`",
-            "cannot assign `Void` to `wrong`, which has type `Int`",
-        ]
+        ["cannot assign `Int` to `wrong`, which has type `Bool`"]
     );
 }
 
@@ -6811,13 +6812,17 @@ fn match_bindings_are_constants_in_their_own_option() {
             {SHAPE}
             fn f(shape: Shape, taken: Int) {{
                 match shape {{
-                    Shape.circle(let radius) => {{
+                    Shape.circle(radius: let radius) => {{
                         radius = 1
                     }}
-                    Shape.empty(let taken) => {{}}
+                    Shape.empty => {{}}
                     Shape.nothing => {{
                         let x = radius
                     }}
+                }}
+                match shape {{
+                    Shape.circle(radius: let taken) => {{}}
+                    _ => {{}}
                 }}
                 let y = radius
             }}
@@ -6825,8 +6830,8 @@ fn match_bindings_are_constants_in_their_own_option() {
         )),
         [
             "cannot assign to `radius` because it was declared with `let`",
-            "`taken` is already declared",
             "`radius` is not declared",
+            "`taken` is already declared",
             "`radius` is not declared",
         ]
     );
@@ -6905,8 +6910,8 @@ fn tuples_can_be_in_any_type() {
                 let start: (x: Int, y: Int)
             }
             choice Path {
-                line: (from: Line, to: Line)
-                none
+                line(ends: (from: Line, to: Line))
+                none()
             }
             "
         ),
@@ -6953,8 +6958,8 @@ fn matches_bind_and_compare_values() {
                 _ => {{}}
             }}
             match shape {{
-                (Shape.circle(0), _) => {{}}
-                (Shape.circle(let radius), let scale) => {{
+                (Shape.circle(radius: 0), _) => {{}}
+                (Shape.circle(radius: let radius), let scale) => {{
                     return radius * scale
                 }}
                 (Shape.empty, _) => {{}}
@@ -6977,12 +6982,16 @@ fn matches_report_the_values_they_miss() {
     let src = format!(
         "
         {SHAPE}
+        choice Switch {{
+            set(isOn: Bool, count: Int)
+            unset()
+        }}
         fn f(pair: (a: Bool, b: Bool), shape: (_: Shape, _: Int), n: IntU8) {{
             match pair {{
                 (a: true, b: true) => {{}}
             }}
             match shape {{
-                (Shape.circle(1), _) => {{}}
+                (Shape.circle(radius: 1), _) => {{}}
                 (_, 0) => {{}}
             }}
             match n {{
@@ -6990,6 +6999,11 @@ fn matches_report_the_values_they_miss() {
             }}
             match pair {{
                 (a: true, b: _) => {{}}
+            }}
+        }}
+        fn g(switch: Switch) {{
+            match switch {{
+                Switch.set(isOn: true, count: _) => {{}}
             }}
         }}
         "
@@ -7001,6 +7015,8 @@ fn matches_report_the_values_they_miss() {
             "`match` is missing the patterns `(Shape.circle, _)`, `(Shape.empty, _)` and `(Shape.nothing, _)`",
             "`match` is missing the pattern `_`",
             "`match` is missing the pattern `(a: false, b: _)`",
+            // An option's value is shown only if part of it is matched.
+            "`match` is missing the patterns `Switch.set(isOn: false, count: _)` and `Switch.unset`",
         ]
     );
 }
@@ -7019,8 +7035,8 @@ fn matches_reject_unreachable_patterns() {
                 (a: false, b: 2) => {{}}
             }}
             match shape {{
-                Shape.circle(_) => {{}}
-                Shape.circle(1) => {{}}
+                Shape.circle(radius: _) => {{}}
+                Shape.circle(radius: 1) => {{}}
                 let other => {{}}
             }}
         }}
@@ -7031,7 +7047,7 @@ fn matches_reject_unreachable_patterns() {
         [
             "pattern `(a: true, b: 1)` can't be reached, since the patterns before it match everything it does",
             "pattern `(a: false, b: 2)` can't be reached, since the patterns before it match everything it does",
-            "pattern `Shape.circle(1)` can't be reached, since the patterns before it match everything it does",
+            "pattern `Shape.circle(radius: 1)` can't be reached, since the patterns before it match everything it does",
         ]
     );
 }
@@ -7051,8 +7067,9 @@ fn patterns_must_match_their_types() {
                 Shape.empty => {{}}
             }}
             match shape {{
-                Shape.circle(true) => {{}}
-                Shape.circle((x: _)) => {{}}
+                Shape.circle(radius: true) => {{}}
+                Shape.circle(x: _) => {{}}
+                Shape.empty(_) => {{}}
                 _ => {{
                     let y = missing
                 }}
@@ -7070,7 +7087,8 @@ fn patterns_must_match_their_types() {
             "pattern `true` can't match `IntU8`",
             "`match` is on `(a: Bool, b: IntU8)`, so it can't match an option of `Shape`",
             "pattern `true` can't match `Int`",
-            "pattern `(x: _)` can't match `Int`",
+            "pattern `(x: _)` can't match `(radius: Int)`",
+            "pattern `(_)` can't match `()`",
             "`missing` is not declared",
         ]
     );
@@ -7117,7 +7135,7 @@ fn destructuring_must_match_every_value() {
         fn f(point: (x: Int, y: Bool), shape: (_: Shape)) {{
             (x: 0, y: let y) = point
             (x: let x, y: true) = point
-            (Shape.circle(let r)) = shape
+            (Shape.circle(radius: let r)) = shape
             (let a, let b) = point
             (x: let c) = point
             (let d, let e) = missing
@@ -7129,7 +7147,7 @@ fn destructuring_must_match_every_value() {
         [
             "pattern `(x: 0, y: let y)` doesn't match every value, such as `(x: _, y: _)`, so it can only be used in a `match`",
             "pattern `(x: let x, y: true)` doesn't match every value, such as `(x: _, y: false)`, so it can only be used in a `match`",
-            "pattern `(Shape.circle(let r))` doesn't match every value, such as `(Shape.empty)`, so it can only be used in a `match`",
+            "pattern `(Shape.circle(radius: let r))` doesn't match every value, such as `(Shape.empty)`, so it can only be used in a `match`",
             "pattern `(let a, let b)` can't match `(x: Int, y: Bool)`",
             "pattern `(x: let c)` can't match `(x: Int, y: Bool)`",
             "`missing` is not declared",
@@ -7556,8 +7574,8 @@ fn rejects_generic_primitives_outside_the_stdlib() {
 /// Generic types for generics tests.
 const GENERICS: &str = "
     choice Optional<T> {
-        none
-        some: T
+        none()
+        some(value: T)
     }
 
     group Box<T> {
@@ -7581,7 +7599,7 @@ fn generic_arguments_are_inferred_from_calls() {
         "
         {GENERICS}
         choice Shape {{
-            empty
+            empty()
         }}
 
         group Pair<A, B> {{
@@ -7615,23 +7633,23 @@ fn generic_arguments_are_inferred_from_calls() {
         }}
 
         choice Nested<T> {{
-            boxed: Box<T>
-            pair: (a: T, b: Bool)
+            boxed(value: Box<T>)
+            pair(a: T, b: Bool)
         }}
 
         let a: Box<Int> = Box.of(1)
         let b: Bool = Box.of(true).get()
         let c: Optional<Int> = Optional<Int>.none()
         let d: Int = Box.of(Box.of(1)).get().get()
-        let e: Optional<Bool> = Optional.some(true)
-        let f = Optional.some(1)
+        let e: Optional<Bool> = Optional.some(value: true)
+        let f = Optional.some(value: 1)
         let g: Optional<Int> = f
         let h: Pair<Int, Bool> = Pair.of(first: 1, second: true)
         let i: Pair<Int, Bool> = Pair.tupled(pair: (a: 1, b: true))
         let j: Box<Int> = Box.unwrapping(Box.of(1))
         let k: Pair<Int, Bool> = Pair.copy(of: h)
-        let l: Nested<Int> = Nested.boxed(Box.of(1))
-        let m: Nested<Int> = Nested.pair((a: 1, b: true))
+        let l: Nested<Int> = Nested.boxed(value: Box.of(1))
+        let m: Nested<Int> = Nested.pair(a: 1, b: true)
         let n: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.empty())
         let o = ChoiceTag.new(of: Shape.empty()) == Shape.empty.tag()
 
@@ -7644,8 +7662,8 @@ fn generic_arguments_are_inferred_from_calls() {
 fn inferred_arguments_take_types_from_those_already_known() {
     let src = "
         choice Optional<T> {
-            none
-            some: T
+            none()
+            some(value: T)
         }
 
         group Box<T> {
@@ -7661,7 +7679,7 @@ fn inferred_arguments_take_types_from_those_already_known() {
         fn f() {
             let small: IntU8 = 1
             let a: Box<IntU8> = Box.with(value: small, fallback: Optional.none())
-            let b: Box<IntU8> = Box.with(value: small, fallback: Optional.some(1))
+            let b: Box<IntU8> = Box.with(value: small, fallback: Optional.some(value: 1))
         }
         ";
     assert_eq!(check_top(src), Ok(()));
@@ -7696,7 +7714,7 @@ fn rejects_calls_whose_generic_arguments_cannot_be_inferred() {
             }}
 
             choice Shape {{
-                empty
+                empty()
             }}
 
             fn f() {{
@@ -7800,10 +7818,10 @@ fn generic_types_can_be_used_with_any_arguments() {
             let first: Box<Int> = holder.boxes.first
             let other: Optional<Box<Bool>> = holder.boxes.second
             match maybe {{
-                Optional.some((x: let x, y: true)) => {{
+                Optional.some(value: (x: let x, y: true)) => {{
                     return x + first.get()
                 }}
-                Optional<(x: Int, y: Bool)>.some(_) => {{}}
+                Optional<(x: Int, y: Bool)>.some(value: _) => {{}}
                 Optional.none => {{}}
             }}
             return Box<Int>.of(1).value
@@ -7831,10 +7849,10 @@ fn generic_arguments_are_inferred_where_they_are_known() {
         }}
 
         fn f(_ value: Optional<Box<Bool>>) -> Box<Int> {{
-            let some: Optional<Int> = Optional.some(1)
+            let some: Optional<Int> = Optional.some(value: 1)
             let boxed: Box<Int> = Box.of(2)
             match value {{
-                Optional.some(let found) => {{
+                Optional.some(value: let found) => {{
                     let flag: Bool = found.get()
                 }}
                 Optional.none => {{}}
@@ -7964,8 +7982,8 @@ fn generic_types_cannot_contain_themselves() {
         }
 
         choice Optional<T> {
-            none
-            some: T
+            none()
+            some(value: T)
         }
 
         group Grow<T> {
@@ -8063,7 +8081,7 @@ fn rejects_wrong_options_in_match() {
             "
             {SHAPE}
             choice Other {{
-                circle: Int
+                circle(radius: Int)
             }}
             fn f(shape: Shape) {{
                 match shape {{
@@ -8071,7 +8089,7 @@ fn rejects_wrong_options_in_match() {
                     Shape.square => {{}}
                     Missing.circle => {{}}
                     Shape.circle => {{}}
-                    Shape.circle(let radius) => {{}}
+                    Shape.circle(radius: let radius) => {{}}
                     Shape.empty => {{}}
                     Shape.nothing => {{}}
                 }}
@@ -8119,7 +8137,7 @@ fn match_returns_if_every_option_does() {
         {SHAPE}
         fn f(shape: Shape) -> Int {{
             match shape {{
-                Shape.circle(let radius) => {{
+                Shape.circle(radius: let radius) => {{
                     return radius
                 }}
                 Shape.empty => {{
@@ -8146,7 +8164,7 @@ fn match_returns_if_every_option_does() {
             {SHAPE}
             fn f(shape: Shape) -> Int {{
                 match shape {{
-                    Shape.circle(let radius) => {{
+                    Shape.circle(radius: let radius) => {{
                         return radius
                     }}
                     Shape.empty => {{}}
@@ -8169,7 +8187,7 @@ fn match_options_are_checked_when_the_value_has_an_error() {
             {SHAPE}
             fn f() {{
                 match missing {{
-                    Shape.circle(let radius) => {{
+                    Shape.circle(radius: let radius) => {{
                         let x: Bool = 1
                     }}
                 }}
@@ -8294,7 +8312,7 @@ fn aliases_of_choices_have_their_options() {
         alias Figure = Shape
         fn size(of figure: Figure) -> Int {{
             match figure {{
-                Figure.circle(let radius) => {{
+                Figure.circle(radius: let radius) => {{
                     return radius
                 }}
                 Shape.empty => {{
@@ -8305,7 +8323,7 @@ fn aliases_of_choices_have_their_options() {
                 }}
             }}
         }}
-        let a = size(of: Figure.circle(2))
+        let a = size(of: Figure.circle(radius: 2))
         let b = size(of: Shape.empty())
         "
     );
@@ -8440,8 +8458,8 @@ fn literals_take_their_type_from_where_theyre_used() {
         }
 
         choice Level {
-            exact: IntU8
-            none
+            exact(level: IntU8)
+            none()
         }
 
         fn half(of byte: IntU8) -> IntU8 {
@@ -8451,7 +8469,7 @@ fn literals_take_their_type_from_where_theyre_used() {
         fn f() -> IntU8 {
             var byte: IntU8 = 250
             byte = 255
-            let level = Level.exact(255)
+            let level = Level.exact(level: 255)
             let pixel = Pixel.new(red: 255)
             let sum: IntU8 = half(of: 255) + pixel.brighter(by: 1)
             // The other operand gives the type, even when it's second,

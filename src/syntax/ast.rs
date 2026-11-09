@@ -615,12 +615,12 @@ pub struct Field {
     pub span: Span,
 }
 
-/// An option of a choice, such as `circle: Int` or `empty`.
+/// An option of a choice, such as `circle(radius: Int)` or `empty()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
     pub name: String,
-    /// The type of the value it holds. `empty` is the same as
-    /// `empty: Void`, so this is `Void` when no type is written.
+    /// The type of the value it holds, which is always a tuple of what's
+    /// written in its brackets, such as `(radius: Int)`, or `()`.
     pub ty: TypeName,
     pub span: Span,
 }
@@ -652,8 +652,9 @@ pub enum PatternKind {
     /// `(label: pattern, ...)`: matches a tuple whose elements each match,
     /// with the labels its type builds it with.
     Tuple(Vec<TuplePattern>),
-    /// `Type.option` or `Type.option(pattern)`: matches the option of a
-    /// choice, and if given, its value against `pattern`. The type is a name,
+    /// `Type.option` or `Type.option(label: pattern, ...)`: matches the
+    /// option of a choice, and if given, its value against the tuple pattern
+    /// in brackets, which is always `PatternKind::Tuple`. The type is a name,
     /// which can be given generic arguments.
     Option {
         ty: TypeName,
@@ -682,7 +683,7 @@ impl fmt::Display for Pattern {
                 write!(f, "({})", elements.join(", "))
             }
             PatternKind::Option { ty, option, value } => match value {
-                Some(value) => write!(f, "{ty}.{option}({value})"),
+                Some(value) => write!(f, "{ty}.{option}{value}"),
                 None => write!(f, "{ty}.{option}"),
             },
         }

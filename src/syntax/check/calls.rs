@@ -31,11 +31,6 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         span: Span,
     ) -> Typed {
-        if let Some(option_ty) = ty.as_ref()
-            && let Some((base, value_ty)) = self.option_args(option_ty)
-        {
-            return self.call_option(option_ty, value, (base, value_ty), name, args, span);
-        }
         let function = ty.as_ref().and_then(|ty| {
             let not_callable = CheckError::NotCallable {
                 name: name.to_string(),
@@ -77,36 +72,11 @@ impl<'a> Checker<'a> {
             expr: call(function, vec![value, input]),
         }
     }
-    /// Checks calling `value`, whose type `ty` is a `ChoiceOption` with
-    /// `base` and `value_ty`, called `name`, with `args`, at `span`.
-    pub(super) fn call_option(
-        &mut self,
-        ty: &Type,
-        value: ir::Expr,
-        (base, value_ty): (Type, Type),
-        name: &str,
-        args: &[Arg],
-        span: Span,
-    ) -> Typed {
-        let not_callable = CheckError::NotCallable {
-            name: name.to_string(),
-            ty: ty.clone(),
-        };
-        let function = self
-            .trait_method("Call", "call", ty, span, not_callable)
-            .map(|function| self.callee(function, span));
-        let Typed { ty: returns, expr } =
-            self.option_value(name.to_string(), base, Some(value_ty), args, span);
-        Typed {
-            ty: returns,
-            expr: call(function, vec![value, expr]),
-        }
-    }
     /// Checks `args` as the value for an option of the choice `base`, called
     /// `name`, which holds a `value_ty`. Creating an option is like calling a
-    /// function with one unlabelled parameter, so a tuple is always one
-    /// argument, except that a `Void` can be left out. Returns the choice's
-    /// type, along with what the value compiles to.
+    /// function whose parameters are the elements of its value, which are
+    /// built into it. Returns the choice's type, along with what the value
+    /// compiles to.
     pub(super) fn option_value(
         &mut self,
         name: String,
@@ -115,13 +85,13 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         span: Span,
     ) -> Typed {
-        if args.is_empty() && value_ty == Some(self.std_type("Void")) {
-            return Typed {
-                ty: Some(base),
-                expr: self.void(),
-            };
-        }
-        let (found, lowered) = self.args(args, std::slice::from_ref(&value_ty));
+        let params: Vec<_> = self
+            .option_params(value_ty.as_ref())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|element| Some(element.ty))
+            .collect();
+        let (found, lowered) = self.args(args, &params);
         self.checked_option_value(name, base, value_ty, args, found, lowered, span)
     }
     /// Checks `args`, which have the types `found` and compile to `lowered`,
@@ -137,21 +107,38 @@ impl<'a> Checker<'a> {
         lowered: Vec<ir::Expr>,
         span: Span,
     ) -> Typed {
+        // If its value's type is unknown, it's already been reported.
+        let Some(elements) = self.option_params(value_ty.as_ref()) else {
+            return Typed::error(base);
+        };
         let signature = Signature {
             name: name.clone(),
-            params: vec![ParamSignature {
-                label: None,
-                name: "value",
-                span,
-                ty: value_ty,
-            }],
+            params: elements
+                .iter()
+                .map(|element| ParamSignature {
+                    label: element.label.as_deref(),
+                    name: element.name.as_deref().unwrap_or_default(),
+                    span,
+                    ty: Some(element.ty.clone()),
+                })
+                .collect(),
             returns: Some(base),
             template: None,
         };
-        Typed {
-            ty: self.check_args(name, args, found, signature, span),
-            expr: <[_; 1]>::try_from(lowered).map_or(ir::Expr::Error, |[value]| value),
-        }
+        let ty = self.check_args(name, args, found, signature, span);
+        let expr = match value_ty {
+            Some(value_ty) if lowered.len() == elements.len() => ir::Expr::Construct {
+                group: value_ty.id,
+                fields: lowered,
+            },
+            _ => ir::Expr::Error,
+        };
+        Typed { ty, expr }
+    }
+    /// The elements of `value_ty`, the value of an option, which are what
+    /// creating it takes, or `None` if its type is unknown.
+    pub(super) fn option_params(&self, value_ty: Option<&Type>) -> Option<Vec<TupleElementType>> {
+        Some(self.elements(value_ty?.id)?.to_vec())
     }
     /// The types of the parameters of the static function or option called
     /// `method` of the generic type at `template` in `templates`, if it has
@@ -163,7 +150,13 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<Option<Type>>> {
         let generic = self.templates[template].generic.as_ref()?;
         if let Some((_, value_ty)) = self.option(generic, method) {
-            return Some(vec![value_ty]);
+            let elements = self.option_params(value_ty.as_ref()).unwrap_or_default();
+            return Some(
+                elements
+                    .into_iter()
+                    .map(|element| Some(element.ty))
+                    .collect(),
+            );
         }
         let function = self.static_function(generic, method)?;
         let params = &self.functions[function.index].params;
@@ -252,7 +245,8 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Option<Type> {
         if let Some((_, value_ty)) = self.option(ty, method) {
-            return value_ty.filter(|_| index == 0);
+            let elements = self.option_params(value_ty.as_ref())?;
+            return elements.into_iter().nth(index).map(|element| element.ty);
         }
         let function = self.static_function(ty, method)?;
         let signature = self.signature_of(&function, span);

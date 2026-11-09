@@ -17,8 +17,7 @@
 // Types whose values can be called like functions, which calls `call`, as in
 // `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. The arguments
 // are always built into a tuple, which must be the `Input`, so a tuple is
-// never unpacked into them. A `ChoiceOption` always has one argument, which
-// is its `Input`, even if that's a tuple.
+// never unpacked into them.
 trait Call {
     alias Input
     alias Output
