@@ -277,20 +277,24 @@ struct OptionSignature<'a> {
     ty: Option<Type>,
 }
 
-/// A static member of a type that's called with arguments: one of its static
-/// functions, or one of its options, which creates it.
+/// What's called with arguments: a function, or an option of a choice,
+/// which creates it.
 #[derive(Debug, Clone)]
-enum StaticCallee {
+enum Callee {
     Function(FnRef),
-    /// The option of the choice at this index.
-    Option(usize),
+    /// The option of `choice` at `index`.
+    Option {
+        choice: Type,
+        index: usize,
+    },
 }
 
-impl StaticCallee {
+impl Callee {
+    /// What kind of member it is, if it's a static member of a type.
     fn kind(&self) -> MemberKind {
         match self {
             Self::Function(_) => MemberKind::StaticFunction,
-            Self::Option(_) => MemberKind::Option,
+            Self::Option { .. } => MemberKind::Option,
         }
     }
 }

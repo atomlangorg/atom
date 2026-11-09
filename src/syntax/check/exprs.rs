@@ -539,12 +539,15 @@ impl<'a> Checker<'a> {
     }
     /// Finds the static function or option of `ty` called `name`. They never
     /// share a name, since declaring one as the other is an error.
-    pub(super) fn static_callee(&self, ty: &Type, name: &str) -> Option<StaticCallee> {
+    pub(super) fn static_callee(&self, ty: &Type, name: &str) -> Option<Callee> {
         if let Some(function) = self.static_function(ty, name) {
-            return Some(StaticCallee::Function(function));
+            return Some(Callee::Function(function));
         }
         let (index, _) = self.option(ty, name)?;
-        Some(StaticCallee::Option(index))
+        Some(Callee::Option {
+            choice: ty.clone(),
+            index,
+        })
     }
     /// Finds the option of `ty` called `name`, if `ty` is a choice, returning
     /// its index in the order they're declared, and the type of the value it
@@ -637,12 +640,12 @@ impl<'a> Checker<'a> {
                 None => self.no_member(ty, field),
             },
             Receiver::Type(ty) => match self.static_callee(&ty, field) {
-                Some(StaticCallee::Function(found)) => {
+                Some(Callee::Function(found)) => {
                     return self.function_value(found, span);
                 }
                 // Naming an option doesn't create the choice, but gives its
                 // `ChoiceOption`.
-                Some(StaticCallee::Option(index)) => {
+                Some(Callee::Option { index, .. }) => {
                     let template = self.std_template("ChoiceOption");
                     let value_ty = self.options(ty.id).unwrap_or_default()[index].ty.clone();
                     return Typed {

@@ -72,20 +72,15 @@ impl<'a> Checker<'a> {
             expr: call(function, vec![value, input]),
         }
     }
-    /// The signature of `callee` of `ty`, for the code at `span`. Creating an
-    /// option is like calling a static function whose parameters are the
-    /// elements of its value, which returns the choice.
-    pub(super) fn static_signature(
-        &mut self,
-        ty: &Type,
-        callee: &StaticCallee,
-        span: Span,
-    ) -> Signature<'a> {
-        let index = match callee {
-            StaticCallee::Function(function) => return self.signature_of(function, span),
-            StaticCallee::Option(index) => *index,
+    /// The signature of `callee`, for the code at `span`. Creating an option
+    /// is like calling a static function whose parameters are the elements
+    /// of its value, which returns the choice.
+    pub(super) fn callee_signature(&mut self, callee: &Callee, span: Span) -> Signature<'a> {
+        let (choice, index) = match callee {
+            Callee::Function(function) => return self.signature_of(function, span),
+            Callee::Option { choice, index } => (choice, *index),
         };
-        let option = self.options(ty.id).unwrap_or_default()[index].clone();
+        let option = self.options(choice.id).unwrap_or_default()[index].clone();
         // If its value's type is unknown, it's already been reported, and
         // so are the types of its parameters.
         let types: Vec<_> = option
@@ -97,7 +92,7 @@ impl<'a> Checker<'a> {
             .collect();
         let params = option.decl.values.iter().enumerate();
         Signature {
-            name: format!("{ty}.{}", option.decl.name),
+            name: format!("{choice}.{}", option.decl.name),
             params: params
                 .map(|(index, value)| ParamSignature {
                     label: value.label.as_deref(),
@@ -106,52 +101,52 @@ impl<'a> Checker<'a> {
                     ty: types.get(index).cloned(),
                 })
                 .collect(),
-            returns: Some(ty.clone()),
+            returns: Some(choice.clone()),
             template: None,
         }
     }
-    /// Checks a call to `callee`, which is called `method` of `ty`, with
-    /// `args`, which are checked as its parameters.
-    pub(super) fn call_static(
+    /// Checks a call to `callee`, called `name`, with `args`, which are
+    /// checked as its parameters.
+    pub(super) fn call_callee(
         &mut self,
-        ty: Type,
-        method: &str,
-        callee: StaticCallee,
+        callee: Callee,
+        name: String,
         args: &[Arg],
         span: Span,
     ) -> Typed {
-        let signature = self.static_signature(&ty, &callee, span);
+        let signature = self.callee_signature(&callee, span);
         let params: Vec<_> = signature
             .params
             .iter()
             .map(|param| param.ty.clone())
             .collect();
         let checked = self.args(args, &params);
-        self.checked_static_call(ty, method, callee, args, checked, span)
+        self.checked_call(callee, name, signature, args, checked, span)
     }
-    /// Checks a call to `callee`, as `call_static` does, whose `args` have
-    /// already been checked, with the types and what they compile to in
-    /// `checked`.
-    pub(super) fn checked_static_call(
+    /// Checks a call to `callee`, as `call_callee` does, against its
+    /// `signature`, where `args` have already been checked, with the types
+    /// and what they compile to in `checked`.
+    pub(super) fn checked_call(
         &mut self,
-        ty: Type,
-        method: &str,
-        callee: StaticCallee,
+        callee: Callee,
+        name: String,
+        signature: Signature,
         args: &[Arg],
         (found, lowered): (Vec<Option<Type>>, Vec<ir::Expr>),
         span: Span,
     ) -> Typed {
-        let signature = self.static_signature(&ty, &callee, span);
         let arity = signature.params.len();
-        let returns = self.check_args(format!("{ty}.{method}"), args, found, signature, span);
+        let returns = self.check_args(name, args, found, signature, span);
         let expr = match callee {
-            StaticCallee::Function(function) => ir::Expr::Call {
+            Callee::Function(function) => ir::Expr::Call {
                 function: self.callee(function, span),
                 args: lowered,
             },
             // The option's value is built from the arguments.
-            StaticCallee::Option(index) => {
-                let value_ty = self.options(ty.id).unwrap_or_default()[index].ty.clone();
+            Callee::Option { choice, index } => {
+                let value_ty = self.options(choice.id).unwrap_or_default()[index]
+                    .ty
+                    .clone();
                 let value = match value_ty {
                     Some(value_ty) if lowered.len() == arity => ir::Expr::Construct {
                         group: value_ty.id,
@@ -160,7 +155,7 @@ impl<'a> Checker<'a> {
                     _ => ir::Expr::Error,
                 };
                 ir::Expr::Choose {
-                    choice: ty.id,
+                    choice: choice.id,
                     option: index,
                     value: Box::new(value),
                 }
@@ -180,7 +175,7 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<Option<Type>>> {
         let generic = self.templates[template].generic.clone()?;
         let callee = self.static_callee(&generic, method)?;
-        let signature = self.static_signature(&generic, &callee, span);
+        let signature = self.callee_signature(&callee, span);
         Some(signature.params.into_iter().map(|param| param.ty).collect())
     }
     /// Checks a call to the static function or option called `method` of the
@@ -239,7 +234,9 @@ impl<'a> Checker<'a> {
         let Some(callee) = self.static_callee(&ty, method) else {
             return Typed::UNKNOWN;
         };
-        self.checked_static_call(ty, method, callee, args, (found, lowered), span)
+        let signature = self.callee_signature(&callee, span);
+        let name = format!("{ty}.{method}");
+        self.checked_call(callee, name, signature, args, (found, lowered), span)
     }
     /// The type of the parameter at `index` of the static function or option
     /// called `method` of `ty`, for the code at `span`.
@@ -251,33 +248,8 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Option<Type> {
         let callee = self.static_callee(ty, method)?;
-        let signature = self.static_signature(ty, &callee, span);
+        let signature = self.callee_signature(&callee, span);
         signature.params.into_iter().nth(index)?.ty
-    }
-    /// Checks a call to `function`, called `name`, with `args`, which are
-    /// checked as its parameters.
-    pub(super) fn call_function(
-        &mut self,
-        function: FnRef,
-        name: &str,
-        args: &[Arg],
-        span: Span,
-    ) -> Typed {
-        let signature = self.signature_of(&function, span);
-        let params: Vec<_> = signature
-            .params
-            .iter()
-            .map(|param| param.ty.clone())
-            .collect();
-        let (found, lowered) = self.args(args, &params);
-        let function = self.callee(function, span);
-        Typed {
-            ty: self.check_args(name.to_string(), args, found, signature, span),
-            expr: ir::Expr::Call {
-                function,
-                args: lowered,
-            },
-        }
     }
     /// Checks a call to a method on a value, a static function on a type, or
     /// the creation of an option of a choice, returning its return type, or
@@ -315,7 +287,7 @@ impl<'a> Checker<'a> {
             // A static function is called like any other function, and an
             // option is created directly, since it's known which one it is.
             Some(Receiver::Type(ty)) if let Some(callee) = self.static_callee(&ty, method) => {
-                return self.call_static(ty, method, callee, args, span);
+                return self.call_callee(callee, format!("{ty}.{method}"), args, span);
             }
             receiver => receiver,
         };
@@ -370,8 +342,8 @@ impl<'a> Checker<'a> {
         let name = callee.to_string();
         match self.lookup(callee) {
             Ok(Binding::Function(index)) => {
-                let function = self.own_fn(index);
-                self.call_function(function, &name, args, span)
+                let function = Callee::Function(self.own_fn(index));
+                self.call_callee(function, name, args, span)
             }
             Ok(Binding::Value { .. } | Binding::Global(_)) => {
                 let Typed { ty, expr } = self.expr(&Expr {
