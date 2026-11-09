@@ -15,12 +15,6 @@
  */
 
 // The return type of a function that doesn't return anything useful.
-// Functions without an explicit return type return `Void`.
-group Void {}
-
-impl Void {
-    // Creates a `Void`, for when one is needed as a value.
-    static fn new() -> Void {
-        return Self {}
-    }
-}
+// Functions without an explicit return type return `Void`, and it's created
+// with `()`.
+alias Void = ()

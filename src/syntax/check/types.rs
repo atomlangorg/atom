@@ -410,7 +410,14 @@ impl<'a> Checker<'a> {
                     })
                 })
                 .collect::<Option<_>>()?;
-            return Some(self.tuple_type(elements));
+            // A tuple that's unchanged keeps the name it's used by, such as
+            // `Void` for `()`.
+            let substituted = self.tuple_type(elements);
+            return Some(if substituted == *ty {
+                ty.clone()
+            } else {
+                substituted
+            });
         }
         Some(ty.clone())
     }

@@ -32,7 +32,7 @@ impl ChoiceTag with Equal {
 // option refers to, as in `Shape.circle`. `Base` must be a choice. Calling it
 // creates the choice, so `Shape.circle(3)` is `Shape.circle.call(input: 3)`,
 // and if `Value` is `Void` it can be left out, so `Shape.empty()` is
-// `Shape.empty(Void.new())`.
+// `Shape.empty(())`.
 primitive ChoiceOption<Base, Value>
 
 impl ChoiceOption {

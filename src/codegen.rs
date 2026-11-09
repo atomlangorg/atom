@@ -1237,7 +1237,7 @@ mod tests {
                 if stop {
                     return
                 }
-                let unused = Void.new()
+                let unused = ()
             }
 
             fn main() -> Int {
@@ -1672,7 +1672,7 @@ mod tests {
             let circle = Shape.circle(3)
             let flag = Shape.flag(true)
             let empty = Shape.empty()
-            let emptyWithValue = Shape.empty(Void.new())
+            let emptyWithValue = Shape.empty(())
             fn main() -> Int {{
                 return 0
             }}
@@ -1733,7 +1733,7 @@ mod tests {
                 let c = describe(shape: make(from: Shape.circle))
                 let d = describe(shape: Maker.new().make(8))
                 let e = describe(shape: empty())
-                let f = describe(shape: empty(Void.new()))
+                let f = describe(shape: empty(()))
                 let stored = Shape.flag
                 let g = describe(shape: stored(true))
                 return a + b + c + d + e + f + g
@@ -1993,7 +1993,7 @@ mod tests {
             let n: ChoiceOption<Shape, Void> = Shape.other
             let o: ChoiceTag<Shape> = Shape.other.tag()
             let p: Shape = Shape.other()
-            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(Void.new()))
+            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(()))
 
             fn main() -> Int {
                 return 0

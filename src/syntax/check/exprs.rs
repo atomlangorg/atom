@@ -698,7 +698,7 @@ impl<'a> Checker<'a> {
             return Typed::error(ty);
         }
         // Only the type's own file can construct it. Elsewhere, values come
-        // from its functions, such as `Void.new()`.
+        // from its functions, such as a static `new`.
         let declared_in = self.types[ty.id].file;
         if declared_in != self.cx.file {
             self.error(

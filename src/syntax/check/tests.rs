@@ -228,13 +228,13 @@ fn not_calls_not_and_keeps_its_type() {
             }
             fn f(flags: Flags) -> Bool {
                 let a: Bool = !flags
-                return !Void.new()
+                return !()
             }
             "
         ),
         [
             "operator `!` expects a type that implements `Not`, found `Flags`",
-            "operator `!` expects a type that implements `Not`, found `Void`",
+            "operator `!` expects a type that implements `Not`, found `()`",
         ]
     );
 }
@@ -475,16 +475,13 @@ fn rejects_comparing_other_types() {
         found: ty("Void"),
     };
     assert_eq!(
-        check_body("let x = Void.new() == Void.new()"),
+        check_body("let x = () == ()"),
         Err(vec![incomparable("==")])
     );
+    assert_eq!(check_body("let x = () != 1"), Err(vec![incomparable("!=")]));
     assert_eq!(
-        check_body("let x = Void.new() != 1"),
-        Err(vec![incomparable("!=")])
-    );
-    assert_eq!(
-        messages("let x = Void.new() == Void.new()"),
-        vec!["operator `==` expects a type that implements `Equal`, found `Void`"]
+        messages("let x = () == ()"),
+        vec!["operator `==` expects a type that implements `Equal`, found `()`"]
     );
 }
 
@@ -510,7 +507,7 @@ fn rejects_ordering_other_types() {
         Err(vec![invalid_operand("<=")])
     );
     assert_eq!(
-        check_body("let x = Void.new() > Void.new()"),
+        check_body("let x = () > ()"),
         Err(vec![CheckError::NotImplemented {
             op: ">",
             trait_name: "Order",
@@ -606,7 +603,7 @@ fn comparisons_with_unknown_operands_do_not_cascade() {
         Err(vec![CheckError::Undeclared("y".to_string())])
     );
     assert_eq!(
-        check_body("let x = Void.new() == y"),
+        check_body("let x = () == y"),
         Err(vec![
             CheckError::NotImplemented {
                 op: "==",
@@ -1624,8 +1621,9 @@ fn calls_that_never_return_only_end_their_own_path() {
                     exit()
                 }
             }
+            fn nothing() {}
             fn h() -> Int {
-                Void.new()
+                nothing()
             }
             fn i(c: Bool) -> Int {
                 if c {
@@ -3432,7 +3430,7 @@ fn groups_are_only_constructed_in_their_own_file() {
 #[test]
 fn only_literals_create_ints_and_bools() {
     assert_eq!(
-        check_body("let v: Void = Void.new()\nlet w: void::Void = void::Void.new()"),
+        check_body("let v: Void = ()\nlet w: void::Void = ()"),
         Ok(())
     );
     assert_eq!(
@@ -5615,7 +5613,7 @@ fn project_files_can_share_names_with_stdlib_files() {
 #[test]
 fn programs_import_the_stdlib_without_a_use() {
     assert_eq!(
-        check_top("let x: Void = Void.new()\nlet y: Bool = true\nlet z: int::Int = 1"),
+        check_top("let x: Void = ()\nlet y: Bool = true\nlet z: int::Int = 1"),
         Ok(())
     );
 }
@@ -5991,21 +5989,22 @@ fn creates_void_values() {
     assert_eq!(
         check_top(
             "
-            let a: Void = Void.new()
+            let a: Void = ()
             fn nothing() {}
             let b: Void = nothing()
-            fn f() -> Void {
-                return void::Void.new()
+            let c: () = nothing()
+            fn f() -> void::Void {
+                return ()
             }
             "
         ),
         Ok(())
     );
     assert_eq!(
-        messages_top("let a: Int = Void.new()\nlet b = Void.new().new()"),
+        messages_top("let a: Int = ()\nlet b: Int = Void.new()"),
         [
-            "cannot assign `Void` to `a`, which has type `Int`",
-            "`Void.new` is a static function, so it must be used on `Void` itself rather than a value",
+            "cannot assign `()` to `a`, which has type `Int`",
+            "`Void` has no static function `new`",
         ]
     );
 }
@@ -6028,11 +6027,6 @@ fn self_constructs_the_type_of_its_impl() {
                     return Self {}
                 }
             }
-            impl Void {
-                static fn again() -> Void {
-                    return Self {}
-                }
-            }
             "
         ),
         [
@@ -6040,7 +6034,6 @@ fn self_constructs_the_type_of_its_impl() {
             "`y` is not declared",
             "`Self` can only be used inside an `impl` or a `trait`",
             "`make` must return `Point`, found `Other`",
-            "`Void` can only be constructed in `stdlib/void`, which declares it",
         ]
     );
 }
@@ -6102,7 +6095,7 @@ fn accepts_choices() {
         {SHAPE}
         let a: Shape = Shape.circle(3)
         let b: Shape = Shape.empty()
-        let c: Shape = Shape.empty(Void.new())
+        let c: Shape = Shape.empty(())
         let d: Shape = Shape.nothing()
         fn f() -> Shape {{
             choice Inner {{
@@ -6219,7 +6212,7 @@ fn options_are_values_with_tags() {
         let n: ChoiceOption<Shape, Void> = Shape.other
         let o: ChoiceTag<Shape> = Shape.other.tag()
         let p: Shape = Shape.other()
-        let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(Void.new()))
+        let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other(()))
         ";
     assert_eq!(check_top(src), Ok(()));
 }
@@ -6246,8 +6239,8 @@ fn options_can_be_called_like_other_values() {
             let e: Shape = maker.make(1)
             let empty = Shape.empty
             let g: Shape = empty()
-            let h: Shape = empty(Void.new())
-            let i: Shape = empty.call(input: Void.new())
+            let h: Shape = empty(())
+            let i: Shape = empty.call(input: ())
         }}
         "
     );
@@ -6318,24 +6311,38 @@ fn options_take_tuples_as_one_argument() {
 }
 
 #[test]
-fn only_options_can_leave_out_void() {
+fn values_taking_void_are_called_without_arguments() {
+    // The arguments are built into `()`, which is `Void`.
+    let runner = "
+        group Runner {}
+
+        impl Runner with Call {
+            fn call(input: Void) -> Int {
+                return 1
+            }
+        }
+        ";
     assert_eq!(
-        messages_top(
+        check_top(&format!(
             "
-            group Runner {}
-
-            impl Runner with Call {
-                fn call(input: Void) -> Int {
-                    return 1
-                }
-            }
-
-            fn f(runner: Runner) -> Int {
-                return runner()
-            }
+            {runner}
+            fn f(runner: Runner) -> Int {{
+                return runner() + runner.call(input: ())
+            }}
             "
-        ),
-        ["`runner` is called with `Void`, but was given `()`"]
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {runner}
+            fn f(runner: Runner) -> Int {{
+                return runner(1)
+            }}
+            "
+        )),
+        ["`runner` is called with `Void`, but was given `(_: Int)`"]
     );
 }
 
@@ -7694,7 +7701,7 @@ fn rejects_calls_whose_generic_arguments_cannot_be_inferred() {
 
             fn f() {{
                 let a = Optional.none()
-                let b = Optional.none(Void.new())
+                let b = Optional.none(())
                 let c = Box.of()
                 let d = Pair.left(1)
                 let e = Box.plain(1)
