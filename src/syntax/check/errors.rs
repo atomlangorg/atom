@@ -264,9 +264,6 @@ pub enum CheckError {
     GenericTooDeep(String),
     /// A generic type was declared inside a function.
     GenericInFunction(String),
-    /// `Self` or one of a trait's aliases was used in a tuple type in the
-    /// trait's signatures.
-    TraitTypeInTuple(String),
     /// An alias that's inferred from an `impl`'s signatures was used in them,
     /// or in another of its aliases, without being given.
     InferredAliasUsed(String),
@@ -685,10 +682,6 @@ impl fmt::Display for CheckError {
             Self::GenericInFunction(name) => write!(
                 f,
                 "`{name}` can't be generic, since only types at the top level can be"
-            ),
-            Self::TraitTypeInTuple(name) => write!(
-                f,
-                "`{name}` can't be used inside another type in a trait's signatures, since it's a different type in each `impl`"
             ),
             Self::InferredAliasUsed(name) => write!(
                 f,

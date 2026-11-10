@@ -411,6 +411,7 @@ struct Template<'a> {
 }
 
 /// A trait, whose functions an `impl` with it must implement exactly.
+#[derive(Clone)]
 struct TraitInfo<'a> {
     name: &'a str,
     span: Span,
