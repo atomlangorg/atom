@@ -68,6 +68,14 @@ trait Compare {
     fn isGreaterOrEqual(to rhs: Rhs) -> Bool
 }
 
+// How one value compares to another: `less` than it, `equal` to it, or
+// `greater` than it.
+choice Comparison {
+    less()
+    equal()
+    greater()
+}
+
 // Types that `+` can be used on, which calls `add`, as in `a + b`, where `b`
 // is an `Rhs`, and the result is an `Output`.
 trait Add {
