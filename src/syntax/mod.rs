@@ -22,4 +22,4 @@ pub mod lexer;
 pub mod parser;
 
 pub use check::{File, check, stdlib_source};
-pub use parser::parse_with_warnings;
+pub use parser::parse;
