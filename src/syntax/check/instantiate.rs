@@ -225,7 +225,7 @@ impl<'a> Checker<'a> {
         let ty = Type {
             id,
             name: self.types[id].name.clone(),
-            names: None,
+            parts: None,
         };
         let (file, span) = state.site;
         self.cx.file = file;

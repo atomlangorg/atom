@@ -6939,6 +6939,57 @@ fn tuples_are_read_by_the_names_they_were_found_with() {
 }
 
 #[test]
+fn types_keep_the_names_they_were_found_with() {
+    // Each plain type is used first, so its parts are made without names.
+    let src = format!(
+        "
+        {GENERICS}
+        impl Box {{
+            static fn new(_ value: Self.T) -> Self {{
+                return Self {{ value: value }}
+            }}
+        }}
+
+        fn plain(box: Box<(at: Int)>, pair: (a: (b: Int)), maybe: Optional<(at: Int)>) {{}}
+
+        fn f(maybe: Optional<(at x: Int)>) -> Int {{
+            let a: Box<(at x: Int)> = Box.new((at: 3))
+            let b = a
+            let c: Box<(at: Int)> = a
+            let pair: (a: (b x: Int)) = (a: (b: 4))
+            let total = b.get().x + b.value.x + c.get().at + pair.a.x
+            (a: let inner) = pair
+            match maybe {{
+                Optional.some(value: let value) => {{
+                    return total + inner.x + value.x
+                }}
+                Optional.none() => {{
+                    return total
+                }}
+            }}
+        }}
+        "
+    );
+    assert_eq!(check_top(&src), Ok(()));
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            fn f(a: Box<(at x: Int)>) {{
+                let b = a
+                let c: Int = b
+                let d = b.get().at
+            }}
+            "
+        )),
+        [
+            "cannot assign `Box<(at x: Int)>` to `c`, which has type `Int`",
+            "`(at x: Int)` has no field or method `at`",
+        ]
+    );
+}
+
+#[test]
 fn parameters_and_option_values_are_written_like_tuple_types() {
     let src = "
         choice Shape {

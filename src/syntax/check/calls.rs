@@ -87,13 +87,10 @@ impl<'a> Checker<'a> {
                 let option = self.options(choice.id).unwrap_or_default()[*index].clone();
                 // If its value's type is unknown, it's already been reported,
                 // and so are the types of its parameters.
-                let types: Vec<_> = option
-                    .ty
-                    .and_then(|value| self.elements(value.id))
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|element| element.ty.clone())
-                    .collect();
+                let types = match self.option_type(choice, *index, span) {
+                    Some(value) => self.element_types(&value),
+                    None => vec![],
+                };
                 let params = option.decl.values.iter().enumerate();
                 Signature {
                     name: format!("{choice}.{}", option.decl.name),
@@ -320,7 +317,8 @@ impl<'a> Checker<'a> {
         // A field followed by arguments is called, like any other value.
         let receiver = match receiver {
             Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
-                Some(Member::Field(index, field_ty)) => {
+                Some(Member::Field(index)) => {
+                    let field_ty = self.field_type(&ty, index, span);
                     let value = ir::Expr::Field {
                         receiver: Box::new(lowered),
                         index,

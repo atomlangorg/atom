@@ -225,7 +225,7 @@ impl<'a> Checker<'a> {
             .map(|name| Type {
                 id: self.add_type(name.to_string(), file, TypeKind::Group(vec![])),
                 name: name.to_string(),
-                names: None,
+                parts: None,
             })
             .collect();
         let alias_types = aliases.iter().zip(&stand_ins[1..]);

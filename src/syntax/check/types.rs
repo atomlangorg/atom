@@ -70,7 +70,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|element| element.label.clone())
             .collect();
-        let names = names.filter(|names| *names != labels);
+        let names = names.unwrap_or_else(|| labels.clone());
         let show = |names: &[Option<String>]| {
             let shown: Vec<_> = elements
                 .iter()
@@ -87,11 +87,12 @@ impl<'a> Checker<'a> {
                 .collect();
             format!("({})", shown.join(", "))
         };
-        let name = show(names.as_deref().unwrap_or(&labels));
+        let name = show(&names);
         let key: Vec<_> = elements
             .iter()
             .map(|element| (element.label.clone(), element.ty.id))
             .collect();
+        let types = elements.iter().map(|element| element.ty.clone()).collect();
         let id = match self.tuple_ids.get(&key) {
             Some(&id) => id,
             None => {
@@ -103,20 +104,79 @@ impl<'a> Checker<'a> {
         Type {
             id,
             name,
-            names: names.map(Rc::from),
+            parts: Some(Rc::new(Parts { types, names })),
         }
     }
-    /// The names that the elements of the tuple type `ty` are read by, which
-    /// are its labels unless it was found with others.
+    /// The names that the elements of the tuple type `ty` are read by.
     pub(super) fn element_names(&self, ty: &Type) -> Vec<Option<String>> {
-        match &ty.names {
-            Some(names) => names.to_vec(),
+        match &ty.parts {
+            Some(parts) => parts.names.clone(),
             None => self
                 .elements(ty.id)
                 .unwrap_or_default()
                 .iter()
                 .map(|element| element.label.clone())
                 .collect(),
+        }
+    }
+    /// The types of the elements of the tuple type `ty`, as it was found.
+    pub(super) fn element_types(&self, ty: &Type) -> Vec<Type> {
+        match &ty.parts {
+            Some(parts) => parts.types.clone(),
+            None => self
+                .elements(ty.id)
+                .unwrap_or_default()
+                .iter()
+                .map(|element| element.ty.clone())
+                .collect(),
+        }
+    }
+    /// The generic type that `ty` is made from, as an index into
+    /// `templates`, and its arguments, as it was found.
+    pub(super) fn found_args(&self, ty: &Type) -> Option<(usize, Vec<Type>)> {
+        let (template, args) = self.types[ty.id].instance.as_ref()?;
+        let args = match &ty.parts {
+            Some(parts) => parts.types.clone(),
+            None => args.clone(),
+        };
+        Some((*template, args))
+    }
+    /// The type of the field at `index` of `ty`, as it was found, for the
+    /// code at `span`. A type made from a generic type has the fields of
+    /// that type, with its arguments as they were found.
+    pub(super) fn field_type(&mut self, ty: &Type, index: usize, span: Span) -> Option<Type> {
+        if self.elements(ty.id).is_some() {
+            return self.element_types(ty).get(index).cloned();
+        }
+        let field = |checker: &Self, id: usize| checker.fields(id).get(index)?.ty.clone();
+        self.as_found(ty, field, span)
+    }
+    /// The type of the value of the option at `index` of `ty`, as it was
+    /// found, like `field_type`.
+    pub(super) fn option_type(&mut self, ty: &Type, index: usize, span: Span) -> Option<Type> {
+        let option = |checker: &Self, id: usize| checker.options(id)?.get(index)?.ty.clone();
+        self.as_found(ty, option, span)
+    }
+    /// The part of `ty` that `part` finds in a type by its `id`, as `ty` was
+    /// found, for the code at `span`. For a type made from a generic type,
+    /// it's found in that type, with `ty`'s arguments in place of its
+    /// parameters.
+    pub(super) fn as_found(
+        &mut self,
+        ty: &Type,
+        part: impl Fn(&Self, usize) -> Option<Type>,
+        span: Span,
+    ) -> Option<Type> {
+        let generic = self.found_args(ty).and_then(|(template, args)| {
+            let generic = self.templates[template].generic.as_ref()?;
+            Some((generic.id, self.params(template, &args)))
+        });
+        match generic {
+            Some((generic, params)) if ty.parts.is_some() => {
+                let found = part(self, generic)?;
+                self.substitute(&found, &params, span)
+            }
+            _ => part(self, ty.id),
         }
     }
     /// The type made from the generic type called `name` with `args`.
@@ -192,11 +252,11 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        let Some((template, args)) = &self.types[impl_type.id].instance else {
+        let Some((template, args)) = self.found_args(&impl_type) else {
             self.error(span, CheckError::SelfParamOutsideGeneric(param.to_string()));
             return None;
         };
-        match self.templates[*template]
+        match self.templates[template]
             .params
             .iter()
             .position(|found| found == param)
@@ -276,7 +336,7 @@ impl<'a> Checker<'a> {
                 Type {
                     id: self.add_type(param.clone(), file, kind),
                     name: param.clone(),
-                    names: None,
+                    parts: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -294,7 +354,7 @@ impl<'a> Checker<'a> {
         let ty = Type {
             id,
             name,
-            names: None,
+            parts: None,
         };
         self.templates[template].generic = Some(ty.clone());
         self.fill_instances();
@@ -315,12 +375,13 @@ impl<'a> Checker<'a> {
 
         let name = self.instance_name(template, &args);
         let key = (template, args.iter().map(|arg| arg.id).collect());
+        // It keeps its arguments as they were found.
+        let parts = Some(Rc::new(Parts {
+            types: args.clone(),
+            names: vec![],
+        }));
         if let Some(&id) = self.instance_ids.get(&key) {
-            return Some(Type {
-                id,
-                name,
-                names: None,
-            });
+            return Some(Type { id, name, parts });
         }
         let depth = 1 + args
             .iter()
@@ -342,11 +403,7 @@ impl<'a> Checker<'a> {
         let id = self.new_instance(template, args, &name);
         self.unfilled.push(id);
         self.fill_instances();
-        Some(Type {
-            id,
-            name,
-            names: None,
-        })
+        Some(Type { id, name, parts })
     }
     /// How the type made from the generic type at `template` in `templates`
     /// with `args` is shown, as in `Optional<Int>`.
@@ -454,7 +511,7 @@ impl<'a> Checker<'a> {
         if let Some(arg) = params.get(&ty.id) {
             return Some(arg.clone());
         }
-        if let Some((template, args)) = self.types[ty.id].instance.clone() {
+        if let Some((template, args)) = self.found_args(ty) {
             let args = args
                 .iter()
                 .map(|arg| self.substitute(arg, params, span))
@@ -463,18 +520,20 @@ impl<'a> Checker<'a> {
         }
         if let Some(elements) = self.elements(ty.id) {
             let elements = elements.to_vec();
+            let types = self.element_types(ty);
             let elements = elements
                 .into_iter()
-                .map(|element| {
+                .zip(types)
+                .map(|(element, ty)| {
                     Some(TupleElementType {
-                        ty: self.substitute(&element.ty, params, span)?,
+                        ty: self.substitute(&ty, params, span)?,
                         ..element
                     })
                 })
                 .collect::<Option<_>>()?;
             // A tuple that's unchanged keeps the name it's used by, such as
             // `Void` for `()`, and it's always read by the same names.
-            let substituted = self.tuple_type(elements, ty.names.as_deref().map(<[_]>::to_vec));
+            let substituted = self.tuple_type(elements, Some(self.element_names(ty)));
             return Some(if substituted == *ty {
                 ty.clone()
             } else {
@@ -617,7 +676,7 @@ impl<'a> Checker<'a> {
         let ty = Type {
             id,
             name: name.to_string(),
-            names: None,
+            parts: None,
         };
         self.declare(name, span, Binding::Type(ty));
         id
@@ -671,7 +730,7 @@ impl<'a> Checker<'a> {
                         ty: Type {
                             id,
                             name: name.to_string(),
-                            names: None,
+                            parts: None,
                         },
                         member: option.name.clone(),
                         existing: MemberKind::Option,
@@ -697,7 +756,7 @@ impl<'a> Checker<'a> {
                         ty: Type {
                             id,
                             name: name.to_string(),
-                            names: None,
+                            parts: None,
                         },
                         member: field.name.clone(),
                         existing: MemberKind::Field,
@@ -778,21 +837,16 @@ impl<'a> Checker<'a> {
             inferred[index].get_or_insert_with(|| found.clone());
             return;
         }
-        let parts: Vec<(Type, Type)> = match (
-            &self.types[param.id].instance,
-            &self.types[found.id].instance,
-        ) {
+        let parts: Vec<(Type, Type)> = match (self.found_args(param), self.found_args(found)) {
             (Some((expected, params)), Some((template, args))) if expected == template => {
-                params.iter().cloned().zip(args.iter().cloned()).collect()
+                params.into_iter().zip(args).collect()
             }
-            _ => match (self.elements(param.id), self.elements(found.id)) {
-                (Some(params), Some(elements)) => params
-                    .iter()
-                    .zip(elements)
-                    .map(|(param, element)| (param.ty.clone(), element.ty.clone()))
-                    .collect(),
-                _ => vec![],
-            },
+            _ if self.elements(param.id).is_some() && self.elements(found.id).is_some() => self
+                .element_types(param)
+                .into_iter()
+                .zip(self.element_types(found))
+                .collect(),
+            _ => vec![],
         };
         for (param, found) in parts {
             self.infer(&param, &found, stand_ins, inferred);

@@ -146,14 +146,26 @@ pub struct File {
 /// found by, so a type found through an alias is named after the alias.
 ///
 /// A tuple type is only the labels and types of its elements, which are what
-/// it's built with, so `names` is like `name`: they're the names its elements
-/// are read by where it was found, as in `(at x: Int)`, or `None` if they're
-/// its labels.
+/// it's built with, so the names its elements are read by are like `name`:
+/// they're the ones it was found with, as in `(at x: Int)`. So `parts` are
+/// its parts as it was found, which only differ from the ones it was first
+/// made with in those names, or `None` if they're the ones it was made with.
 #[derive(Debug, Clone)]
 pub struct Type {
     id: usize,
     name: String,
-    names: Option<Rc<[Option<String>]>>,
+    parts: Option<Rc<Parts>>,
+}
+
+/// The parts of a type as it was found, as `Type::parts` says.
+#[derive(Debug)]
+struct Parts {
+    /// The types of a tuple's elements, or the arguments of the generic type
+    /// it's made from.
+    types: Vec<Type>,
+    /// The names a tuple's elements are read by, which is empty for other
+    /// types.
+    names: Vec<Option<String>>,
 }
 
 impl PartialEq for Type {
@@ -894,7 +906,7 @@ impl<'a> Checker<'a> {
         Type {
             id: ty.id,
             name: name.to_string(),
-            names: None,
+            parts: None,
         }
     }
     /// Finds what `name` refers to. An alias is found as the type it's an

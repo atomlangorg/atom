@@ -3160,6 +3160,34 @@ mod tests {
     }
 
     #[test]
+    fn generic_types_are_read_by_the_names_they_were_found_with() {
+        let src = "
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn new(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+
+                fn get() -> Self.T {
+                    return self.value
+                }
+            }
+
+            fn main() -> Int {
+                let plain: Box<(at: Int)> = Box.new((at: 1))
+                let a: Box<(at x: Int)> = Box.new((at: 3))
+                let b = a
+                let c: Box<(at: Int)> = a
+                return plain.get().at * 100 + b.get().x * 10 + c.value.at
+            }
+            ";
+        assert_eq!(run(src), 133);
+    }
+
+    #[test]
     fn functions_can_take_a_tuple_as_a_value() {
         let src = "
             fn sum(_ pair: (a: Int, b: Int)) -> Int {

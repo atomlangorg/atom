@@ -172,17 +172,20 @@ impl<'a> Checker<'a> {
         ty: &Type,
     ) -> Option<(Option<Vec<ir::Pattern>>, Vec<Space>)> {
         // The labels must be the ones the tuple is built with.
-        let types = self.elements(ty.id).map(<[_]>::to_vec).filter(|types| {
+        let matches = self.elements(ty.id).is_some_and(|types| {
             types.len() == elements.len()
                 && types
                     .iter()
                     .zip(elements)
                     .all(|(ty, element)| ty.label == element.label)
-        })?;
+        });
+        if !matches {
+            return None;
+        }
         let mut lowered = vec![];
         let mut spaces = vec![];
-        for (element, element_ty) in elements.iter().zip(&types) {
-            let (pattern, space) = self.pattern(&element.pattern, Some(&element_ty.ty));
+        for (element, element_ty) in elements.iter().zip(self.element_types(ty)) {
+            let (pattern, space) = self.pattern(&element.pattern, Some(&element_ty));
             lowered.push(pattern);
             spaces.push(space);
         }
@@ -218,12 +221,13 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
-        let Some(option) = self.option(&found, option) else {
+        let Some((index, _)) = self.option(&found, option) else {
             let option = option.to_string();
             self.error(span, CheckError::UnknownOption { ty: found, option });
             return None;
         };
-        Some(option)
+        // Its value is as the matched value was found.
+        Some((index, self.option_type(ty, index, span)))
     }
     /// Reports the patterns of `arms`, which match `spaces`, that can't be
     /// reached, since the ones before them match everything they do, and the

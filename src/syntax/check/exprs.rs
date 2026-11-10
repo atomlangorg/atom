@@ -31,9 +31,9 @@ pub(super) enum Receiver {
 /// Whether it's called is decided by the brackets after it, not by which kind
 /// it is.
 pub(super) enum Member {
-    /// The field's index in the order its group declares them, and its type,
-    /// which is `None` if it's unknown.
-    Field(usize, Option<Type>),
+    /// The field's index in the order its group or tuple declares them,
+    /// whose type is found with `Checker::field_type`.
+    Field(usize),
     Method(FnRef),
 }
 
@@ -498,17 +498,17 @@ impl<'a> Checker<'a> {
     /// Finds the field or method of `ty` called `name`. A tuple's elements
     /// are its fields, found by the names `ty` was found with.
     pub(super) fn member(&self, ty: &Type, name: &str) -> Option<Member> {
-        if let Some(elements) = self.elements(ty.id)
+        if self.elements(ty.id).is_some()
             && let Some(index) = self
                 .element_names(ty)
                 .iter()
                 .position(|element| element.as_deref() == Some(name))
         {
-            return Some(Member::Field(index, Some(elements[index].ty.clone())));
+            return Some(Member::Field(index));
         }
         let fields = self.fields(ty.id);
         if let Some(index) = fields.iter().position(|field| field.name == name) {
-            return Some(Member::Field(index, fields[index].ty.clone()));
+            return Some(Member::Field(index));
         }
         let (owner, args) = self.owner(ty);
         let index = *self.types[owner].methods.get(name)?;
@@ -519,10 +519,10 @@ impl<'a> Checker<'a> {
     /// type made from a generic type shares the functions of the one made
     /// with its own parameters.
     pub(super) fn owner(&self, ty: &Type) -> (usize, Vec<Type>) {
-        if let Some((template, args)) = &self.types[ty.id].instance
-            && let Some(generic) = &self.templates[*template].generic
+        if let Some((template, args)) = self.found_args(ty)
+            && let Some(generic) = &self.templates[template].generic
         {
-            return (generic.id, args.clone());
+            return (generic.id, args);
         }
         (ty.id, vec![])
     }
@@ -623,9 +623,9 @@ impl<'a> Checker<'a> {
         };
         let error = match receiver {
             Receiver::Value(ty, receiver) => match self.member(&ty, field) {
-                Some(Member::Field(index, field_ty)) => {
+                Some(Member::Field(index)) => {
                     return Typed {
-                        ty: field_ty,
+                        ty: self.field_type(&ty, index, span),
                         expr: ir::Expr::Field {
                             receiver: Box::new(receiver),
                             index,
@@ -648,7 +648,7 @@ impl<'a> Checker<'a> {
                 // `ChoiceOption`.
                 Some(Callee::Option { index, .. }) => {
                     let template = self.std_template("ChoiceOption");
-                    let value_ty = self.options(ty.id).unwrap_or_default()[index].ty.clone();
+                    let value_ty = self.option_type(&ty, index, span);
                     return Typed {
                         ty: value_ty
                             .and_then(|value| self.instance(template, vec![ty, value], span)),
