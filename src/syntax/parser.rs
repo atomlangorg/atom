@@ -133,10 +133,6 @@ fn void_type(span: Span) -> TypeName {
     })
 }
 
-/// A comma-separated list of `item`s between `open` and `close`, as in a
-/// call, constructor or function's parameters. It can be split over several
-/// lines after `open`, after each comma, and before `close`.
-///
 /// A line in an `impl`, which are collected into its aliases and functions.
 enum ImplItem {
     Alias(ImplAlias),
@@ -149,6 +145,37 @@ enum TraitItem {
     Function(TraitFunction),
 }
 
+/// `item`s, one per line, with blank lines allowed anywhere, as in a block
+/// or a file.
+fn lines<'tok, 'src: 'tok, I, T>(
+    item: impl Parser<'tok, I, T, Extra<'tok, 'src>> + Clone,
+) -> impl Parser<'tok, I, Vec<T>, Extra<'tok, 'src>> + Clone
+where
+    I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+{
+    let newlines = just(Token::Newline).repeated();
+    newlines.clone().ignore_then(
+        item.separated_by(newlines.at_least(1))
+            .allow_trailing()
+            .collect(),
+    )
+}
+
+/// `lines` of `item` between `{` and `}`, as in a block, group or `impl`.
+/// The `{` must be on the same line as what comes before it.
+fn braced_lines<'tok, 'src: 'tok, I, T>(
+    item: impl Parser<'tok, I, T, Extra<'tok, 'src>> + Clone,
+) -> impl Parser<'tok, I, Vec<T>, Extra<'tok, 'src>> + Clone
+where
+    I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+{
+    lines(item).delimited_by(just(Token::LBrace), just(Token::RBrace))
+}
+
+/// A comma-separated list of `item`s between `open` and `close`, as in a
+/// call, constructor or function's parameters. It can be split over several
+/// lines after `open`, after each comma, and before `close`.
+///
 /// A list whose `close` is on its own line should end with a comma, so that
 /// adding an item only changes one line. Otherwise it shouldn't. Either way,
 /// this is a warning rather than an error.
@@ -580,8 +607,6 @@ where
             span: Span::from(e.span()),
         });
 
-    let newlines = just(Token::Newline).repeated();
-
     // `let name: Type` or `var name: Type`. A value is parsed only so that it
     // can be reported clearly.
     let field = mutability
@@ -600,8 +625,6 @@ where
             }
         });
 
-    // Like a block, one field per line with blank lines allowed, and the `{`
-    // on the same line as `group`.
     // `<T, U>` after a type's name, naming its generic parameters.
     let generic_params = ident
         .separated_by(just(Token::Comma))
@@ -611,21 +634,12 @@ where
         .or_not()
         .map(Option::unwrap_or_default);
 
+    // Like a block, one field per line.
     let group_ = just(Token::Group)
         .ignore_then(ident)
         .then(generic_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    field
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
+        .then(braced_lines(field))
         .map(|(((name, params), span), fields)| Stmt {
             kind: StmtKind::Group {
                 name,
@@ -660,17 +674,7 @@ where
         .ignore_then(ident)
         .then(generic_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    option
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
+        .then(braced_lines(option))
         .map(|(((name, params), span), options)| Stmt {
             kind: StmtKind::Choice {
                 name,
@@ -695,18 +699,10 @@ where
         })
         .boxed();
 
-    // One statement per line; blank lines are allowed anywhere.
+    // One statement per line.
     let mut stmt = Recursive::declare();
     let (function, block) = {
-        let block = newlines
-            .clone()
-            .ignore_then(
-                stmt.clone()
-                    .separated_by(newlines.clone().at_least(1))
-                    .allow_trailing()
-                    .collect(),
-            )
-            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+        let block = braced_lines(stmt.clone());
 
         // The `{` must be on the same line as the `if`, and `else` on the same
         // line as the preceding `}`, so newlines never need disambiguating.
@@ -736,22 +732,11 @@ where
             .then(block.clone())
             .map(|(pattern, body)| MatchArm { pattern, body });
 
-        // Like a block, one option per line with blank lines allowed, and the
-        // `{` on the same line as `match`.
+        // Like a block, one arm per line.
         let match_ = just(Token::Match)
             .ignore_then(expr.clone())
             .map_with(|value, e| (value, Span::from(e.span())))
-            .then(
-                newlines
-                    .clone()
-                    .ignore_then(
-                        match_arm
-                            .separated_by(newlines.clone().at_least(1))
-                            .allow_trailing()
-                            .collect(),
-                    )
-                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-            )
+            .then(braced_lines(match_arm))
             .map(|((value, span), arms)| Stmt {
                 kind: StmtKind::Match { value, arms },
                 span,
@@ -924,18 +909,9 @@ where
                 .or_not(),
         )
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    impl_alias
-                        .or(impl_function.map(ImplItem::Function))
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect::<Vec<_>>(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
+        .then(braced_lines(
+            impl_alias.or(impl_function.map(ImplItem::Function)),
+        ))
         .map(|(((ty, with), span), items)| {
             let mut aliases = vec![];
             let mut functions = vec![];
@@ -977,18 +953,9 @@ where
     let trait_ = just(Token::Trait)
         .ignore_then(ident)
         .map_with(|name, e| (name, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    trait_alias
-                        .or(trait_function.map(TraitItem::Function))
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect::<Vec<_>>(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
+        .then(braced_lines(
+            trait_alias.or(trait_function.map(TraitItem::Function)),
+        ))
         .map(|((name, span), items)| {
             let mut aliases = vec![];
             let mut functions = vec![];
@@ -1048,15 +1015,7 @@ where
                 stmt
             }));
 
-    newlines
-        .clone()
-        .ignore_then(
-            top_level_stmt
-                .separated_by(newlines.at_least(1))
-                .allow_trailing()
-                .collect(),
-        )
-        .then_ignore(end())
+    lines(top_level_stmt).then_ignore(end())
 }
 
 #[cfg(test)]
