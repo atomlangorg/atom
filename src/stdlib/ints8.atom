@@ -22,7 +22,7 @@ impl IntS8 with Equal {
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
-impl IntS8 with Order {
+impl IntS8 with Compare {
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
     primitive fn isGreater(than rhs: Self) -> Bool

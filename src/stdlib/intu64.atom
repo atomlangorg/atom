@@ -22,7 +22,7 @@ impl IntU64 with Equal {
     primitive fn isNotEqual(to rhs: Self) -> Bool
 }
 
-impl IntU64 with Order {
+impl IntU64 with Compare {
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
     primitive fn isGreater(than rhs: Self) -> Bool

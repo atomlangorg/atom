@@ -2687,7 +2687,7 @@ mod tests {
                 }
             }
 
-            impl Money with Order {
+            impl Money with Compare {
                 fn isLess(than rhs: Self) -> Bool {
                     return self.cents < rhs.cents
                 }

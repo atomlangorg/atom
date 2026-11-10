@@ -510,13 +510,13 @@ fn rejects_ordering_other_types() {
         check_body("let x = () > ()"),
         Err(vec![CheckError::NotImplemented {
             op: ">",
-            trait_name: "Order",
+            trait_name: "Compare",
             found: ty("Void"),
         }])
     );
     assert_eq!(
         messages("let x = true >= false"),
-        vec!["operator `>=` expects a type that implements `Order`, found `Bool`"]
+        vec!["operator `>=` expects a type that implements `Compare`, found `Bool`"]
     );
 }
 

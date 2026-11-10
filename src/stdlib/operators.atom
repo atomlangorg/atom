@@ -59,7 +59,7 @@ trait Equal {
 // Types that `<`, `<=`, `>` and `>=` can be used on, which call `isLess`,
 // `isLessOrEqual`, `isGreater` and `isGreaterOrEqual`, as in `a < b`, where `b`
 // is an `Rhs`.
-trait Order {
+trait Compare {
     alias Rhs
 
     fn isLess(than rhs: Rhs) -> Bool
