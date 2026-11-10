@@ -3125,6 +3125,41 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_parameters_and_values_keep_their_places() {
+        let src = "
+            choice Shape {
+                circle(_ radius: Int)
+                rectangle(width _: Int, height: Int)
+            }
+
+            fn last(_: Int, to _: Int, _ value: Int) -> Int {
+                return value
+            }
+
+            fn size(of shape: Shape) -> Int {
+                match shape {
+                    Shape.circle(let radius) => {
+                        return radius
+                    }
+                    Shape.rectangle(width: let width, height: let height) => {
+                        return width * height
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let point: (at x: Int, _ y: Int) = (at: 1, 2)
+                let same: (at: Int, _: Int) = point
+                let read: (at x: Int, _ y: Int) = same
+                let circle = Shape.circle
+                let shapes = size(of: circle(3)) + size(of: Shape.rectangle(width: 4, height: 5))
+                return last(100, to: 200, 7) * 1000 + shapes * 10 + read.x + read.y
+            }
+            ";
+        assert_eq!(run(src), 7233);
+    }
+
+    #[test]
     fn functions_can_take_a_tuple_as_a_value() {
         let src = "
             fn sum(_ pair: (a: Int, b: Int)) -> Int {

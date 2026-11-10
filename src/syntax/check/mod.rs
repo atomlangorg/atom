@@ -51,14 +51,15 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     iter,
+    rc::Rc,
     sync::LazyLock,
 };
 
 use super::{
     ast::{
         self as ast, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, ImplAlias,
-        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Param, Pattern, PatternKind,
-        Program, Span, Stmt, StmtKind, TraitFunction, TypeName, UnOp,
+        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind,
+        Program, Span, Stmt, StmtKind, TraitFunction, TupleElement, TypeName, UnOp,
     },
     parser::parse,
 };
@@ -143,10 +144,16 @@ pub struct File {
 /// can share a name, and aliases give a type more names, so they're told
 /// apart by `id`, and `name` is only for messages. It's the name the type was
 /// found by, so a type found through an alias is named after the alias.
+///
+/// A tuple type is only the labels and types of its elements, which are what
+/// it's built with, so `names` is like `name`: they're the names its elements
+/// are read by where it was found, as in `(at x: Int)`, or `None` if they're
+/// its labels.
 #[derive(Debug, Clone)]
 pub struct Type {
     id: usize,
     name: String,
+    names: Option<Rc<[Option<String>]>>,
 }
 
 impl PartialEq for Type {
@@ -229,37 +236,39 @@ struct FnRef {
     args: Vec<Type>,
 }
 
+/// A parameter of something that's called, which is an element of the
+/// tuple its arguments build.
 #[derive(Debug, Clone)]
 struct ParamSignature<'a> {
-    label: Option<&'a str>,
-    name: &'a str,
+    label: Option<String>,
+    /// What it's called in its function, if it's declared with a name.
+    name: Option<&'a str>,
     span: Span,
     /// `None` if the parameter's type is unknown.
     ty: Option<Type>,
 }
 
-/// An element of a tuple type as `Checker::tuple_ids` tells them apart: its
-/// label, name and type `id`.
-type TupleKey = (Option<String>, Option<String>, usize);
+impl<'a> ParamSignature<'a> {
+    /// The parameter declared as `element`, whose type is `ty`.
+    fn declared(element: &'a TupleElement, ty: Option<Type>) -> Self {
+        Self {
+            label: element.label.clone(),
+            name: element.name.as_deref(),
+            span: element.span,
+            ty,
+        }
+    }
+}
 
-/// An element of a tuple type, which is built with its label, and read by
-/// its name.
+/// An element of a tuple type as `Checker::tuple_ids` tells them apart: its
+/// label and type `id`.
+type TupleKey = (Option<String>, usize);
+
+/// An element of a tuple type, which is built with its label.
 #[derive(Debug, Clone)]
 struct TupleElementType {
     label: Option<String>,
-    name: Option<String>,
     ty: Type,
-}
-
-impl fmt::Display for TupleElementType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let element = ast::TupleElement {
-            label: self.label.clone(),
-            name: self.name.clone(),
-            ty: TypeName::new(&self.ty.name),
-        };
-        write!(f, "{element}")
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -277,8 +286,8 @@ struct OptionSignature<'a> {
     ty: Option<Type>,
 }
 
-/// What's called with arguments: a function, or an option of a choice,
-/// which creates it.
+/// What's called with arguments: a function, an option of a choice, which
+/// creates it, or a value, through the standard library's `Call` trait.
 #[derive(Debug, Clone)]
 enum Callee {
     Function(FnRef),
@@ -286,6 +295,14 @@ enum Callee {
     Option {
         choice: Type,
         index: usize,
+    },
+    /// `value`, whose `call` takes a tuple `input`, which the arguments
+    /// build. `call` and `returns` are `None` if they're unknown.
+    Value {
+        value: ir::Expr,
+        call: Option<FnRef>,
+        input: Type,
+        returns: Option<Type>,
     },
 }
 
@@ -295,6 +312,7 @@ impl Callee {
         match self {
             Self::Function(_) => MemberKind::StaticFunction,
             Self::Option { .. } => MemberKind::Option,
+            Self::Value { .. } => unreachable!("values aren't members of types"),
         }
     }
 }
@@ -876,6 +894,7 @@ impl<'a> Checker<'a> {
         Type {
             id: ty.id,
             name: name.to_string(),
+            names: None,
         }
     }
     /// Finds what `name` refers to. An alias is found as the type it's an
@@ -1079,14 +1098,7 @@ impl<'a> Checker<'a> {
         mutability: Mutability,
         ty: Option<Type>,
     ) -> usize {
-        let locals = &mut self
-            .cx
-            .current_fn
-            .as_mut()
-            .expect("values are only declared inside functions")
-            .locals;
-        locals.push(ty.clone());
-        let local = locals.len() - 1;
+        let local = self.add_local(ty.clone());
         self.declare(
             name,
             span,
@@ -1097,6 +1109,18 @@ impl<'a> Checker<'a> {
             },
         );
         local
+    }
+    /// Adds a local of type `ty` to the current function, without a name,
+    /// returning its index.
+    fn add_local(&mut self, ty: Option<Type>) -> usize {
+        let locals = &mut self
+            .cx
+            .current_fn
+            .as_mut()
+            .expect("values are only declared inside functions")
+            .locals;
+        locals.push(ty);
+        locals.len() - 1
     }
     /// Creates a `Void`, which has no fields.
     fn void(&self) -> ir::Expr {

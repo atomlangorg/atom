@@ -24,7 +24,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &'a str,
         span: Span,
-        params: &'a [Param],
+        params: &'a [TupleElement],
         ret: &TypeName,
     ) -> usize {
         let index = self.signature(params, ret, self.full_name(name));
@@ -36,7 +36,7 @@ impl<'a> Checker<'a> {
     pub(super) fn declare_method(
         &mut self,
         self_ty: Option<&Type>,
-        method: (&'a String, &'a [Param], &TypeName),
+        method: (&'a String, &'a [TupleElement], &TypeName),
         span: Span,
         is_static: bool,
         full_name: String,
@@ -81,18 +81,13 @@ impl<'a> Checker<'a> {
     /// `full_name`, returning its index into `functions`.
     pub(super) fn signature(
         &mut self,
-        params: &'a [Param],
+        params: &'a [TupleElement],
         ret: &TypeName,
         full_name: String,
     ) -> usize {
         let params = params
             .iter()
-            .map(|param| ParamSignature {
-                label: param.label.as_deref(),
-                name: &param.name,
-                span: param.span,
-                ty: self.resolve_type(&param.ty),
-            })
+            .map(|param| ParamSignature::declared(param, self.resolve_type(&param.ty)))
             .collect();
         let returns = self.resolve_type(ret);
 
@@ -154,8 +149,17 @@ impl<'a> Checker<'a> {
         if let FnKind::Method(ty) = kind {
             self.declare_local("self", span, Mutability::Let, ty);
         }
+        // A parameter without a name still takes its place, but can't be
+        // used.
         for param in params {
-            self.declare_local(param.name, param.span, Mutability::Let, param.ty);
+            match param.name {
+                Some(name) => {
+                    self.declare_local(name, param.span, Mutability::Let, param.ty);
+                }
+                None => {
+                    self.add_local(param.ty);
+                }
+            }
         }
         let param_count = self.cx.current_fn.as_ref().expect("set above").locals.len();
         let (mut lowered, returns_always) = self.stmts(body);
@@ -316,22 +320,14 @@ impl<'a> Checker<'a> {
         (self.templates[*template].generic.as_ref() == Some(ty)).then_some(*template)
     }
     /// The type `Fn<Input, Output>` of `function`, or `None` if it's unknown.
-    /// Its `Input` is a tuple of its parameters, which have only their labels,
-    /// since their names are private to the function. It's used by the code
-    /// at `span`.
+    /// Its `Input` is the tuple its arguments build, which is read by its
+    /// labels, since its parameters' names are private to the function. It's
+    /// used by the code at `span`.
     pub(super) fn function_type(&mut self, function: &FnRef, span: Span) -> Option<Type> {
         let Signature {
             params, returns, ..
         } = self.signature_of(function, span);
-        let elements = params.iter().map(|param| {
-            Some(TupleElementType {
-                label: param.label.map(str::to_string),
-                name: param.label.map(str::to_string),
-                ty: param.ty.clone()?,
-            })
-        });
-        let input = elements.collect::<Option<_>>()?;
-        let input = self.tuple_type(input);
+        let input = self.params_tuple(&params)?;
         let template = self.std_template("Fn");
         self.instance(template, vec![input, returns?], span)
     }

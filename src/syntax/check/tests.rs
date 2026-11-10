@@ -6269,12 +6269,12 @@ fn rejects_wrong_values_for_stored_options() {
             "
         )),
         [
-            "`circle` is called with `(radius: Int)`, but was given `(radius: Bool)`",
-            "`circle` is called with `(radius: Int)`, but was given `(_: Int)`",
-            "`circle` is called with `(radius: Int)`, but was given `()`",
-            "`circle` is called with `(radius: Int)`, but was given `(radius: Int, _: Int)`",
-            "`empty` is called with `()`, but was given `(_: Int)`",
-            "`empty` is called with `()`, but was given `(_: ())`",
+            "argument `radius` of `circle` expects `Int`, found `Bool`",
+            "argument to `circle` is missing the label `radius`",
+            "`circle` takes 1 argument, found 0",
+            "`circle` takes 1 argument, found 2",
+            "`empty` takes 0 arguments, found 1",
+            "`empty` takes 0 arguments, found 1",
         ]
     );
 }
@@ -6313,7 +6313,7 @@ fn options_take_each_of_their_values_as_an_argument() {
         )),
         [
             "`Shape.pair` takes 2 arguments, found 1",
-            "`pair` is called with `(a: Int, b: Int)`, but was given `(_: (a: Int, b: Int))`",
+            "`pair` takes 2 arguments, found 1",
         ]
     );
 }
@@ -6350,7 +6350,7 @@ fn values_taking_void_are_called_without_arguments() {
             }}
             "
         )),
-        ["`runner` is called with `Void`, but was given `(_: Int)`"]
+        ["`runner` takes 0 arguments, found 1"]
     );
 }
 
@@ -6877,8 +6877,8 @@ fn tuples_without_names_cannot_be_read() {
 }
 
 #[test]
-fn tuples_are_the_same_type_only_if_everything_matches() {
-    // Labels, names, types and their order all count.
+fn tuples_are_the_same_type_only_if_their_contracts_match() {
+    // Labels, types and their order all count, but names don't.
     assert_eq!(
         messages_top(
             "
@@ -6897,6 +6897,104 @@ fn tuples_are_the_same_type_only_if_everything_matches() {
             "cannot assign `Int` to `c`, which has type `(_: Int)`",
             "cannot assign `(x: Int, y: Int)` to `d`, which has type `(x: Int)`",
             "`f` must return `(at x: Int, y: Int)`, found `(x: Int, y: Int)`",
+        ]
+    );
+}
+
+#[test]
+fn tuples_are_read_by_the_names_they_were_found_with() {
+    // A tuple's names are only what its elements are read by, so tuples with
+    // the same labels and types are the same type, whatever their names.
+    assert_eq!(
+        check_top(
+            "
+            fn f() -> Int {
+                let n: (at x: Int) = (at: 3)
+                let o: Int = n.x
+                let p: (at: Int) = n
+                let q = p.at
+                let r: (_ first: Int, b: Int) = (3, b: 5)
+                let s: (_: Int, b: Int) = r
+                let t: (_ first: Int, b: Int) = s
+                return o + q + r.first + t.first + s.b
+            }
+            "
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        messages_top(
+            "
+            fn f(n: (at x: Int), s: (_: Int, b: Int)) {
+                let a = n.at
+                let b = s.first
+            }
+            "
+        ),
+        [
+            "`(at x: Int)` has no field or method `at`",
+            "`(_: Int, b: Int)` has no field or method `first`",
+        ]
+    );
+}
+
+#[test]
+fn parameters_and_option_values_are_written_like_tuple_types() {
+    let src = "
+        choice Shape {
+            circle(_ radius: Int)
+            square(_: Int)
+            rectangle(width _: Int, height: Int)
+        }
+
+        fn area(of shape: Shape) -> Int {
+            match shape {
+                Shape.circle(let radius) => {
+                    return radius * radius * 3
+                }
+                Shape.square(let side) => {
+                    return side * side
+                }
+                Shape.rectangle(width: let width, height: let height) => {
+                    return width * height
+                }
+            }
+        }
+
+        fn add(_: Int, to _: Int, _ last: Int) -> Int {
+            return last
+        }
+
+        fn f() -> Int {
+            let a = area(of: Shape.circle(2)) + area(of: Shape.square(3))
+            let b = area(of: Shape.rectangle(width: 2, height: 3))
+            let square = Shape.square
+            let c = area(of: square(4))
+            return a + b + c + add(1, to: 2, 3)
+        }
+        ";
+    assert_eq!(check_top(src), Ok(()));
+    assert_eq!(
+        messages_top(
+            "
+            choice Shape {
+                circle(_ radius: Int)
+            }
+
+            fn add(_: Int, to _: Int) -> Int {
+                return to
+            }
+
+            fn f() {
+                let a = Shape.circle(radius: 2)
+                let b = add(1, 2)
+            }
+            "
+        ),
+        [
+            "`to` is not declared",
+            "argument to `Shape.circle` should not have a label, found `radius`",
+            "argument to `add` is missing the label `to`",
         ]
     );
 }
@@ -7228,10 +7326,11 @@ fn calls_need_call_and_its_input() {
         messages_top(&src),
         [
             "`count` is `Int`, which doesn't implement `Call`, so it can't be called",
-            "`adder` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
-            "`adder` is called with `(a: Int, b: Int)`, but was given `(b: Int, a: Int)`",
-            "`negate` is called with `(_ value: Int)`, but was given `(_: Bool)`",
-            "`negate` is called with `(_ value: Int)`, but was given `()`",
+            "`adder` takes 2 arguments, found 1",
+            "argument to `adder` should be labelled `a`, found `b`",
+            "argument to `adder` should be labelled `b`, found `a`",
+            "argument 1 of `negate` expects `Int`, found `Bool`",
+            "`negate` takes 1 argument, found 0",
             "`missing` is not declared",
             "`unknown` is not declared",
         ]
@@ -7304,7 +7403,7 @@ fn functions_as_values_are_checked_like_other_values() {
             "`Fn` has 2 generic parameters, but was given 1",
             "`Fn<(a: Int, b: Int), Int>` has no field or method `missing`",
             "cannot assign `Int` to `h`, which has type `Bool`",
-            "`g` is called with `(a: Int, b: Int)`, but was given `(a: Int)`",
+            "`g` takes 2 arguments, found 1",
         ]
     );
 }
@@ -7357,8 +7456,8 @@ fn tuples_are_not_unpacked_into_arguments() {
         [
             "`add` takes 2 arguments, found 1",
             "`add` takes 2 arguments, found 1",
-            "`sum` is called with `(x: Int, y: Int)`, but was given `(_: (x: Int, y: Int))`",
-            "`adder` is called with `(a: Int, b: Int)`, but was given `(_: (a: Int, b: Int))`",
+            "`sum` takes 2 arguments, found 1",
+            "`adder` takes 2 arguments, found 1",
         ]
     );
 }
@@ -7483,7 +7582,7 @@ fn static_functions_are_called_like_other_functions() {
             "argument `x` of `Point.at` expects `Int`, found `Bool`",
             "argument to `Point.at` should be labelled `y`, found `z`",
             "`Point.at` takes 2 arguments, found 1",
-            "`at` is called with `(x: Int, y: Int)`, but was given `(x: Int)`",
+            "`at` takes 2 arguments, found 1",
             "cannot assign `Fn<(x: Int, y: Int), Point>` to `a`, which has type `Fn<Int, Point>`",
             "`Point` has no static function `missing`",
             "`Point.at` is a static function, so it must be used on `Point` itself rather than a value",

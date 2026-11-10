@@ -44,15 +44,7 @@ pub(super) fn trait_names<'b>(
 /// How `function` is written in its trait, such as `fn and(_ rhs: Self) ->
 /// Bool`, for messages.
 pub(super) fn signature_text(function: &TraitFunction) -> String {
-    let params: Vec<_> = function
-        .params
-        .iter()
-        .map(|param| match &param.label {
-            None => format!("_ {}: {}", param.name, param.ty),
-            Some(label) if *label == param.name => format!("{}: {}", param.name, param.ty),
-            Some(label) => format!("{label} {}: {}", param.name, param.ty),
-        })
-        .collect();
+    let params: Vec<_> = function.params.iter().map(ToString::to_string).collect();
     let static_ = if function.is_static { "static " } else { "" };
     let returns = if function.ret.is_void() {
         String::new()
@@ -233,6 +225,7 @@ impl<'a> Checker<'a> {
             .map(|name| Type {
                 id: self.add_type(name.to_string(), file, TypeKind::Group(vec![])),
                 name: name.to_string(),
+                names: None,
             })
             .collect();
         let alias_types = aliases.iter().zip(&stand_ins[1..]);
@@ -548,7 +541,7 @@ impl<'a> Checker<'a> {
                     .zip(&declared.params)
                     .zip(params)
                     .all(|((found, declared), expected)| {
-                        found.label == declared.label.as_deref() && matches(&found.ty, expected)
+                        found.label == declared.label && matches(&found.ty, expected)
                     })
                 && matches(&signature.returns, returns);
             if !same {

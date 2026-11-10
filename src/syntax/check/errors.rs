@@ -142,8 +142,11 @@ pub enum CheckError {
     /// An argument had the wrong type.
     ArgumentTypeMismatch {
         function: String,
-        /// The argument's label, or the parameter name if it has none.
-        param: String,
+        /// The argument's label, or the parameter name if it has none, or
+        /// `None` if it has neither, so it's named by its `position`, which
+        /// starts at 1.
+        param: Option<String>,
+        position: usize,
         expected: Type,
         found: Type,
     },
@@ -511,12 +514,19 @@ impl fmt::Display for CheckError {
             Self::ArgumentTypeMismatch {
                 function,
                 param,
+                position,
                 expected,
                 found,
-            } => write!(
-                f,
-                "argument `{param}` of `{function}` expects `{expected}`, found `{found}`"
-            ),
+            } => match param {
+                Some(param) => write!(
+                    f,
+                    "argument `{param}` of `{function}` expects `{expected}`, found `{found}`"
+                ),
+                None => write!(
+                    f,
+                    "argument {position} of `{function}` expects `{expected}`, found `{found}`"
+                ),
+            },
             Self::MissingReturnValue { function, expected } => {
                 write!(f, "`{function}` must return a value of type `{expected}`")
             }

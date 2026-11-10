@@ -37,41 +37,87 @@ impl<'a> Checker<'a> {
             TypeName::Tuple(elements) => self.resolve_tuple(elements),
         }
     }
-    /// Finds the tuple type with `elements`, reporting an error if any of
-    /// their types can't be found.
+    /// Finds the tuple type with `elements`, whose elements are read by the
+    /// names they're declared with, reporting an error if any of their types
+    /// can't be found.
     pub(super) fn resolve_tuple(&mut self, elements: &[ast::TupleElement]) -> Option<Type> {
         // Every element is resolved, so each one's errors are found.
-        let elements: Vec<_> = elements
+        let types: Vec<_> = elements
             .iter()
-            .map(|element| {
+            .map(|element| self.resolve_type(&element.ty))
+            .collect();
+        let contract = elements
+            .iter()
+            .zip(types)
+            .map(|(element, ty)| {
                 Some(TupleElementType {
                     label: element.label.clone(),
-                    name: element.name.clone(),
-                    ty: self.resolve_type(&element.ty)?,
+                    ty: ty?,
                 })
             })
-            .collect();
-        let elements = elements.into_iter().collect::<Option<_>>()?;
-        Some(self.tuple_type(elements))
+            .collect::<Option<_>>()?;
+        let names = elements.iter().map(|element| element.name.clone());
+        Some(self.tuple_type(contract, Some(names.collect())))
     }
     /// The tuple type with `elements`, which is created the first time it's
-    /// needed.
-    pub(super) fn tuple_type(&mut self, elements: Vec<TupleElementType>) -> Type {
-        let shown: Vec<_> = elements.iter().map(ToString::to_string).collect();
-        let name = format!("({})", shown.join(", "));
+    /// needed, read by `names`, or by its labels if they're `None`.
+    pub(super) fn tuple_type(
+        &mut self,
+        elements: Vec<TupleElementType>,
+        names: Option<Vec<Option<String>>>,
+    ) -> Type {
+        let labels: Vec<_> = elements
+            .iter()
+            .map(|element| element.label.clone())
+            .collect();
+        let names = names.filter(|names| *names != labels);
+        let show = |names: &[Option<String>]| {
+            let shown: Vec<_> = elements
+                .iter()
+                .zip(names)
+                .map(|(element, name)| {
+                    let element = ast::TupleElement {
+                        label: element.label.clone(),
+                        name: name.clone(),
+                        ty: TypeName::new(&element.ty.name),
+                        span: Span::default(),
+                    };
+                    element.to_string()
+                })
+                .collect();
+            format!("({})", shown.join(", "))
+        };
+        let name = show(names.as_deref().unwrap_or(&labels));
         let key: Vec<_> = elements
             .iter()
-            .map(|element| (element.label.clone(), element.name.clone(), element.ty.id))
+            .map(|element| (element.label.clone(), element.ty.id))
             .collect();
         let id = match self.tuple_ids.get(&key) {
             Some(&id) => id,
             None => {
-                let id = self.add_type(name.clone(), self.cx.file, TypeKind::Tuple(elements));
+                let id = self.add_type(show(&labels), self.cx.file, TypeKind::Tuple(elements));
                 self.tuple_ids.insert(key, id);
                 id
             }
         };
-        Type { id, name }
+        Type {
+            id,
+            name,
+            names: names.map(Rc::from),
+        }
+    }
+    /// The names that the elements of the tuple type `ty` are read by, which
+    /// are its labels unless it was found with others.
+    pub(super) fn element_names(&self, ty: &Type) -> Vec<Option<String>> {
+        match &ty.names {
+            Some(names) => names.to_vec(),
+            None => self
+                .elements(ty.id)
+                .unwrap_or_default()
+                .iter()
+                .map(|element| element.label.clone())
+                .collect(),
+        }
     }
     /// The type made from the generic type called `name` with `args`.
     pub(super) fn generic_type(&mut self, name: &Name, args: &[TypeName]) -> Option<Type> {
@@ -230,6 +276,7 @@ impl<'a> Checker<'a> {
                 Type {
                     id: self.add_type(param.clone(), file, kind),
                     name: param.clone(),
+                    names: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -244,7 +291,11 @@ impl<'a> Checker<'a> {
                 _ => unreachable!("only groups, choices and primitives are generic"),
             }
         });
-        let ty = Type { id, name };
+        let ty = Type {
+            id,
+            name,
+            names: None,
+        };
         self.templates[template].generic = Some(ty.clone());
         self.fill_instances();
         Some((file, ty, stmt.span))
@@ -265,7 +316,11 @@ impl<'a> Checker<'a> {
         let name = self.instance_name(template, &args);
         let key = (template, args.iter().map(|arg| arg.id).collect());
         if let Some(&id) = self.instance_ids.get(&key) {
-            return Some(Type { id, name });
+            return Some(Type {
+                id,
+                name,
+                names: None,
+            });
         }
         let depth = 1 + args
             .iter()
@@ -287,7 +342,11 @@ impl<'a> Checker<'a> {
         let id = self.new_instance(template, args, &name);
         self.unfilled.push(id);
         self.fill_instances();
-        Some(Type { id, name })
+        Some(Type {
+            id,
+            name,
+            names: None,
+        })
     }
     /// How the type made from the generic type at `template` in `templates`
     /// with `args` is shown, as in `Optional<Int>`.
@@ -414,8 +473,8 @@ impl<'a> Checker<'a> {
                 })
                 .collect::<Option<_>>()?;
             // A tuple that's unchanged keeps the name it's used by, such as
-            // `Void` for `()`.
-            let substituted = self.tuple_type(elements);
+            // `Void` for `()`, and it's always read by the same names.
+            let substituted = self.tuple_type(elements, ty.names.as_deref().map(<[_]>::to_vec));
             return Some(if substituted == *ty {
                 ty.clone()
             } else {
@@ -558,6 +617,7 @@ impl<'a> Checker<'a> {
         let ty = Type {
             id,
             name: name.to_string(),
+            names: None,
         };
         self.declare(name, span, Binding::Type(ty));
         id
@@ -611,6 +671,7 @@ impl<'a> Checker<'a> {
                         ty: Type {
                             id,
                             name: name.to_string(),
+                            names: None,
                         },
                         member: option.name.clone(),
                         existing: MemberKind::Option,
@@ -636,6 +697,7 @@ impl<'a> Checker<'a> {
                         ty: Type {
                             id,
                             name: name.to_string(),
+                            names: None,
                         },
                         member: field.name.clone(),
                         existing: MemberKind::Field,

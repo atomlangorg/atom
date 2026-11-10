@@ -433,12 +433,11 @@ impl<'a> Checker<'a> {
             let elements = values.iter().zip(found).map(|(value, ty)| {
                 Some(TupleElementType {
                     label: value.label.clone(),
-                    name: value.label.clone(),
                     ty: ty?,
                 })
             });
             let elements = elements.collect::<Option<_>>();
-            elements.map(|elements| self.tuple_type(elements))
+            elements.map(|elements| self.tuple_type(elements, None))
         };
         let expr = match &ty {
             Some(ty) => ir::Expr::Construct {
@@ -497,12 +496,13 @@ impl<'a> Checker<'a> {
         Some(Receiver::Value(ty?, expr))
     }
     /// Finds the field or method of `ty` called `name`. A tuple's elements
-    /// are its fields, found by their names.
+    /// are its fields, found by the names `ty` was found with.
     pub(super) fn member(&self, ty: &Type, name: &str) -> Option<Member> {
         if let Some(elements) = self.elements(ty.id)
-            && let Some(index) = elements
+            && let Some(index) = self
+                .element_names(ty)
                 .iter()
-                .position(|element| element.name.as_deref() == Some(name))
+                .position(|element| element.as_deref() == Some(name))
         {
             return Some(Member::Field(index, Some(elements[index].ty.clone())));
         }
@@ -643,6 +643,7 @@ impl<'a> Checker<'a> {
                 Some(Callee::Function(found)) => {
                     return self.function_value(found, span);
                 }
+                Some(Callee::Value { .. }) => unreachable!("values aren't members of types"),
                 // Naming an option doesn't create the choice, but gives its
                 // `ChoiceOption`.
                 Some(Callee::Option { index, .. }) => {

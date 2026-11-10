@@ -185,17 +185,20 @@ impl fmt::Display for TypeName {
     }
 }
 
-/// An element of a tuple type, such as `at x: Int`, `x: Int` or `_: Int`.
+/// An element of a tuple type, a function's parameters, or an option's
+/// value, such as `at x: Int`, `x: Int`, `at _: Int`, `_ x: Int` or `_: Int`.
 ///
-/// Like a function parameter, its label is used to build the tuple, as in
-/// `(at: 1)`, and its name is used to read it, as in `point.x`. `x: Int` has
-/// `x` as both. Without a label, it's built without one, as in `(1)`, and
-/// without a name, it can't be read.
+/// Its label and type are its public contract: the label is used to build
+/// the tuple or call the function, as in `(at: 1)`, and `_` means it's built
+/// without one, as in `(1)`. Its name is what the value is read by, as in
+/// `point.x`, or what a parameter is called in its function. `x: Int` has
+/// `x` as both, and without a name, it can't be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TupleElement {
     pub label: Option<String>,
     pub name: Option<String>,
     pub ty: TypeName,
+    pub span: Span,
 }
 
 impl fmt::Display for TupleElement {
@@ -508,7 +511,7 @@ pub enum StmtKind {
     /// the standard library.
     PrimitiveFn {
         name: String,
-        params: Vec<Param>,
+        params: Vec<TupleElement>,
         ret: TypeName,
     },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
@@ -545,7 +548,7 @@ pub enum StmtKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: String,
-    pub params: Vec<Param>,
+    pub params: Vec<TupleElement>,
     /// The return type. `fn f()` is the same as `fn f() -> Void`,
     /// so this is `Void` when no type is written.
     pub ret: TypeName,
@@ -561,7 +564,7 @@ pub struct TraitFunction {
     /// Whether it's a `static fn`, like in an `impl`.
     pub is_static: bool,
     pub name: String,
-    pub params: Vec<Param>,
+    pub params: Vec<TupleElement>,
     /// `Void` when no type is written, like in a `fn`.
     pub ret: TypeName,
     /// Its default implementation, which an `impl` uses unless it implements
@@ -589,20 +592,6 @@ pub struct ImplFunction {
     /// so its `body` is empty. Only allowed in the standard library.
     pub is_primitive: bool,
     pub function: Function,
-}
-
-/// A function parameter, such as `to value: Int`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Param {
-    /// The label callers must use, or `None` if declared with `_`.
-    ///
-    /// When only one name is given, as in `value: Int`, it is both the label
-    /// and the parameter name.
-    pub label: Option<String>,
-    pub name: String,
-    /// The parameter's type.
-    pub ty: TypeName,
-    pub span: Span,
 }
 
 /// A group field, such as `let age: Int`. Fields can't have values.

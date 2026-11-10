@@ -27,7 +27,7 @@ use chumsky::{
 use super::{
     ast::{
         Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, ImplAlias,
-        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Param, Pattern, PatternKind,
+        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind,
         Program, Span, Stmt, StmtKind, TraitFunction, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
@@ -279,10 +279,10 @@ where
         .boxed();
 
     // Type names are resolved by the checker, not reserved by the lexer. A
-    // tuple type is written like parameters, as in `(at x: Int, y: Int)`,
-    // except that `_: Int` has neither a label nor a name. A generic type is
-    // given its arguments, as in `Optional<Int>`, and in a generic type's
-    // `impl`, `Self.T` is what its parameter `T` stands for.
+    // tuple type is written like a function's parameters, as in
+    // `(at x: Int, y: Int)`. A generic type is given its arguments, as in
+    // `Optional<Int>`, and in a generic type's `impl`, `Self.T` is what its
+    // parameter `T` stands for.
     let mut type_name = Recursive::declare();
     let type_args = type_name
         .clone()
@@ -298,16 +298,29 @@ where
             Some(args) => TypeName::Generic { name, args },
             None => TypeName::Named(name),
         });
-    let element = just(Token::Underscore)
-        .ignore_then(ident.or_not())
-        .map(|name| (None, name))
-        .or(ident
-            .then(ident)
-            .map(|(label, name)| (Some(label), Some(name))))
-        .or(ident.map(|name| (Some(name.clone()), Some(name))))
+    // An element of a tuple type, a function's parameters or an option's
+    // value: a label, then optionally a name, then its type, where `_` is
+    // neither. With only a label, as in `x: Int`, it's also the name, so
+    // `_: Int` has neither.
+    let label_or_blank = ident.map(Some).or(just(Token::Underscore).to(None));
+    let element = label_or_blank
+        .clone()
+        .then(label_or_blank.or_not())
         .then_ignore(just(Token::Colon))
         .then(type_name.clone())
-        .map(|((label, name), ty)| TupleElement { label, name, ty });
+        .try_map(|((label, name), ty), span| match (label, name) {
+            (None, Some(None)) => Err(Rich::custom(
+                span,
+                "`_ _` is written `_`, since neither has a name",
+            )),
+            (label, name) => Ok(TupleElement {
+                name: name.unwrap_or_else(|| label.clone()),
+                label,
+                ty,
+                span: Span::from(span),
+            }),
+        })
+        .boxed();
     let self_param = just(Token::SelfType)
         .ignore_then(just(Token::Dot))
         .ignore_then(ident)
@@ -315,7 +328,7 @@ where
     type_name.define(
         self_param
             .or(named_type.clone())
-            .or(comma_list(element, Token::LParen, Token::RParen).map(TypeName::Tuple))
+            .or(comma_list(element.clone(), Token::LParen, Token::RParen).map(TypeName::Tuple))
             .labelled("type"),
     );
 
@@ -633,16 +646,9 @@ where
         });
 
     // `name(label: Type, ...)`, which holds a tuple of what's in brackets,
-    // where each element must have a label. `name()` holds `()`.
-    let option_value = ident
-        .then(annotation.clone())
-        .map(|(label, ty)| TupleElement {
-            label: Some(label.clone()),
-            name: Some(label),
-            ty,
-        });
+    // written like a tuple type. `name()` holds `()`.
     let option = ident
-        .then(comma_list(option_value, Token::LParen, Token::RParen))
+        .then(comma_list(element.clone(), Token::LParen, Token::RParen))
         .map_with(|(name, values), e| ChoiceOption {
             name,
             values,
@@ -674,22 +680,8 @@ where
             span,
         });
 
-    // `label name: Type`, `_ name: Type`, or `name: Type`, where the name is
-    // also the label.
-    let param = just(Token::Underscore)
-        .ignore_then(ident)
-        .map(|name| (None, name))
-        .or(ident.then(ident).map(|(label, name)| (Some(label), name)))
-        .or(ident.map(|name| (Some(name.clone()), name)))
-        .then_ignore(just(Token::Colon))
-        .then(type_name.clone())
-        .map_with(|((label, name), ty), e| Param {
-            label,
-            name,
-            ty,
-            span: Span::from(e.span()),
-        });
-    let params = comma_list(param, Token::LParen, Token::RParen);
+    // Written like a tuple type, as in `(to value: Int)`.
+    let params = comma_list(element, Token::LParen, Token::RParen);
 
     // `fn name(params) -> Type`, or `fn name(params)`, which returns `Void`.
     let signature = just(Token::Fn)
@@ -1548,6 +1540,7 @@ mod tests {
             label: label.map(str::to_string),
             name: name.map(str::to_string),
             ty,
+            span: Span::default(),
         };
         assert_eq!(
             decl_type("let t: (at x: Int, y: Bool, _: Int, _ z: Int) = t"),
@@ -1626,6 +1619,7 @@ mod tests {
                             label: Some("x".to_string()),
                             name: Some("x".to_string()),
                             ty: TypeName::new("Int"),
+                            span: Span::default(),
                         }])],
                     ),
                 ],
@@ -2609,10 +2603,11 @@ mod tests {
         assert_eq!(errs[0].span().into_range(), 10..11);
     }
 
-    fn param(label: Option<&str>, name: &str, ty: &str) -> Param {
-        Param {
+    /// A parameter with `label` and `name`, which are `None` for `_`.
+    fn param(label: Option<&str>, name: Option<&str>, ty: &str) -> TupleElement {
+        TupleElement {
             label: label.map(str::to_string),
-            name: name.to_string(),
+            name: name.map(str::to_string),
             ty: TypeName::new(ty),
             span: Span::default(),
         }
@@ -2645,7 +2640,7 @@ mod tests {
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "addFive".to_string(),
-                params: vec![param(Some("to"), "value", "Int")],
+                params: vec![param(Some("to"), Some("value"), "Int")],
                 ret: TypeName::new("Int"),
                 body: vec![stmt_node(StmtKind::Return(Some(expr_node(
                     ExprKind::Binary(var("value"), BinOp::Add, int(5),)
@@ -2658,21 +2653,28 @@ mod tests {
     #[test]
     fn parses_parameter_label_forms() {
         assert_eq!(
-            parse_body("fn f(a: Int, to b: Bool, _ c: Int) {}"),
+            parse_body("fn f(a: Int, to b: Bool, _ c: Int, _: Int, at _: Int) {}"),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
                 name: "f".to_string(),
                 params: vec![
                     // A single name is both the label and the parameter name.
-                    param(Some("a"), "a", "Int"),
-                    param(Some("to"), "b", "Bool"),
-                    // `_` means no label.
-                    param(None, "c", "Int"),
+                    param(Some("a"), Some("a"), "Int"),
+                    param(Some("to"), Some("b"), "Bool"),
+                    // `_` means no label, or no name.
+                    param(None, Some("c"), "Int"),
+                    param(None, None, "Int"),
+                    param(Some("at"), None, "Int"),
                 ],
                 ret: TypeName::new("Void"),
                 body: vec![],
                 span: Span::default()
             }))])
         );
+        for src in ["fn f(_ _: Int) {}", "fn f(a b c: Int) {}", "fn f(a) {}"] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
+        let errs = parse_body("fn f(_ _: Int) {}").unwrap_err();
+        assert_eq!(errs[0], "`_ _` is written `_`, since neither has a name");
     }
 
     #[test]
@@ -2787,9 +2789,9 @@ mod tests {
             "fn f(x:) {}",
             // Bad parameter labels.
             "fn f(a b c: Int) {}",
-            "fn f(_: Int) {}",
+            "fn f(_ _: Int) {}",
             "fn f(_ _ x: Int) {}",
-            "fn f(x _: Int) {}",
+            "fn f(Int) {}",
             // Separators.
             "fn f(a: Int b: Int) {}",
             "fn f(,) {}",
@@ -2968,6 +2970,7 @@ mod tests {
                 label: Some(label.to_string()),
                 name: Some(label.to_string()),
                 ty,
+                span: Span::default(),
             })
             .collect();
         ChoiceOption {
@@ -3011,11 +3014,13 @@ mod tests {
                                     label: Some("a".to_string()),
                                     name: Some("a".to_string()),
                                     ty: TypeName::new("Int"),
+                                    span: Span::default(),
                                 },
                                 TupleElement {
                                     label: Some("b".to_string()),
                                     name: Some("b".to_string()),
                                     ty: TypeName::new("Bool"),
+                                    span: Span::default(),
                                 },
                             ]),
                         )],
@@ -3102,11 +3107,9 @@ mod tests {
             "choice Shape { circle(radius:) }",
             "choice Shape { (radius: Int) }",
             "choice Shape { circle(: Int) }",
-            // Values must be labelled.
+            // Values are written like a tuple type's elements.
             "choice Shape { circle(Int) }",
-            "choice Shape { circle(_: Int) }",
-            "choice Shape { circle(_ radius: Int) }",
-            "choice Shape { circle(at radius: Int) }",
+            "choice Shape { circle(_ _: Int) }",
             // The old syntax, with a type after `:`.
             "choice Shape { circle: Int }",
             "choice Shape { pair: (a: Int, b: Int) }",
@@ -3436,9 +3439,9 @@ mod tests {
                 }),
                 stmt_node(StmtKind::PrimitiveFn {
                     name: "wait".to_string(),
-                    params: vec![Param {
+                    params: vec![TupleElement {
                         label: Some("for".to_string()),
-                        name: "seconds".to_string(),
+                        name: Some("seconds".to_string()),
                         ty: TypeName::new("Int"),
                         span: Span::default()
                     }],
@@ -4260,7 +4263,7 @@ mod tests {
                             is_primitive: false,
                             function: Function {
                                 name: "rename".to_string(),
-                                params: vec![param(Some("to"), "name", "Int")],
+                                params: vec![param(Some("to"), Some("name"), "Int")],
                                 ret: TypeName::new("Void"),
                                 body: vec![],
                                 span: Span::default()
@@ -4419,12 +4422,6 @@ mod tests {
 
     #[test]
     fn parses_traits() {
-        let param = |label: Option<&str>, name: &str, ty: &str| Param {
-            label: label.map(str::to_string),
-            name: name.to_string(),
-            ty: TypeName::new(ty),
-            span: Span::default(),
-        };
         assert_eq!(
             parse(
                 "
@@ -4445,7 +4442,7 @@ mod tests {
                         TraitFunction {
                             is_static: false,
                             name: "and".to_string(),
-                            params: vec![param(None, "rhs", "Self")],
+                            params: vec![param(None, Some("rhs"), "Self")],
                             ret: TypeName::new("Bool"),
                             body: None,
                             span: Span::default()
@@ -4461,7 +4458,7 @@ mod tests {
                         TraitFunction {
                             is_static: false,
                             name: "reset".to_string(),
-                            params: vec![param(Some("to"), "value", "Int")],
+                            params: vec![param(Some("to"), Some("value"), "Int")],
                             ret: TypeName::new("Void"),
                             body: None,
                             span: Span::default()
@@ -4513,9 +4510,9 @@ mod tests {
                     is_primitive: true,
                     function: Function {
                         name: "and".to_string(),
-                        params: vec![Param {
+                        params: vec![TupleElement {
                             label: None,
-                            name: "rhs".to_string(),
+                            name: Some("rhs".to_string()),
                             ty: TypeName::new("Self"),
                             span: Span::default()
                         }],

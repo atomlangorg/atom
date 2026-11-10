@@ -22,7 +22,7 @@ impl<'a> Checker<'a> {
     /// Checks calling `value`, of type `ty`, called `name`, with `args`, at
     /// `span`, which calls its `call` from the standard library's `Call`
     /// trait, as in `adder(a: 3)` for `adder.call(input: (a: 3))`. The
-    /// arguments are always built into a tuple, which must be the `Input`.
+    /// arguments always build its `Input`, which must be a tuple.
     pub(super) fn call_value(
         &mut self,
         ty: Option<Type>,
@@ -31,79 +31,114 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         span: Span,
     ) -> Typed {
-        let function = ty.as_ref().and_then(|ty| {
+        let call = ty.as_ref().and_then(|ty| {
             let not_callable = CheckError::NotCallable {
                 name: name.to_string(),
                 ty: ty.clone(),
             };
             self.trait_method("Call", "call", ty, span, not_callable)
         });
-        let signature = function
-            .as_ref()
-            .map(|function| self.signature_of(function, span));
-        // The input is the only parameter of `call`, which the arguments are
-        // checked as, like any other function's.
-        let (param, returns) = match signature {
-            Some(signature) => (
-                signature.params.first().and_then(|param| param.ty.clone()),
-                signature.returns,
-            ),
+        // The input is the only parameter of `call`.
+        let (input, returns) = match &call {
+            Some(call) => {
+                let signature = self.signature_of(call, span);
+                let input = signature.params.first().and_then(|param| param.ty.clone());
+                (input, signature.returns)
+            }
             None => (None, None),
         };
-        let Typed {
-            ty: found,
-            expr: input,
-        } = self.tuple(args, param.as_ref());
-        let function = function.map(|function| self.callee(function, span));
-        if let (Some(expected), Some(found)) = (&param, &found)
-            && expected != found
-        {
-            self.error(
-                span,
-                CheckError::WrongCallInput {
-                    name: name.to_string(),
-                    expected: expected.clone(),
-                    found: found.clone(),
-                },
-            );
-        }
-        Typed {
-            ty: returns,
-            expr: call(function, vec![value, input]),
+        match input {
+            Some(input) if self.elements(input.id).is_some() => {
+                let callee = Callee::Value {
+                    value,
+                    call,
+                    input,
+                    returns,
+                };
+                self.call_callee(callee, name.to_string(), args, span)
+            }
+            // Its input is unknown, which has already been reported, or isn't
+            // a tuple, so the arguments can't build it.
+            input => {
+                let found = self.tuple(args, None).ty;
+                if let (Some(expected), Some(found)) = (input, found) {
+                    let name = name.to_string();
+                    let error = CheckError::WrongCallInput {
+                        name,
+                        expected,
+                        found,
+                    };
+                    self.error(span, error);
+                }
+                Typed {
+                    ty: returns,
+                    expr: ir::Expr::Error,
+                }
+            }
         }
     }
-    /// The signature of `callee`, for the code at `span`. Creating an option
-    /// is like calling a static function whose parameters are the elements
-    /// of its value, which returns the choice.
+    /// The signature of `callee`, for the code at `span`. Something whose
+    /// arguments build a tuple, such as an option, is like a function whose
+    /// parameters are the tuple's elements.
     pub(super) fn callee_signature(&mut self, callee: &Callee, span: Span) -> Signature<'a> {
-        let (choice, index) = match callee {
-            Callee::Function(function) => return self.signature_of(function, span),
-            Callee::Option { choice, index } => (choice, *index),
-        };
-        let option = self.options(choice.id).unwrap_or_default()[index].clone();
-        // If its value's type is unknown, it's already been reported, and
-        // so are the types of its parameters.
-        let types: Vec<_> = option
-            .ty
-            .and_then(|value| self.elements(value.id))
-            .unwrap_or_default()
-            .iter()
-            .map(|element| element.ty.clone())
-            .collect();
-        let params = option.decl.values.iter().enumerate();
-        Signature {
-            name: format!("{choice}.{}", option.decl.name),
-            params: params
-                .map(|(index, value)| ParamSignature {
-                    label: value.label.as_deref(),
-                    name: value.name.as_deref().unwrap_or_default(),
-                    span: option.decl.span,
-                    ty: types.get(index).cloned(),
-                })
-                .collect(),
-            returns: Some(choice.clone()),
-            template: None,
+        match callee {
+            Callee::Function(function) => self.signature_of(function, span),
+            Callee::Option { choice, index } => {
+                let option = self.options(choice.id).unwrap_or_default()[*index].clone();
+                // If its value's type is unknown, it's already been reported,
+                // and so are the types of its parameters.
+                let types: Vec<_> = option
+                    .ty
+                    .and_then(|value| self.elements(value.id))
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|element| element.ty.clone())
+                    .collect();
+                let params = option.decl.values.iter().enumerate();
+                Signature {
+                    name: format!("{choice}.{}", option.decl.name),
+                    params: params
+                        .map(|(index, value)| {
+                            ParamSignature::declared(value, types.get(index).cloned())
+                        })
+                        .collect(),
+                    returns: Some(choice.clone()),
+                    template: None,
+                }
+            }
+            Callee::Value { input, returns, .. } => Signature {
+                name: input.name.clone(),
+                params: self.tuple_params(input),
+                returns: returns.clone(),
+                template: None,
+            },
         }
+    }
+    /// The parameters whose arguments build the tuple `ty`, which are read
+    /// by its labels.
+    pub(super) fn tuple_params(&self, ty: &Type) -> Vec<ParamSignature<'a>> {
+        let elements = self.elements(ty.id).unwrap_or_default();
+        elements
+            .iter()
+            .map(|element| ParamSignature {
+                label: element.label.clone(),
+                name: None,
+                span: Span::default(),
+                ty: Some(element.ty.clone()),
+            })
+            .collect()
+    }
+    /// The tuple that the arguments for `params` build, or `None` if any of
+    /// their types are unknown.
+    pub(super) fn params_tuple(&mut self, params: &[ParamSignature]) -> Option<Type> {
+        let elements = params.iter().map(|param| {
+            Some(TupleElementType {
+                label: param.label.clone(),
+                ty: param.ty.clone()?,
+            })
+        });
+        let elements = elements.collect::<Option<_>>()?;
+        Some(self.tuple_type(elements, None))
     }
     /// Checks a call to `callee`, called `name`, with `args`, which are
     /// checked as its parameters.
@@ -137,28 +172,38 @@ impl<'a> Checker<'a> {
     ) -> Typed {
         let arity = signature.params.len();
         let returns = self.check_args(name, args, found, signature, span);
+        // Unless it's a function, its arguments build a tuple.
+        let build = |tuple: Option<&Type>, fields: Vec<ir::Expr>| match tuple {
+            Some(tuple) if fields.len() == arity => ir::Expr::Construct {
+                group: tuple.id,
+                fields,
+            },
+            _ => ir::Expr::Error,
+        };
         let expr = match callee {
             Callee::Function(function) => ir::Expr::Call {
                 function: self.callee(function, span),
                 args: lowered,
             },
-            // The option's value is built from the arguments.
             Callee::Option { choice, index } => {
                 let value_ty = self.options(choice.id).unwrap_or_default()[index]
                     .ty
                     .clone();
-                let value = match value_ty {
-                    Some(value_ty) if lowered.len() == arity => ir::Expr::Construct {
-                        group: value_ty.id,
-                        fields: lowered,
-                    },
-                    _ => ir::Expr::Error,
-                };
                 ir::Expr::Choose {
                     choice: choice.id,
                     option: index,
-                    value: Box::new(value),
+                    value: Box::new(build(value_ty.as_ref(), lowered)),
                 }
+            }
+            Callee::Value {
+                value,
+                call: function,
+                input,
+                ..
+            } => {
+                let input = build(Some(&input), lowered);
+                let function = function.map(|function| self.callee(function, span));
+                call(function, vec![value, input])
             }
         };
         Typed { ty: returns, expr }
@@ -401,13 +446,14 @@ impl<'a> Checker<'a> {
             return signature.returns;
         }
 
-        for ((arg, found), param) in args.iter().zip(found).zip(&signature.params) {
-            if arg.label.as_deref() != param.label {
+        let params = signature.params.iter().enumerate();
+        for ((arg, found), (index, param)) in args.iter().zip(found).zip(params) {
+            if arg.label != param.label {
                 self.error(
                     arg.span,
                     CheckError::WrongLabel {
                         function: function.clone(),
-                        expected: param.label.map(str::to_string),
+                        expected: param.label.clone(),
                         found: arg.label.clone(),
                     },
                 );
@@ -418,7 +464,8 @@ impl<'a> Checker<'a> {
                     arg.value.span,
                     CheckError::ArgumentTypeMismatch {
                         function: function.clone(),
-                        param: param.label.unwrap_or(param.name).to_string(),
+                        param: param.label.clone().or(param.name.map(str::to_string)),
+                        position: index + 1,
                         expected: expected.clone(),
                         found,
                     },
