@@ -606,10 +606,6 @@ struct Checker<'a> {
     files: Vec<FileInfo<'a>>,
     /// Every type, indexed by `id`.
     types: Vec<TypeInfo<'a>>,
-    /// For each function used as a value, by its index in `functions`, the
-    /// index of the function that a pointer to it really points to, which
-    /// takes its `Input` as a single parameter.
-    function_values: HashMap<usize, usize>,
     /// Where the code being checked is.
     cx: Context<'a>,
     /// The aliases of each `impl` with a trait, by name, whether they're

@@ -57,8 +57,8 @@ pub enum Primitive {
         signed: bool,
     },
     Bool,
-    /// `Fn`, which is a pointer to a function that takes its `Input` as a
-    /// single parameter.
+    /// `Fn`, which is a pointer to a function whose parameters are the
+    /// elements of its `Input`.
     Fn,
     /// `ChoiceOption` and `ChoiceTag`, which are the index of an option of a
     /// choice, in the order they're declared.

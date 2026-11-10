@@ -331,45 +331,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.build_call(exit, &[code.into()], "")?;
                 self.builder.build_unreachable()?;
             }
-            Body::Primitive(PrimitiveFn::CallFn) => {
-                let input = self.types[function.locals[1]];
-                let fn_type = self.types[function.returns].fn_type(&[input.into()], false);
-                let pointer = value
-                    .get_nth_param(0)
-                    .expect("`self` is the first parameter");
-                let input = value
-                    .get_nth_param(1)
-                    .expect("the input is the second parameter");
-                let result = self
-                    .builder
-                    .build_indirect_call(
-                        fn_type,
-                        pointer.into_pointer_value(),
-                        &[input.into()],
-                        "",
-                    )?
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("every function returns a value, even if it's `Void`");
-                self.builder.build_return(Some(&result))?;
-            }
-            Body::Primitive(PrimitiveFn::CallOption) => {
-                let ty = self.types[function.returns].into_struct_type();
-                let option = value
-                    .get_nth_param(0)
-                    .expect("`self` is the first parameter");
-                let input = value
-                    .get_nth_param(1)
-                    .expect("the input is the second parameter");
-                let result = self.choose(ty, option.into_int_value(), input)?;
-                self.builder.build_return(Some(&result))?;
-            }
-            // Calls are built as the instruction itself, but the function
-            // is still defined like any other.
+            // Calls are built as the instructions themselves, but the
+            // function is still defined like any other.
             &Body::Primitive(primitive) => {
+                let returns = function.returns;
                 let result = self
-                    .primitive_instruction(primitive, &value.get_params())?
-                    .expect("only `exit` and `call`s aren't a single instruction");
+                    .primitive_instruction(primitive, &value.get_params(), returns)?
+                    .expect("only `exit` isn't built in place");
                 self.builder.build_return(Some(&result))?;
             }
         }
@@ -377,29 +345,67 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     /// Builds the instructions that `primitive` is, on `args`, where a
-    /// method's `self` comes first, or `None` if it isn't built in place,
-    /// such as `exit`.
+    /// method's `self` comes first, returning a value of the type at
+    /// `returns` in `program.types`, or `None` for `exit`, which isn't built
+    /// in place.
     fn primitive_instruction(
         &mut self,
         primitive: PrimitiveFn,
         args: &[BasicValueEnum<'ctx>],
-    ) -> Result<Option<IntValue<'ctx>>, BuilderError> {
+        returns: usize,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BuilderError> {
         let int = |index: usize| args[index].into_int_value();
         Ok(Some(match primitive {
-            PrimitiveFn::Exit | PrimitiveFn::CallFn | PrimitiveFn::CallOption => return Ok(None),
-            PrimitiveFn::Binary { op, signed } => self.binary(op, signed, int(0), int(1))?,
+            PrimitiveFn::Exit => return Ok(None),
+            PrimitiveFn::Binary { op, signed } => self.binary(op, signed, int(0), int(1))?.into(),
             // Negating the smallest integer overflows.
             PrimitiveFn::Unary(UnOp::Neg) => {
                 let zero = int(0).get_type().const_zero();
                 self.checked("llvm.ssub.with.overflow", zero, int(0))?
+                    .into()
             }
-            PrimitiveFn::Unary(UnOp::Not | UnOp::BitNot) => self.builder.build_not(int(0), "")?,
-            PrimitiveFn::ChoiceTag => self
-                .builder
-                .build_extract_value(args[0].into_struct_value(), 0, "")?
-                .into_int_value(),
-            PrimitiveFn::OptionTag => int(0),
+            PrimitiveFn::Unary(UnOp::Not | UnOp::BitNot) => {
+                self.builder.build_not(int(0), "")?.into()
+            }
+            PrimitiveFn::ChoiceTag => {
+                self.builder
+                    .build_extract_value(args[0].into_struct_value(), 0, "")?
+            }
+            PrimitiveFn::OptionTag => int(0).into(),
+            PrimitiveFn::CallFn => self.call_function_value(args[0], args[1], returns)?,
+            PrimitiveFn::CallOption => {
+                let ty = self.types[returns].into_struct_type();
+                self.choose(ty, int(0), args[1])?
+            }
         }))
+    }
+
+    /// Calls the function that `pointer` points to, whose parameters are the
+    /// elements of the tuple `input`, returning a value of the type at
+    /// `returns` in `program.types`.
+    fn call_function_value(
+        &mut self,
+        pointer: BasicValueEnum<'ctx>,
+        input: BasicValueEnum<'ctx>,
+        returns: usize,
+    ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+        // A function's `Input` is always a tuple, but an `Fn` with any other
+        // `Input` can still be called, though it never has a value.
+        let args = match input {
+            BasicValueEnum::StructValue(input) => (0..input.get_type().count_fields())
+                .map(|index| self.builder.build_extract_value(input, index, ""))
+                .collect::<Result<Vec<_>, _>>()?,
+            input => vec![input],
+        };
+        let params: Vec<_> = args.iter().map(|arg| arg.get_type().into()).collect();
+        let fn_type = self.types[returns].fn_type(&params, false);
+        let args: Vec<_> = args.into_iter().map(Into::into).collect();
+        Ok(self
+            .builder
+            .build_indirect_call(fn_type, pointer.into_pointer_value(), &args, "")?
+            .try_as_basic_value()
+            .basic()
+            .expect("every function returns a value, even if it's `Void`"))
     }
 
     /// Builds `op` on `lhs` and `rhs`, which are signed integers if `signed`
@@ -574,12 +580,14 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .iter()
                     .map(|arg| self.expr(arg))
                     .collect::<Result<Vec<_>, BuilderError>>()?;
-                // A primitive that's a single instruction, such as `==` on
-                // integers, is built in place rather than called.
-                if let Body::Primitive(primitive) = self.program.functions[*function].body
-                    && let Some(result) = self.primitive_instruction(primitive, &args)?
+                // A primitive, such as `==` on integers, is built in place
+                // rather than called.
+                let callee = &self.program.functions[*function];
+                if let Body::Primitive(primitive) = callee.body
+                    && let Some(result) =
+                        self.primitive_instruction(primitive, &args, callee.returns)?
                 {
-                    return Ok(result.into());
+                    return Ok(result);
                 }
                 let args: Vec<_> = args.into_iter().map(Into::into).collect();
                 self.builder
@@ -3185,6 +3193,32 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 133);
+    }
+
+    #[test]
+    fn function_values_are_called_with_their_input_unpacked() {
+        // An `Fn` whose `Input` isn't a tuple never has a value, but it can
+        // still be called.
+        let src = "
+            fn subtract(_ a: Int, from b: Int) -> Int {
+                return b - a
+            }
+
+            fn none() -> Int {
+                return 4
+            }
+
+            fn never(_ function: Fn<Int, Int>) -> Int {
+                return function.call(input: 1)
+            }
+
+            fn main() -> Int {
+                let minus = subtract
+                let four = none
+                return minus(2, from: 10) * 10 + minus.call(input: (1, from: 3)) + four()
+            }
+            ";
+        assert_eq!(run(src), 86);
     }
 
     #[test]
