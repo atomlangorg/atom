@@ -331,70 +331,16 @@ impl<'a> Checker<'a> {
         let template = self.std_template("Fn");
         self.instance(template, vec![input, returns?], span)
     }
-    /// `function` as a value, which compiles to a pointer to a function taking
-    /// its `Input` as a single parameter, so that every `Fn` can be called in
-    /// the same way. It's used by the code at `span`.
+    /// `function` as a value, which compiles to a pointer to it. Calling it
+    /// unpacks its `Input` into its parameters. It's used by the code at
+    /// `span`.
     pub(super) fn function_value(&mut self, function: FnRef, span: Span) -> Typed {
         let Some(ty) = self.function_type(&function, span) else {
             return Typed::UNKNOWN;
         };
-        let index = match self.function_values.get(&function.index) {
-            Some(&index) => index,
-            None => self.single_input_function(function.index, span),
-        };
-        let value = FnRef {
-            index,
-            args: function.args,
-        };
         Typed {
             ty: Some(ty),
-            expr: ir::Expr::Function(self.callee(value, span)),
+            expr: ir::Expr::Function(self.callee(function, span)),
         }
-    }
-    /// Makes a function that calls the function at `index` in `functions` with
-    /// the elements of its `Input` as a single parameter, returning its index
-    /// in `functions`. It's for the same generic type as the function, if
-    /// any, so it's only made once. It's used by the code at `span`.
-    pub(super) fn single_input_function(&mut self, index: usize, span: Span) -> usize {
-        let function = self.own_fn(index);
-        let ty = self
-            .function_type(&function, span)
-            .expect("the function's type is known");
-        let (_, fn_args) = self.types[ty.id].instance.as_ref().expect("made from `Fn`");
-        let input = fn_args[0].id;
-        let Signature {
-            name,
-            params,
-            returns,
-            template,
-        } = self.functions[index].clone();
-        let returns = returns.expect("the function's type is known");
-        let args = (0..params.len())
-            .map(|index| ir::Expr::Field {
-                receiver: Box::new(ir::Expr::Local(0)),
-                index,
-            })
-            .collect();
-        let call = self.callee(function, span);
-        let value = self.functions.len();
-        let value_name = format!("{name}.value");
-        self.functions.push(Signature {
-            name: value_name.clone(),
-            params: vec![],
-            returns: Some(returns.clone()),
-            template,
-        });
-        self.lowered_functions.push(Some(ir::Function {
-            name: value_name,
-            locals: vec![input],
-            params: 1,
-            returns: returns.id,
-            body: ir::Body::Stmts(vec![ir::Stmt::Return(ir::Expr::Call {
-                function: call,
-                args,
-            })]),
-        }));
-        self.function_values.insert(index, value);
-        value
     }
 }

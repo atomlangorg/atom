@@ -18,32 +18,9 @@
 
 use super::*;
 
-/// The names in the tuple type `ty` that are `Self` or one of `aliases`,
-/// which stand for a different type in each `impl` of a trait.
-pub(super) fn trait_names<'b>(
-    ty: &'b TypeName,
-    aliases: &'b [String],
-) -> Box<dyn Iterator<Item = &'b Name> + 'b> {
-    match ty {
-        TypeName::Named(name) if name.file.is_none() => {
-            let is_trait_name = name.name == "Self" || aliases.contains(&name.name);
-            Box::new(is_trait_name.then_some(name).into_iter())
-        }
-        TypeName::Named(_) | TypeName::SelfParam(..) => Box::new(iter::empty()),
-        TypeName::Tuple(elements) => Box::new(
-            elements
-                .iter()
-                .flat_map(move |element| trait_names(&element.ty, aliases)),
-        ),
-        TypeName::Generic { args, .. } => {
-            Box::new(args.iter().flat_map(move |arg| trait_names(arg, aliases)))
-        }
-    }
-}
-
 /// How `function` is written in its trait, such as `fn and(_ rhs: Self) ->
 /// Bool`, for messages.
-pub(super) fn signature_text(function: &TraitFunction) -> String {
+pub(super) fn signature_text(function: &Function) -> String {
     let params: Vec<_> = function.params.iter().map(ToString::to_string).collect();
     let static_ = if function.is_static { "static " } else { "" };
     let returns = if function.ret.is_void() {
@@ -67,8 +44,8 @@ impl<'a> Checker<'a> {
         ty: &'a Name,
         self_ty: Option<Type>,
         with: Option<&'a Name>,
-        aliases: &'a [ImplAlias],
-        functions: &'a [ImplFunction],
+        aliases: &'a [ast::Alias],
+        functions: &'a [Function],
     ) -> Vec<(usize, Pending<'a>)> {
         // A generic type's functions are named with its parameters, and each
         // type made from it names them with its arguments.
@@ -91,37 +68,33 @@ impl<'a> Checker<'a> {
         });
         let mut indexes = vec![];
         self.in_impl(self_ty.clone(), impl_aliases, |checker| {
-            for ImplFunction {
-                is_static,
-                is_primitive,
-                function,
-            } in functions
-            {
+            for function in functions {
                 let name = format!("{type_name}.{}", function.name);
                 let full_name = checker.full_name(&name);
                 let index = checker.declare_method(
                     self_ty.as_ref(),
                     (&function.name, &function.params, &function.ret),
                     function.span,
-                    *is_static,
+                    function.is_static,
                     full_name,
                 );
                 indexes.push(index);
-                let kind = if *is_static {
+                let kind = if function.is_static {
                     FnKind::Static(self_ty.clone())
                 } else {
                     FnKind::Method(self_ty.clone())
                 };
-                if *is_primitive {
+                // Only a `primitive fn` has no body in an `impl`.
+                let Some(body) = &function.body else {
                     let owner = Some(ty.name.as_str());
                     checker.define_primitive_fn(index, owner, &function.name, function.span, kind);
                     continue;
-                }
+                };
                 let body = Pending::Fn {
                     index,
                     name: &function.name,
                     span: function.span,
-                    body: &function.body,
+                    body,
                     kind,
                     aliases: impl_aliases,
                 };
@@ -165,8 +138,8 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &'a str,
         span: Span,
-        aliases: &'a [String],
-        functions: &'a [TraitFunction],
+        aliases: &'a [ast::Alias],
+        functions: &'a [Function],
     ) {
         self.traits.push(TraitInfo {
             name,
@@ -197,8 +170,8 @@ impl<'a> Checker<'a> {
         let mut function_names = HashSet::new();
         let redeclared = aliases
             .iter()
-            .filter(|alias| !alias_names.insert(*alias))
-            .map(|alias| (span, alias))
+            .filter(|alias| !alias_names.insert(&alias.name))
+            .map(|alias| (span, &alias.name))
             .chain(
                 functions
                     .iter()
@@ -221,7 +194,7 @@ impl<'a> Checker<'a> {
         // The signatures are resolved with `Self` and the aliases standing
         // for their stand-ins.
         let stand_ins: Vec<_> = iter::once("Self")
-            .chain(aliases.iter().map(String::as_str))
+            .chain(aliases.iter().map(|alias| alias.name.as_str()))
             .map(|name| Type {
                 id: self.add_type(name.to_string(), file, TypeKind::Group(vec![])),
                 name: name.to_string(),
@@ -229,8 +202,8 @@ impl<'a> Checker<'a> {
             })
             .collect();
         let alias_types = aliases.iter().zip(&stand_ins[1..]);
-        let alias_types =
-            alias_types.map(|(alias, ty)| (alias.as_str(), ImplAliasType::Known(Some(ty.clone()))));
+        let alias_types = alias_types
+            .map(|(alias, ty)| (alias.name.as_str(), ImplAliasType::Known(Some(ty.clone()))));
         self.impl_aliases.push(alias_types.collect());
         let alias_types = Some(self.impl_aliases.len() - 1);
         let signatures = self.in_impl(Some(stand_ins[0].clone()), alias_types, |checker| {
@@ -239,26 +212,14 @@ impl<'a> Checker<'a> {
                 let params = function
                     .params
                     .iter()
-                    .map(|param| checker.trait_type(aliases, &param.ty))
+                    .map(|param| checker.resolve_type(&param.ty))
                     .collect();
-                signatures.push((params, checker.trait_type(aliases, &function.ret)));
+                signatures.push((params, checker.resolve_type(&function.ret)));
             }
             signatures
         });
         self.traits[index].stand_ins = stand_ins;
         self.traits[index].signatures = signatures;
-    }
-    /// Resolves the type `ty` in the signature of a trait with `aliases`.
-    pub(super) fn trait_type(&mut self, aliases: &[String], ty: &TypeName) -> Option<Type> {
-        // `Self` and the aliases are a different type in each `impl`, so
-        // they can't be inside another type, which is always the same.
-        if !matches!(ty, TypeName::Named(_))
-            && let Some(name) = trait_names(ty, aliases).next()
-        {
-            self.error(name.span, CheckError::TraitTypeInTuple(name.name.clone()));
-            return None;
-        }
-        self.resolve_type(ty)
     }
     /// Works out the types of an `impl`'s `aliases`, which can use `Self`
     /// and the aliases before them, returning their index in `impl_aliases`
@@ -270,7 +231,7 @@ impl<'a> Checker<'a> {
     /// they can't be used.
     pub(super) fn define_impl_aliases(
         &mut self,
-        aliases: &'a [ImplAlias],
+        aliases: &'a [ast::Alias],
         trait_index: Option<usize>,
     ) -> Option<usize> {
         if aliases.is_empty() && trait_index.is_none() {
@@ -280,13 +241,15 @@ impl<'a> Checker<'a> {
             .map(|index| self.traits[index].aliases)
             .unwrap_or_default()
             .iter()
-            .filter(|declared| !aliases.iter().any(|alias| alias.name == **declared))
-            .map(|declared| (declared.as_str(), ImplAliasType::Inferring));
+            .filter(|declared| !aliases.iter().any(|alias| alias.name == declared.name))
+            .map(|declared| (declared.name.as_str(), ImplAliasType::Inferring));
         self.impl_aliases.push(inferred.collect());
         let index = self.impl_aliases.len() - 1;
         self.cx.impl_aliases = Some(index);
         for alias in aliases {
-            let ty = ImplAliasType::Known(self.resolve_type(&alias.ty));
+            // Only a `trait`'s aliases have no type.
+            let ty = alias.ty.as_ref().and_then(|ty| self.resolve_type(ty));
+            let ty = ImplAliasType::Known(ty);
             if self.impl_aliases[index].insert(&alias.name, ty).is_some() {
                 self.error(alias.span, CheckError::Redeclared(alias.name.clone()));
             }
@@ -294,81 +257,112 @@ impl<'a> Checker<'a> {
         Some(index)
     }
     /// Infers the types of the aliases of `impl ty with trait_name` that it
-    /// doesn't give, at `aliases` in `impl_aliases`. Each is the type that
-    /// `functions`, each with its index into `functions`, have where the
-    /// trait at `trait_index` in `traits` uses the alias, such as
-    /// `alias Rhs = Bool` from `fn and(_ rhs: Bool)` for `fn and(_ rhs: Rhs)`.
-    /// The first use decides it, and other uses must match it.
+    /// doesn't give, at `aliases` in `impl_aliases`, from `functions`, each
+    /// with its index into `functions`, as a generic type's arguments are
+    /// inferred from a call. Each is what the alias is where the trait at
+    /// `trait_index` in `traits` uses it, such as `alias Rhs = Bool` from
+    /// `fn and(_ rhs: Bool)` for `fn and(_ rhs: Rhs)`. The first use decides
+    /// it, and other uses must match it.
     pub(super) fn infer_impl_aliases(
         &mut self,
         ty: &Name,
         trait_name: &Name,
         trait_index: usize,
         aliases: usize,
-        functions: &[(&ImplFunction, &usize)],
+        functions: &[(&Function, &usize)],
     ) {
         let trait_ = &self.traits[trait_index];
-        let mut inferred = vec![];
+        let alias_stand_ins = &trait_.stand_ins[1..];
+        let mut inferred = vec![None; alias_stand_ins.len()];
+        // Whether an alias is used where the `impl`'s type is unknown, which
+        // has already been reported, and might have shown what it is.
+        let mut unknown = vec![false; alias_stand_ins.len()];
+        for (declared, (params, returns)) in trait_.functions.iter().zip(&trait_.signatures) {
+            let Some(&(_, &index)) = functions
+                .iter()
+                .find(|(function, _)| function.name == declared.name)
+            else {
+                continue;
+            };
+            let signature = &self.functions[index];
+            let found = signature.params.iter().map(|param| &param.ty);
+            let types = params
+                .iter()
+                .zip(found)
+                .chain(iter::once((returns, &signature.returns)));
+            for (expected, found) in types {
+                match (expected, found) {
+                    (Some(expected), Some(found)) => {
+                        self.infer(expected, found, alias_stand_ins, &mut inferred);
+                    }
+                    (Some(expected), None) => {
+                        for (unknown, stand_in) in unknown.iter_mut().zip(alias_stand_ins) {
+                            *unknown |= self.mentions(expected, stand_in);
+                        }
+                    }
+                    (None, _) => {}
+                }
+            }
+        }
+
         let mut errors = vec![];
-        for (name, stand_in) in trait_.aliases.iter().zip(&trait_.stand_ins[1..]) {
+        let mut known = vec![];
+        let found = inferred.into_iter().zip(unknown);
+        for ((alias, stand_in), (found, unknown)) in
+            trait_.aliases.iter().zip(alias_stand_ins).zip(found)
+        {
+            let name = alias.name.as_str();
             if !matches!(
-                self.impl_aliases[aliases].get(name.as_str()),
+                self.impl_aliases[aliases].get(name),
                 Some(ImplAliasType::Inferring)
             ) {
                 continue;
             }
-            let is_alias = |expected: &Option<Type>| expected.as_ref() == Some(stand_in);
-            let uses_alias =
-                |(params, returns): &(Vec<_>, _)| params.iter().any(is_alias) || is_alias(returns);
             // A function that's missing is reported by `check_implements`,
             // unless it has a default implementation, which can't show what
             // the alias is.
-            let missing_use =
-                trait_
-                    .functions
-                    .iter()
-                    .zip(&trait_.signatures)
-                    .any(|(declared, signature)| {
-                        declared.body.is_none()
-                            && uses_alias(signature)
-                            && !functions
-                                .iter()
-                                .any(|(function, _)| function.function.name == declared.name)
-                    });
-            // Where the `impl`'s functions have the alias.
-            let found = trait_.functions.iter().zip(&trait_.signatures).find_map(
+            let missing_use = trait_.functions.iter().zip(&trait_.signatures).any(
                 |(declared, (params, returns))| {
-                    let &(_, &index) = functions
-                        .iter()
-                        .find(|(function, _)| function.function.name == declared.name)?;
-                    let signature = &self.functions[index];
-                    let found = signature.params.iter().map(|param| &param.ty);
-                    params
-                        .iter()
-                        .zip(found)
-                        .chain(iter::once((returns, &signature.returns)))
-                        .find(|(expected, _)| is_alias(expected))
-                        .map(|(_, found)| found.clone())
+                    declared.body.is_none()
+                        && iter::once(returns)
+                            .chain(params)
+                            .flatten()
+                            .any(|ty| self.mentions(ty, stand_in))
+                        && !functions
+                            .iter()
+                            .any(|(function, _)| function.name == declared.name)
                 },
             );
-            if found.is_none() && !missing_use {
+            if found.is_none() && !unknown && !missing_use {
                 errors.push((
                     trait_name.span,
                     CheckError::UninferableAlias {
                         ty: ty.to_string(),
                         trait_name: trait_name.to_string(),
-                        alias: name.clone(),
+                        alias: name.to_string(),
                     },
                 ));
             }
-            inferred.push((name, found.flatten()));
+            known.push((name, found));
         }
-        for (name, ty) in inferred {
+        for (name, ty) in known {
             self.impl_aliases[aliases].insert(name, ImplAliasType::Known(ty));
         }
         for (span, error) in errors {
             self.error(span, error);
         }
+    }
+    /// Whether `ty` is `part` or contains it, as an argument of a generic
+    /// type or an element of a tuple, however deeply.
+    pub(super) fn mentions(&self, ty: &Type, part: &Type) -> bool {
+        if ty == part {
+            return true;
+        }
+        let parts = match self.found_args(ty) {
+            Some((_, args)) => args,
+            None => self.element_types(ty),
+        };
+        parts.iter().any(|ty| self.mentions(ty, part))
     }
     /// Declares the default implementations that `impl ty with` the trait at
     /// `trait_index` in `traits` uses, since it doesn't implement them in
@@ -382,13 +376,13 @@ impl<'a> Checker<'a> {
         type_name: &str,
         self_ty: Option<&Type>,
         trait_index: usize,
-        functions: &'a [ImplFunction],
+        functions: &'a [Function],
         aliases: Option<usize>,
     ) -> Vec<(usize, Pending<'a>)> {
-        let is_implemented = |declared: &TraitFunction| {
+        let is_implemented = |declared: &Function| {
             functions
                 .iter()
-                .any(|implemented| implemented.function.name == declared.name)
+                .any(|implemented| implemented.name == declared.name)
         };
         let declared = self.traits[trait_index].functions;
         // A missing function is reported, so the defaults that might call it
@@ -464,7 +458,7 @@ impl<'a> Checker<'a> {
     pub(super) fn check_implements(
         &mut self,
         implementation: Implementation,
-        functions: Vec<(&ImplFunction, usize)>,
+        functions: Vec<(&Function, usize)>,
     ) {
         let Implementation {
             ty,
@@ -474,30 +468,52 @@ impl<'a> Checker<'a> {
             aliases,
             alias_types,
         } = implementation;
-        let trait_ = &self.traits[index];
-        // What `Self` and each alias stand for in this `impl`, or `None` for
-        // an alias that couldn't be worked out.
+        let trait_ = self.traits[index].clone();
+        // What `Self` and each alias stand for in this `impl`. An alias that
+        // couldn't be worked out has already been reported, so the types
+        // that use it aren't compared.
         let alias_type = |alias: &str| match self.impl_aliases[alias_types?].get(alias)? {
-            ImplAliasType::Known(ty) => ty.as_ref(),
+            ImplAliasType::Known(ty) => ty.clone(),
             ImplAliasType::Inferring => None,
         };
-        let stands_for: HashMap<_, _> = iter::once(Some(self_ty))
-            .chain(trait_.aliases.iter().map(|alias| alias_type(alias)))
-            .zip(&trait_.stand_ins)
-            .map(|(ty, stand_in)| (stand_in.id, ty))
+        let stands_for: Vec<_> = iter::once(Some(self_ty.clone()))
+            .chain(trait_.aliases.iter().map(|alias| alias_type(&alias.name)))
             .collect();
-        let matches = |found: &Option<Type>, expected: &Option<Type>| match (found, expected) {
-            (Some(found), Some(expected)) => match stands_for.get(&expected.id) {
-                Some(stands_for) => stands_for.is_none_or(|expected| found == expected),
-                None => found == expected,
-            },
-            // An unknown type has already been reported.
-            _ => true,
+        let params: HashMap<_, _> = trait_
+            .stand_ins
+            .iter()
+            .zip(&stands_for)
+            .filter_map(|(stand_in, ty)| Some((stand_in.id, ty.clone()?)))
+            .collect();
+        let unknown: Vec<_> = trait_
+            .stand_ins
+            .iter()
+            .zip(&stands_for)
+            .filter(|(_, ty)| ty.is_none())
+            .map(|(stand_in, _)| stand_in.clone())
+            .collect();
+        let matches = |checker: &mut Self, found: &Option<Type>, expected: &Option<Type>| {
+            match (found, expected) {
+                (Some(found), Some(expected))
+                    if !unknown
+                        .iter()
+                        .any(|alias| checker.mentions(expected, alias)) =>
+                {
+                    let expected = checker.substitute(expected, &params, trait_name.span);
+                    expected.is_none_or(|expected| *found == expected)
+                }
+                // An unknown type has already been reported.
+                _ => true,
+            }
         };
 
         let mut errors = vec![];
         for alias in aliases {
-            if !trait_.aliases.contains(&alias.name) {
+            if !trait_
+                .aliases
+                .iter()
+                .any(|declared| declared.name == alias.name)
+            {
                 errors.push((
                     alias.span,
                     CheckError::NotInTrait {
@@ -507,15 +523,7 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
-        for &(
-            ImplFunction {
-                is_static,
-                function,
-                ..
-            },
-            implemented,
-        ) in &functions
-        {
+        for &(function, implemented) in &functions {
             let Some(position) = trait_
                 .functions
                 .iter()
@@ -532,8 +540,8 @@ impl<'a> Checker<'a> {
             };
             let declared = &trait_.functions[position];
             let (params, returns) = &trait_.signatures[position];
-            let signature = &self.functions[implemented];
-            let same = *is_static == declared.is_static
+            let signature = self.functions[implemented].clone();
+            let same = function.is_static == declared.is_static
                 && signature.params.len() == params.len()
                 && signature
                     .params
@@ -541,9 +549,9 @@ impl<'a> Checker<'a> {
                     .zip(&declared.params)
                     .zip(params)
                     .all(|((found, declared), expected)| {
-                        found.label == declared.label && matches(&found.ty, expected)
+                        found.label == declared.label && matches(self, &found.ty, expected)
                     })
-                && matches(&signature.returns, returns);
+                && matches(self, &signature.returns, returns);
             if !same {
                 errors.push((
                     function.span,
@@ -562,7 +570,7 @@ impl<'a> Checker<'a> {
         {
             if !functions
                 .iter()
-                .any(|(implemented, _)| implemented.function.name == declared.name)
+                .any(|(implemented, _)| implemented.name == declared.name)
             {
                 errors.push((
                     trait_name.span,

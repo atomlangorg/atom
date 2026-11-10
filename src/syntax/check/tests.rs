@@ -4820,6 +4820,63 @@ fn inferred_aliases_must_be_used_consistently() {
 }
 
 #[test]
+fn traits_can_use_self_and_aliases_inside_other_types() {
+    let wrap = format!(
+        "
+        {GENERICS}
+        trait Wrap {{
+            alias Inner
+            fn wrap(_ value: Inner) -> Optional<Self>
+            fn pair(with other: (first: Self, second: Inner)) -> Box<Inner>
+        }}
+        "
+    );
+    // `Inner` is inferred from inside another type as well.
+    let src = format!(
+        "
+        {wrap}
+        impl Int with Wrap {{
+            fn wrap(_ value: Bool) -> Optional<Int> {{
+                return Optional.none()
+            }}
+            fn pair(with other: (first: Int, second: Bool)) -> Box<Bool> {{
+                return Box.of(other.second)
+            }}
+        }}
+
+        impl Bool with Wrap {{
+            fn pair(with other: (first: Bool, second: Int)) -> Box<Int> {{
+                return Box.of(other.second)
+            }}
+            fn wrap(_ value: Int) -> Optional<Bool> {{
+                return Optional.some(value: true)
+            }}
+        }}
+        "
+    );
+    assert_eq!(check_top(&src), Ok(()));
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {wrap}
+            impl Int with Wrap {{
+                fn wrap(_ value: Bool) -> Optional<Bool> {{
+                    return Optional.none()
+                }}
+                fn pair(with other: (first: Int, second: Int)) -> Box<Bool> {{
+                    return Box.of(true)
+                }}
+            }}
+            "
+        )),
+        [
+            "trait `Wrap` declares this function as `fn wrap(_ value: Inner) -> Optional<Self>`",
+            "trait `Wrap` declares this function as `fn pair(with other: (first: Self, second: Inner)) -> Box<Inner>`",
+        ]
+    );
+}
+
+#[test]
 fn inferred_aliases_cannot_be_used_in_signatures() {
     let src = format!(
         "
@@ -7078,11 +7135,7 @@ fn tuples_can_be_in_any_type() {
             fn f(x: (y: Missing)) {}
             "
         ),
-        [
-            "`Node` contains itself",
-            "`Self` can't be used inside another type in a trait's signatures, since it's a different type in each `impl`",
-            "unknown type `Missing`",
-        ]
+        ["`Node` contains itself", "unknown type `Missing`",]
     );
 }
 

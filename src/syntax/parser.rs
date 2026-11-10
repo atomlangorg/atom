@@ -14,21 +14,18 @@
  * limitations under the License.
  */
 
-use std::fmt;
-
 use chumsky::{
     extra::ParserExtra,
     input::{MapExtra, Stream, ValueInput},
-    inspector::TruncateState,
     pratt::{infix, left, prefix},
     prelude::*,
 };
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, ImplAlias,
-        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind,
-        Program, Span, Stmt, StmtKind, TraitFunction, TupleElement, TuplePattern, TypeName, UnOp,
+        Alias, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, Import,
+        ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
+        StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
 };
@@ -44,66 +41,21 @@ impl From<SimpleSpan> for Span {
     }
 }
 
-/// A problem that doesn't stop a program from compiling, such as a matter of
-/// style. Unlike errors, warnings never stop parsing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Warning {
-    pub span: SimpleSpan,
-    pub kind: WarningKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WarningKind {
-    /// A list whose closing bracket is on the same line as its last item ends
-    /// with a comma. The span is the comma.
-    RedundantTrailingComma,
-    /// A list whose closing bracket is on its own line doesn't end with a
-    /// comma. The span is empty, just after the last item.
-    MissingTrailingComma,
-}
-
-impl fmt::Display for Warning {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.kind {
-            WarningKind::RedundantTrailingComma => {
-                write!(f, "redundant trailing comma in a list on one line")
-            }
-            WarningKind::MissingTrailingComma => {
-                write!(f, "missing trailing comma in a list over several lines")
-            }
-        }
-    }
-}
-
-/// Parser state that collects warnings. Warnings from parsers that are
-/// backtracked out of are dropped.
-type Extra<'tok, 'src> = extra::Full<Rich<'tok, Token<'src>>, TruncateState<Warning>, ()>;
+type Extra<'tok, 'src> = extra::Err<Rich<'tok, Token<'src>>>;
 
 /// Lexes and parses `src` into a program.
 pub fn parse(src: &str) -> Result<Program, Vec<ParseError<'_>>> {
-    parse_with_warnings(src).0
-}
-
-/// Lexes and parses `src` into a program, also returning any warnings,
-/// which are found even if parsing fails.
-pub fn parse_with_warnings(src: &str) -> (Result<Program, Vec<ParseError<'_>>>, Vec<Warning>) {
     let tokens = lexer::tokens(src).map(|(tok, span)| (tok, span.into()));
     parse_tokens(tokens, src.len())
 }
 
-/// Parses `tokens` into a program, also returning any warnings. The source
-/// ends at the byte `end`.
+/// Parses `tokens` into a program. The source ends at the byte `end`.
 fn parse_tokens<'src>(
     tokens: impl Iterator<Item = (Token<'src>, SimpleSpan)> + 'src,
     end: usize,
-) -> (Result<Program, Vec<ParseError<'src>>>, Vec<Warning>) {
+) -> Result<Program, Vec<ParseError<'src>>> {
     let stream = Stream::from_iter(tokens).map((end..end).into(), |(t, s)| (t, s));
-
-    let mut warnings = TruncateState(vec![]);
-    let result = program_parser()
-        .parse_with_state(stream, &mut warnings)
-        .into_result();
-    (result, warnings.0)
+    program_parser().parse(stream).into_result()
 }
 
 /// Combines the operands of a binary operator into an expression.
@@ -133,25 +85,96 @@ fn void_type(span: Span) -> TypeName {
     })
 }
 
+/// A line in an `impl` or `trait`, which are collected into its aliases and
+/// functions.
+enum Member {
+    Alias(Alias),
+    Function(Function),
+}
+
+/// The aliases and functions of `members`, in order.
+fn split(members: Vec<Member>) -> (Vec<Alias>, Vec<Function>) {
+    let mut aliases = vec![];
+    let mut functions = vec![];
+    for member in members {
+        match member {
+            Member::Alias(alias) => aliases.push(alias),
+            Member::Function(function) => functions.push(function),
+        }
+    }
+    (aliases, functions)
+}
+
+/// Where a function or alias is declared, which decides how it's written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// A block, or the top level of a file.
+    Stmt,
+    Impl,
+    Trait,
+}
+
+impl Place {
+    /// What's wrong with `function` here, if anything, which is a `primitive
+    /// fn` if `is_primitive`.
+    fn function_error(self, function: &Function, is_primitive: bool) -> Option<&'static str> {
+        match self {
+            Self::Stmt if function.is_static => {
+                Some("only an `impl` or `trait` can have a `static fn`")
+            }
+            Self::Trait if is_primitive => Some("a `trait` can't have a `primitive fn`"),
+            Self::Trait => None,
+            _ if is_primitive && function.body.is_some() => {
+                Some("a `primitive fn` has no body, since the compiler implements it")
+            }
+            _ if !is_primitive && function.body.is_none() => Some("expected the function's body"),
+            _ => None,
+        }
+    }
+
+    /// What's wrong with `alias` here, if anything.
+    fn alias_error(self, alias: &Alias) -> Option<&'static str> {
+        match (self, &alias.ty) {
+            (Self::Trait, Some(_)) => {
+                Some("a `trait`'s alias has no type, since each `impl` gives one")
+            }
+            (Self::Stmt | Self::Impl, None) => Some("expected `=` and the type it stands for"),
+            _ => None,
+        }
+    }
+}
+
+/// `item`s, one per line, with blank lines allowed anywhere, as in a block
+/// or a file.
+fn lines<'tok, 'src: 'tok, I, T>(
+    item: impl Parser<'tok, I, T, Extra<'tok, 'src>> + Clone,
+) -> impl Parser<'tok, I, Vec<T>, Extra<'tok, 'src>> + Clone
+where
+    I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+{
+    let newlines = just(Token::Newline).repeated();
+    newlines.clone().ignore_then(
+        item.separated_by(newlines.at_least(1))
+            .allow_trailing()
+            .collect(),
+    )
+}
+
+/// `lines` of `item` between `{` and `}`, as in a block, group or `impl`.
+/// The `{` must be on the same line as what comes before it.
+fn braced_lines<'tok, 'src: 'tok, I, T>(
+    item: impl Parser<'tok, I, T, Extra<'tok, 'src>> + Clone,
+) -> impl Parser<'tok, I, Vec<T>, Extra<'tok, 'src>> + Clone
+where
+    I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+{
+    lines(item).delimited_by(just(Token::LBrace), just(Token::RBrace))
+}
+
 /// A comma-separated list of `item`s between `open` and `close`, as in a
-/// call, constructor or function's parameters. It can be split over several
-/// lines after `open`, after each comma, and before `close`.
-///
-/// A line in an `impl`, which are collected into its aliases and functions.
-enum ImplItem {
-    Alias(ImplAlias),
-    Function(ImplFunction),
-}
-
-/// A line in a `trait`, which are collected into its aliases and functions.
-enum TraitItem {
-    Alias(String),
-    Function(TraitFunction),
-}
-
-/// A list whose `close` is on its own line should end with a comma, so that
-/// adding an item only changes one line. Otherwise it shouldn't. Either way,
-/// this is a warning rather than an error.
+/// call, constructor or function's parameters, which can end with a comma.
+/// It can be split over several lines after `open`, after each comma, and
+/// before `close`.
 fn comma_list<'tok, 'src: 'tok, I, T>(
     item: impl Parser<'tok, I, T, Extra<'tok, 'src>> + Clone,
     open: Token<'src>,
@@ -161,40 +184,18 @@ where
     I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
 {
     let line_breaks = just(Token::Newline).repeated();
-    let item = item.map_with(|item, e| (item, e.span()));
-    let trailing_comma = just(Token::Comma).map_with(|_, e| e.span());
-
+    let comma = just(Token::Comma).then(line_breaks.clone());
     just(open)
         .then(line_breaks.clone())
-        .ignore_then(
-            item.separated_by(just(Token::Comma).then(line_breaks.clone()))
-                .collect::<Vec<_>>(),
-        )
-        .then(trailing_comma.or_not())
-        .then(line_breaks.count())
+        .ignore_then(item.separated_by(comma.clone()).collect::<Vec<_>>())
+        .then(comma.map_with(|_, e| e.span()).or_not())
+        .then_ignore(line_breaks)
         .then_ignore(just(close))
-        .validate(|((items, comma), newlines_before_close), e, emitter| {
-            let close_on_own_line = newlines_before_close > 0;
-            let last = items.last().map(|(_, span): &(T, SimpleSpan)| *span);
-            let warning = match (last, comma) {
-                (None, Some(comma)) => {
-                    emitter.emit(Rich::custom(comma, "expected a value before `,`"));
-                    None
-                }
-                (Some(_), Some(comma)) if !close_on_own_line => Some(Warning {
-                    span: comma,
-                    kind: WarningKind::RedundantTrailingComma,
-                }),
-                (Some(last), None) if close_on_own_line => Some(Warning {
-                    span: (last.end..last.end).into(),
-                    kind: WarningKind::MissingTrailingComma,
-                }),
-                _ => None,
-            };
-            if let Some(warning) = warning {
-                e.state().0.push(warning);
+        .validate(|(items, comma), _, emitter| {
+            if let (true, Some(comma)) = (items.is_empty(), comma) {
+                emitter.emit(Rich::custom(comma, "expected a value before `,`"));
             }
-            items.into_iter().map(|(item, _)| item).collect()
+            items
         })
 }
 
@@ -580,8 +581,6 @@ where
             span: Span::from(e.span()),
         });
 
-    let newlines = just(Token::Newline).repeated();
-
     // `let name: Type` or `var name: Type`. A value is parsed only so that it
     // can be reported clearly.
     let field = mutability
@@ -600,8 +599,6 @@ where
             }
         });
 
-    // Like a block, one field per line with blank lines allowed, and the `{`
-    // on the same line as `group`.
     // `<T, U>` after a type's name, naming its generic parameters.
     let generic_params = ident
         .separated_by(just(Token::Comma))
@@ -611,21 +608,12 @@ where
         .or_not()
         .map(Option::unwrap_or_default);
 
+    // Like a block, one field per line.
     let group_ = just(Token::Group)
         .ignore_then(ident)
         .then(generic_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    field
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
+        .then(braced_lines(field))
         .map(|(((name, params), span), fields)| Stmt {
             kind: StmtKind::Group {
                 name,
@@ -635,15 +623,24 @@ where
             span,
         });
 
-    // `alias Name = Type`.
-    let alias = just(Token::Alias)
+    // `alias Name = Type`, or `alias Name` in a `trait`.
+    let any_alias = just(Token::Alias)
         .ignore_then(ident)
-        .then_ignore(just(Token::Eq))
-        .then(type_name.clone())
-        .map_with(|(name, ty), e| Stmt {
-            kind: StmtKind::Alias { name, ty },
+        .then(just(Token::Eq).ignore_then(type_name.clone()).or_not())
+        .map_with(|(name, ty), e| Alias {
+            name,
+            ty,
             span: Span::from(e.span()),
-        });
+        })
+        .boxed();
+    let alias_in = |place: Place| {
+        any_alias.clone().validate(move |alias, e, emitter| {
+            if let Some(message) = place.alias_error(&alias) {
+                emitter.emit(Rich::custom(e.span(), message));
+            }
+            alias
+        })
+    };
 
     // `name(label: Type, ...)`, which holds a tuple of what's in brackets,
     // written like a tuple type. `name()` holds `()`.
@@ -660,17 +657,7 @@ where
         .ignore_then(ident)
         .then(generic_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    option
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
+        .then(braced_lines(option))
         .map(|(((name, params), span), options)| Stmt {
             kind: StmtKind::Choice {
                 name,
@@ -695,18 +682,19 @@ where
         })
         .boxed();
 
-    // One statement per line; blank lines are allowed anywhere.
+    // One statement per line. Only the top level can have a `primitive fn`.
     let mut stmt = Recursive::declare();
-    let (function, block) = {
-        let block = newlines
-            .clone()
-            .ignore_then(
-                stmt.clone()
-                    .separated_by(newlines.clone().at_least(1))
-                    .allow_trailing()
-                    .collect(),
-            )
-            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+    let function_in = {
+        let block = braced_lines(stmt.clone().validate(|stmt: Stmt, e, emitter| {
+            if let StmtKind::Fn(Function { body: None, .. }) = &stmt.kind {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    "only the top level can have a `primitive fn`",
+                ));
+            }
+            stmt
+        }))
+        .boxed();
 
         // The `{` must be on the same line as the `if`, and `else` on the same
         // line as the preceding `}`, so newlines never need disambiguating.
@@ -736,38 +724,54 @@ where
             .then(block.clone())
             .map(|(pattern, body)| MatchArm { pattern, body });
 
-        // Like a block, one option per line with blank lines allowed, and the
-        // `{` on the same line as `match`.
+        // Like a block, one arm per line.
         let match_ = just(Token::Match)
             .ignore_then(expr.clone())
             .map_with(|value, e| (value, Span::from(e.span())))
-            .then(
-                newlines
-                    .clone()
-                    .ignore_then(
-                        match_arm
-                            .separated_by(newlines.clone().at_least(1))
-                            .allow_trailing()
-                            .collect(),
-                    )
-                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-            )
+            .then(braced_lines(match_arm))
             .map(|((value, span), arms)| Stmt {
                 kind: StmtKind::Match { value, arms },
                 span,
             });
 
-        let function = signature
+        // `fn name(params) -> Type { ... }`, which can be a `static fn` in an
+        // `impl` or `trait`, or a `primitive fn`, which has no body. In a
+        // `trait`, its body is optional.
+        // It has a body only if one starts, so a body with an error isn't
+        // left out instead.
+        let body = block
             .clone()
-            .then(block.clone())
-            .map(|((name, params, ret, span), body)| Function {
-                name,
-                params,
-                ret,
-                body,
-                span,
-            })
+            .map(Some)
+            .or(just(Token::LBrace).not().to(None));
+        let any_function = just(Token::Static)
+            .or_not()
+            .then(just(Token::Primitive).or_not())
+            .then(signature.clone())
+            .then(body)
+            .map(
+                |(((is_static, primitive), (name, params, ret, span)), body)| {
+                    let function = Function {
+                        is_static: is_static.is_some(),
+                        name,
+                        params,
+                        ret,
+                        body,
+                        span,
+                    };
+                    (function, primitive.is_some())
+                },
+            )
             .boxed();
+        let function_in = move |place: Place| {
+            any_function
+                .clone()
+                .validate(move |(function, is_primitive), e, emitter| {
+                    if let Some(message) = place.function_error(&function, is_primitive) {
+                        emitter.emit(Rich::custom(e.span(), message));
+                    }
+                    function
+                })
+        };
 
         let return_ = just(Token::Return)
             .ignore_then(expr.clone().or_not())
@@ -808,17 +812,20 @@ where
                 .or(destructure)
                 .or(if_)
                 .or(match_)
-                .or(function.clone().map(|function| Stmt {
+                .or(function_in(Place::Stmt).map(|function| Stmt {
                     span: function.span,
                     kind: StmtKind::Fn(function),
                 }))
                 .or(group_)
                 .or(choice_)
-                .or(alias)
+                .or(alias_in(Place::Stmt).map(|alias| Stmt {
+                    span: alias.span,
+                    kind: StmtKind::Alias(alias),
+                }))
                 .or(return_)
                 .or(call),
         );
-        (function, block)
+        function_in
     };
 
     // `use /dir/other`, which can have an alias, as in `use /dir/other as
@@ -877,43 +884,9 @@ where
     // `impl Type { fn ... }`, with one function per line, like a block. Each
     // can be a method, or a `static fn`, and the standard library's can be a
     // `primitive fn`, which has no body.
-    let impl_function = just(Token::Static)
-        .or_not()
-        .then(
-            just(Token::Primitive)
-                .ignore_then(signature.clone())
-                .map(|(name, params, ret, span)| {
-                    let body = vec![];
-                    (
-                        true,
-                        Function {
-                            name,
-                            params,
-                            ret,
-                            body,
-                            span,
-                        },
-                    )
-                })
-                .or(function.map(|function| (false, function))),
-        )
-        .map(|(is_static, (is_primitive, function))| ImplFunction {
-            is_static: is_static.is_some(),
-            is_primitive,
-            function,
-        });
-    let impl_alias = just(Token::Alias)
-        .ignore_then(ident)
-        .then_ignore(just(Token::Eq))
-        .then(type_name.clone())
-        .map_with(|(name, ty), e| {
-            ImplItem::Alias(ImplAlias {
-                name,
-                ty,
-                span: Span::from(e.span()),
-            })
-        });
-
+    let impl_member = alias_in(Place::Impl)
+        .map(Member::Alias)
+        .or(function_in(Place::Impl).map(Member::Function));
     // `with` is only special here, so it can still be a label. Only a named
     // type can have an `impl`, and only a trait can follow `with`.
     let impl_ = just(Token::Impl)
@@ -924,27 +897,9 @@ where
                 .or_not(),
         )
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    impl_alias
-                        .or(impl_function.map(ImplItem::Function))
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect::<Vec<_>>(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
-        .map(|(((ty, with), span), items)| {
-            let mut aliases = vec![];
-            let mut functions = vec![];
-            for item in items {
-                match item {
-                    ImplItem::Alias(alias) => aliases.push(alias),
-                    ImplItem::Function(function) => functions.push(function),
-                }
-            }
+        .then(braced_lines(impl_member))
+        .map(|(((ty, with), span), members)| {
+            let (aliases, functions) = split(members);
             Stmt {
                 kind: StmtKind::Impl {
                     ty,
@@ -957,47 +912,17 @@ where
         });
 
     // Like an `impl`, one function per line, but each only needs its
-    // signature. A body is its default implementation.
-    let trait_function = just(Token::Static)
-        .or_not()
-        .then(signature.clone())
-        .then(block.or_not())
-        .map(
-            |((is_static, (name, params, ret, span)), body)| TraitFunction {
-                is_static: is_static.is_some(),
-                name,
-                params,
-                ret,
-                body,
-                span,
-            },
-        );
-    // `alias Name`, whose type each implementation gives.
-    let trait_alias = just(Token::Alias).ignore_then(ident).map(TraitItem::Alias);
+    // signature. A body is its default implementation. Each alias is only
+    // named, since each `impl` gives its type.
+    let trait_member = alias_in(Place::Trait)
+        .map(Member::Alias)
+        .or(function_in(Place::Trait).map(Member::Function));
     let trait_ = just(Token::Trait)
         .ignore_then(ident)
         .map_with(|name, e| (name, Span::from(e.span())))
-        .then(
-            newlines
-                .clone()
-                .ignore_then(
-                    trait_alias
-                        .or(trait_function.map(TraitItem::Function))
-                        .separated_by(newlines.clone().at_least(1))
-                        .allow_trailing()
-                        .collect::<Vec<_>>(),
-                )
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
-        .map(|((name, span), items)| {
-            let mut aliases = vec![];
-            let mut functions = vec![];
-            for item in items {
-                match item {
-                    TraitItem::Alias(alias) => aliases.push(alias),
-                    TraitItem::Function(function) => functions.push(function),
-                }
-            }
+        .then(braced_lines(trait_member))
+        .map(|((name, span), members)| {
+            let (aliases, functions) = split(members);
             Stmt {
                 kind: StmtKind::Trait {
                     name,
@@ -1008,19 +933,13 @@ where
             }
         });
 
-    // `primitive Name`, `primitive Name<T, U>`, or
-    // `primitive fn name(params) -> Type`, which the checker only allows in
-    // the standard library.
+    // `primitive Name` or `primitive Name<T, U>`, which the checker only
+    // allows in the standard library, like a `primitive fn`.
     let primitive = just(Token::Primitive)
-        .ignore_then(
-            signature
-                .map(|(name, params, ret, _)| StmtKind::PrimitiveFn { name, params, ret })
-                .or(ident
-                    .then(generic_params)
-                    .map(|(name, params)| StmtKind::Primitive { name, params })),
-        )
-        .map_with(|kind, e| Stmt {
-            kind,
+        .ignore_then(ident)
+        .then(generic_params)
+        .map_with(|(name, params), e| Stmt {
+            kind: StmtKind::Primitive { name, params },
             span: Span::from(e.span()),
         });
 
@@ -1048,15 +967,7 @@ where
                 stmt
             }));
 
-    newlines
-        .clone()
-        .ignore_then(
-            top_level_stmt
-                .separated_by(newlines.at_least(1))
-                .allow_trailing()
-                .collect(),
-        )
-        .then_ignore(end())
+    lines(top_level_stmt).then_ignore(end())
 }
 
 #[cfg(test)]
@@ -1068,7 +979,7 @@ mod tests {
     /// written. `super::parse` keeps the real spans.
     fn parse(src: &str) -> Result<Program, Vec<ParseError<'_>>> {
         let tokens = lexer::tokens(src).map(|(tok, _)| (tok, (0..0).into()));
-        parse_tokens(tokens, 0).0
+        parse_tokens(tokens, 0)
     }
 
     fn expr_node(kind: ExprKind) -> Expr {
@@ -1097,7 +1008,9 @@ mod tests {
     fn parse_body(src: &str) -> Result<Vec<Stmt>, Vec<String>> {
         match parse(&format!("fn body() {{\n{src}\n}}")) {
             Ok(mut program) => match program.remove(0).kind {
-                StmtKind::Fn(Function { body, .. }) => Ok(body),
+                StmtKind::Fn(Function {
+                    body: Some(body), ..
+                }) => Ok(body),
                 stmt => panic!("expected a function, got {stmt:?}"),
             },
             Err(errs) => Err(errs.iter().map(ToString::to_string).collect()),
@@ -1249,7 +1162,10 @@ mod tests {
             let StmtKind::Fn(function) = &program[0].kind else {
                 panic!("expected a function");
             };
-            assert_eq!(text(&src, function.body[0].span), stmt);
+            assert_eq!(
+                text(&src, function.body.as_ref().expect("has a body")[0].span),
+                stmt
+            );
         }
         for stmt in [
             "use /dir/other",
@@ -1287,7 +1203,10 @@ mod tests {
             let StmtKind::Fn(function) = &program[0].kind else {
                 panic!("expected a function");
             };
-            assert_eq!(text(&src, function.body[0].span), head);
+            assert_eq!(
+                text(&src, function.body.as_ref().expect("has a body")[0].span),
+                head
+            );
         }
         for (stmt, head) in [
             ("impl Point {}", "impl Point"),
@@ -1309,7 +1228,7 @@ mod tests {
         let StmtKind::If {
             else_block: Some(else_block),
             ..
-        } = &function.body[0].kind
+        } = &function.body.as_ref().expect("has a body")[0].kind
         else {
             panic!("expected an `if` with an `else`");
         };
@@ -1380,7 +1299,7 @@ mod tests {
         assert_eq!(text(src, ty.span), "Point");
         assert_eq!(text(src, with.as_ref().expect("has a trait").span), "Named");
         assert_eq!(text(src, aliases[0].span), "alias Rhs = Int");
-        assert_eq!(text(src, functions[0].function.span), "fn f() -> Int");
+        assert_eq!(text(src, functions[0].span), "fn f() -> Int");
         let StmtKind::Trait { functions, .. } = &program[1].kind else {
             panic!("expected a trait");
         };
@@ -1414,7 +1333,7 @@ mod tests {
         let StmtKind::Impl { functions, .. } = &program[0].kind else {
             panic!("expected an `impl`");
         };
-        let function = &functions[0].function;
+        let function = &functions[0];
         let TypeName::Named(name) = &function.params[0].ty else {
             panic!("expected a named type");
         };
@@ -1439,7 +1358,8 @@ mod tests {
         let StmtKind::Fn(function) = &program[0].kind else {
             panic!("expected a function");
         };
-        let StmtKind::Match { arms, .. } = &function.body[0].kind else {
+        let StmtKind::Match { arms, .. } = &function.body.as_ref().expect("has a body")[0].kind
+        else {
             panic!("expected a match");
         };
         let pattern = &arms[0].pattern;
@@ -2639,13 +2559,14 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "addFive".to_string(),
                 params: vec![param(Some("to"), Some("value"), "Int")],
                 ret: TypeName::new("Int"),
-                body: vec![stmt_node(StmtKind::Return(Some(expr_node(
+                body: Some(vec![stmt_node(StmtKind::Return(Some(expr_node(
                     ExprKind::Binary(var("value"), BinOp::Add, int(5),)
-                ))))],
-                span: Span::default()
+                ))))]),
+                span: Span::default(),
             }))])
         );
     }
@@ -2655,6 +2576,7 @@ mod tests {
         assert_eq!(
             parse_body("fn f(a: Int, to b: Bool, _ c: Int, _: Int, at _: Int) {}"),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "f".to_string(),
                 params: vec![
                     // A single name is both the label and the parameter name.
@@ -2666,8 +2588,8 @@ mod tests {
                     param(Some("at"), None, "Int"),
                 ],
                 ret: TypeName::new("Void"),
-                body: vec![],
-                span: Span::default()
+                body: Some(vec![]),
+                span: Span::default(),
             }))])
         );
         for src in ["fn f(_ _: Int) {}", "fn f(a b c: Int) {}", "fn f(a) {}"] {
@@ -2689,14 +2611,15 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "reset".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![
+                body: Some(vec![
                     assign("count", expr_node(ExprKind::Int(0))),
                     stmt_node(StmtKind::Return(None))
-                ],
-                span: Span::default()
+                ]),
+                span: Span::default(),
             }))])
         );
     }
@@ -2892,11 +2815,12 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "f".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![group_("Inner", vec![])],
-                span: Span::default()
+                body: Some(vec![group_("Inner", vec![])]),
+                span: Span::default(),
             }))])
         );
     }
@@ -3087,11 +3011,12 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "f".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![choice_("Inner", vec![])],
-                span: Span::default()
+                body: Some(vec![choice_("Inner", vec![])]),
+                span: Span::default(),
             }))])
         );
     }
@@ -3302,6 +3227,8 @@ mod tests {
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
+        let errs = parse_body("x = f(,)").unwrap_err();
+        assert_eq!(errs[0], "expected a value before `,`");
     }
 
     #[test]
@@ -3338,11 +3265,12 @@ mod tests {
                     expr_node(ExprKind::Int(2))
                 ),
                 stmt_node(StmtKind::Fn(Function {
+                    is_static: false,
                     name: "f".to_string(),
                     params: vec![],
                     ret: TypeName::new("Void"),
-                    body: vec![],
-                    span: Span::default()
+                    body: Some(vec![]),
+                    span: Span::default(),
                 })),
                 group_("S", vec![]),
                 choice_("C", vec![]),
@@ -3352,10 +3280,11 @@ mod tests {
     }
 
     fn alias(name: &str, ty: TypeName) -> Stmt {
-        stmt_node(StmtKind::Alias {
+        stmt_node(StmtKind::Alias(Alias {
             name: name.to_string(),
-            ty,
-        })
+            ty: Some(ty),
+            span: Span::default(),
+        }))
     }
 
     #[test]
@@ -3432,21 +3361,22 @@ mod tests {
         assert_eq!(
             parse("primitive fn exit() -> Never\nprimitive fn wait(for seconds: Int)"),
             Ok(vec![
-                stmt_node(StmtKind::PrimitiveFn {
+                stmt_node(StmtKind::Fn(Function {
+                    is_static: false,
                     name: "exit".to_string(),
                     params: vec![],
                     ret: TypeName::new("Never"),
-                }),
-                stmt_node(StmtKind::PrimitiveFn {
+                    body: None,
+                    span: Span::default(),
+                })),
+                stmt_node(StmtKind::Fn(Function {
+                    is_static: false,
                     name: "wait".to_string(),
-                    params: vec![TupleElement {
-                        label: Some("for".to_string()),
-                        name: Some("seconds".to_string()),
-                        ty: TypeName::new("Int"),
-                        span: Span::default()
-                    }],
+                    params: vec![param(Some("for"), Some("seconds"), "Int")],
                     ret: TypeName::new("Void"),
-                }),
+                    body: None,
+                    span: Span::default(),
+                })),
             ])
         );
         for src in [
@@ -3953,14 +3883,6 @@ mod tests {
         }
     }
 
-    /// The kinds of warnings from parsing `src` as the body of a function.
-    fn warnings(src: &str) -> Vec<WarningKind> {
-        let src = format!("fn body() {{\n{src}\n}}");
-        let (result, warnings) = parse_with_warnings(&src);
-        assert!(result.is_ok(), "{src:?} should parse");
-        warnings.into_iter().map(|warning| warning.kind).collect()
-    }
-
     #[test]
     fn allows_trailing_commas() {
         assert_eq!(parse_expr("f(a: 1,)"), parse_expr("f(a: 1)"));
@@ -3979,132 +3901,6 @@ mod tests {
             ),
             parse_body("f(a: 1, b: 2)")
         );
-    }
-
-    #[test]
-    fn warns_about_trailing_commas_on_one_line() {
-        assert_eq!(
-            warnings("f(a: 1,)\nx = Self { age: 1, }"),
-            [
-                WarningKind::RedundantTrailingComma,
-                WarningKind::RedundantTrailingComma,
-            ]
-        );
-        // The closing bracket is on the same line as the last item.
-        assert_eq!(
-            warnings(
-                "
-                f(a: 1,
-                    b: 2,)
-                "
-            ),
-            [WarningKind::RedundantTrailingComma]
-        );
-    }
-
-    #[test]
-    fn warns_about_missing_trailing_commas_over_several_lines() {
-        assert_eq!(
-            warnings(
-                "
-                f(
-                    a: 1,
-                    b: 2
-                )
-                x = Self {
-                    age: 1
-                }
-                "
-            ),
-            [
-                WarningKind::MissingTrailingComma,
-                WarningKind::MissingTrailingComma,
-            ]
-        );
-    }
-
-    #[test]
-    fn does_not_warn_about_conventional_commas() {
-        assert_eq!(
-            warnings(
-                "
-                f(a: 1, b: 2)
-                f(
-                    a: 1,
-                    b: 2, // A comment after the comma.
-                )
-                f(a: 1,
-                    b: 2)
-                x = Self {
-                    age: 1,
-
-                }
-                f()
-                f(
-                )
-                x = Self {}
-                "
-            ),
-            []
-        );
-    }
-
-    #[test]
-    fn warns_about_each_nested_list() {
-        // Only the lists whose own layout is wrong.
-        assert_eq!(
-            warnings(
-                "
-                f(a: g(
-                    b: 1
-                ), c: h(d: 2,))
-                "
-            ),
-            [
-                WarningKind::MissingTrailingComma,
-                WarningKind::RedundantTrailingComma,
-            ]
-        );
-    }
-
-    #[test]
-    fn warning_spans_point_at_the_comma() {
-        let (_, warnings) = parse_with_warnings("let x = f(a: 1,)");
-        assert_eq!(
-            warnings,
-            [Warning {
-                span: (14..15).into(),
-                kind: WarningKind::RedundantTrailingComma,
-            }]
-        );
-        let (_, warnings) = parse_with_warnings("let x = f(\na: 1\n)");
-        assert_eq!(
-            warnings,
-            [Warning {
-                span: (15..15).into(),
-                kind: WarningKind::MissingTrailingComma,
-            }]
-        );
-        assert_eq!(
-            warnings[0].to_string(),
-            "missing trailing comma in a list over several lines"
-        );
-    }
-
-    #[test]
-    fn warnings_from_abandoned_parses_are_dropped() {
-        // `f(b: 1,)` is parsed while trying to read a constructor, which then
-        // fails at `c`, so its warning is dropped along with it.
-        let (result, warnings) = parse_with_warnings("let x = Self { a: f(b: 1,), c }");
-        assert!(result.is_err());
-        assert_eq!(warnings, []);
-    }
-
-    #[test]
-    fn warns_even_when_parsing_fails() {
-        let (result, warnings) = parse_with_warnings("let x = f(a: 1,)\nlet y =");
-        assert!(result.is_err());
-        assert_eq!(warnings.len(), 1);
     }
 
     #[test]
@@ -4136,30 +3932,6 @@ mod tests {
             assert_eq!(parse(src), expected, "{src:?}");
         }
         assert_eq!(parse("fn f(\n\n) {}"), parse("fn f() {}"));
-    }
-
-    #[test]
-    fn warns_about_trailing_commas_in_parameters() {
-        assert_eq!(
-            warnings(
-                "
-                fn a(x: Int,) {}
-                fn b(
-                    x: Int
-                ) -> Int {
-                    return x
-                }
-                fn c(
-                    x: Int,
-                ) {}
-                fn d(x: Int) {}
-                "
-            ),
-            [
-                WarningKind::RedundantTrailingComma,
-                WarningKind::MissingTrailingComma,
-            ]
-        );
     }
 
     #[test]
@@ -4243,46 +4015,37 @@ mod tests {
                     with: None,
                     aliases: vec![],
                     functions: vec![
-                        ImplFunction {
+                        Function {
                             is_static: false,
-                            is_primitive: false,
-                            function: Function {
-                                name: "score".to_string(),
-                                params: vec![],
-                                ret: TypeName::new("Int"),
-                                body: vec![stmt_node(StmtKind::Return(Some(method_call(
-                                    expr_node(ExprKind::SelfValue),
-                                    "base",
-                                    vec![],
-                                ))))],
-                                span: Span::default()
-                            },
+                            name: "score".to_string(),
+                            params: vec![],
+                            ret: TypeName::new("Int"),
+                            body: Some(vec![stmt_node(StmtKind::Return(Some(method_call(
+                                expr_node(ExprKind::SelfValue),
+                                "base",
+                                vec![],
+                            ))))]),
+                            span: Span::default(),
                         },
-                        ImplFunction {
+                        Function {
                             is_static: false,
-                            is_primitive: false,
-                            function: Function {
-                                name: "rename".to_string(),
-                                params: vec![param(Some("to"), Some("name"), "Int")],
-                                ret: TypeName::new("Void"),
-                                body: vec![],
-                                span: Span::default()
-                            },
+                            name: "rename".to_string(),
+                            params: vec![param(Some("to"), Some("name"), "Int")],
+                            ret: TypeName::new("Void"),
+                            body: Some(vec![]),
+                            span: Span::default(),
                         },
-                        ImplFunction {
+                        Function {
                             is_static: true,
-                            is_primitive: false,
-                            function: Function {
-                                name: "make".to_string(),
-                                params: vec![],
-                                ret: TypeName::new("User"),
-                                body: vec![stmt_node(StmtKind::Return(Some(method_call(
-                                    *var("User"),
-                                    "make",
-                                    vec![],
-                                ))))],
-                                span: Span::default()
-                            },
+                            name: "make".to_string(),
+                            params: vec![],
+                            ret: TypeName::new("User"),
+                            body: Some(vec![stmt_node(StmtKind::Return(Some(method_call(
+                                *var("User"),
+                                "make",
+                                vec![],
+                            ))))]),
+                            span: Span::default(),
                         },
                     ],
                 }),
@@ -4439,7 +4202,7 @@ mod tests {
                     name: "And".to_string(),
                     aliases: vec![],
                     functions: vec![
-                        TraitFunction {
+                        Function {
                             is_static: false,
                             name: "and".to_string(),
                             params: vec![param(None, Some("rhs"), "Self")],
@@ -4447,7 +4210,7 @@ mod tests {
                             body: None,
                             span: Span::default()
                         },
-                        TraitFunction {
+                        Function {
                             is_static: true,
                             name: "zero".to_string(),
                             params: vec![],
@@ -4455,7 +4218,7 @@ mod tests {
                             body: None,
                             span: Span::default()
                         },
-                        TraitFunction {
+                        Function {
                             is_static: false,
                             name: "reset".to_string(),
                             params: vec![param(Some("to"), Some("value"), "Int")],
@@ -4505,21 +4268,18 @@ mod tests {
                 ty: Name::new("Bool"),
                 with: Some(Name::new("And")),
                 aliases: vec![],
-                functions: vec![ImplFunction {
+                functions: vec![Function {
                     is_static: false,
-                    is_primitive: true,
-                    function: Function {
-                        name: "and".to_string(),
-                        params: vec![TupleElement {
-                            label: None,
-                            name: Some("rhs".to_string()),
-                            ty: TypeName::new("Self"),
-                            span: Span::default()
-                        }],
-                        ret: TypeName::new("Bool"),
-                        body: vec![],
+                    name: "and".to_string(),
+                    params: vec![TupleElement {
+                        label: None,
+                        name: Some("rhs".to_string()),
+                        ty: TypeName::new("Self"),
                         span: Span::default()
-                    },
+                    }],
+                    ret: TypeName::new("Bool"),
+                    body: None,
+                    span: Span::default(),
                 }],
             })])
         );
@@ -4529,6 +4289,42 @@ mod tests {
             "impl Bool {\nprimitive Int\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_functions_and_aliases_where_they_cannot_be_written() {
+        for (src, message) in [
+            (
+                "static fn f() {}",
+                "only an `impl` or `trait` can have a `static fn`",
+            ),
+            (
+                "fn f() {\nprimitive fn g()\n}",
+                "only the top level can have a `primitive fn`",
+            ),
+            ("fn f()", "expected the function's body"),
+            ("impl Bool {\nfn f()\n}", "expected the function's body"),
+            (
+                "impl Bool {\nprimitive fn f() {}\n}",
+                "a `primitive fn` has no body, since the compiler implements it",
+            ),
+            (
+                "trait T {\nprimitive fn f()\n}",
+                "a `trait` can't have a `primitive fn`",
+            ),
+            ("alias A", "expected `=` and the type it stands for"),
+            (
+                "impl Bool with T {\nalias A\n}",
+                "expected `=` and the type it stands for",
+            ),
+            (
+                "trait T {\nalias A = Int\n}",
+                "a `trait`'s alias has no type, since each `impl` gives one",
+            ),
+        ] {
+            let errs = parse(src).unwrap_err();
+            assert_eq!(errs[0].to_string(), message, "{src:?}");
         }
     }
 
@@ -4563,20 +4359,17 @@ mod tests {
         else {
             panic!("expected a trait and an impl, got {program:?}");
         };
-        assert_eq!(aliases, &["Rhs".to_string(), "Output".to_string()]);
+        let alias = |name: &str, ty| Alias {
+            name: name.to_string(),
+            ty,
+            span: Span::default(),
+        };
+        assert_eq!(aliases, &[alias("Rhs", None), alias("Output", None)]);
         assert_eq!(
             given,
             &[
-                ImplAlias {
-                    name: "Rhs".to_string(),
-                    ty: TypeName::new("Self"),
-                    span: Span::default()
-                },
-                ImplAlias {
-                    name: "Output".to_string(),
-                    ty: TypeName::Named(qualified("core", "Bool")),
-                    span: Span::default()
-                },
+                alias("Rhs", Some(TypeName::new("Self"))),
+                alias("Output", Some(TypeName::Named(qualified("core", "Bool")))),
             ]
         );
         for src in [

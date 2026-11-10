@@ -41,17 +41,7 @@ fn main() {
     let mut parsed = true;
     for (path, src) in &files {
         let file = file_name(path);
-        let (result, warnings) = syntax::parse_with_warnings(src);
-        for warning in warnings {
-            let report = report(
-                ReportKind::Warning,
-                &file,
-                warning.span.into_range(),
-                &warning.to_string(),
-            );
-            print_report(&report, &file, src);
-        }
-        match result {
+        match syntax::parse(src) {
             Ok(program) => parsed_files.push(File {
                 path: path.clone(),
                 program,
@@ -59,12 +49,7 @@ fn main() {
             Err(errs) => {
                 parsed = false;
                 for err in errs {
-                    let report = report(
-                        ReportKind::Error,
-                        &file,
-                        err.span().into_range(),
-                        &err.to_string(),
-                    );
+                    let report = report(&file, err.span().into_range(), &err.to_string());
                     print_report(&report, &file, src);
                 }
             }
@@ -79,7 +64,6 @@ fn main() {
         Err(errs) => {
             for err in errs {
                 let report = report(
-                    ReportKind::Error,
                     &err.file,
                     err.span.start..err.span.end,
                     &err.error.to_string(),
@@ -130,24 +114,19 @@ fn file_source<'a>(files: &'a [(Vec<String>, String)], file: &str) -> &'a str {
         .expect("errors are in files that exist")
 }
 
-/// A report of a problem at `span`, a range of bytes in the source of `file`.
+/// A report of an error at `span`, a range of bytes in the source of `file`.
 fn report<'a>(
-    kind: ReportKind<'a>,
     file: &'a str,
     span: Range<usize>,
     message: &str,
 ) -> Report<'a, (&'a str, Range<usize>)> {
-    let color = match kind {
-        ReportKind::Warning => Color::Yellow,
-        _ => Color::Red,
-    };
-    Report::build(kind, (file, span.clone()))
+    Report::build(ReportKind::Error, (file, span.clone()))
         .with_config(Config::new().with_index_type(IndexType::Byte))
         .with_message(message)
         .with_label(
             Label::new((file, span))
                 .with_message("here")
-                .with_color(color),
+                .with_color(Color::Red),
         )
         .finish()
 }
@@ -213,23 +192,11 @@ mod tests {
 
     use super::*;
 
-    /// Renders the first problem found in `src`, preferring errors.
+    /// Renders the first error found in `src`.
     fn render(src: &str) -> String {
-        let (result, warnings) = syntax::parse_with_warnings(src);
-        let report = match result {
-            Ok(_) => report(
-                ReportKind::Warning,
-                "/test",
-                warnings[0].span.into_range(),
-                &warnings[0].to_string(),
-            ),
-            Err(errs) => report(
-                ReportKind::Error,
-                "/test",
-                errs[0].span().into_range(),
-                &errs[0].to_string(),
-            ),
-        };
+        let errs = syntax::parse(src).expect_err("source should have an error");
+        let span = errs[0].span().into_range();
+        let report = report("/test", span, &errs[0].to_string());
         let mut output = vec![];
         report
             .write(("/test", Source::from(src)), &mut output)
@@ -245,7 +212,7 @@ mod tests {
             }
         ";
         let path = vec!["main".to_string()];
-        let (program, _) = syntax::parse_with_warnings(src);
+        let program = syntax::parse(src);
         let parsed_files = [File {
             path: path.clone(),
             program: program.expect("source should parse"),
@@ -255,7 +222,7 @@ mod tests {
         let files = [(path, src.to_string())];
         let source = file_source(&files, &errs[0].file);
         let span = errs[0].span.start..errs[0].span.end;
-        let report = report(ReportKind::Error, &errs[0].file, span, "wrong type");
+        let report = report(&errs[0].file, span, "wrong type");
         let mut output = vec![];
         report
             .write((errs[0].file.as_str(), Source::from(source)), &mut output)
@@ -329,21 +296,6 @@ mod tests {
     fn reports_show_errors_at_the_end_of_the_source() {
         let output = render("let x =");
         assert!(output.contains("/test:1:8"));
-        assert!(output.contains("here"));
-    }
-
-    #[test]
-    fn reports_show_warnings_with_empty_spans() {
-        let output = render(
-            "
-            let x = (
-                1,
-                2
-            )
-            ",
-        );
-        assert!(output.contains("Warning"));
-        assert!(output.contains("/test:4:18"));
         assert!(output.contains("here"));
     }
 }
