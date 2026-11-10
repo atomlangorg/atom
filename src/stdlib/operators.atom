@@ -76,6 +76,14 @@ choice Comparison {
     greater()
 }
 
+// `Comparison`s are equal if they're the same option, since none of them hold
+// a value.
+impl Comparison with Equal {
+    fn isEqual(to rhs: Self) -> Bool {
+        return ChoiceTag.new(of: self) == ChoiceTag.new(of: rhs)
+    }
+}
+
 // Types that `+` can be used on, which calls `add`, as in `a + b`, where `b`
 // is an `Rhs`, and the result is an `Output`.
 trait Add {

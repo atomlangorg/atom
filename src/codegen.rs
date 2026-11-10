@@ -1177,6 +1177,30 @@ mod tests {
     }
 
     #[test]
+    fn compares_comparisons_for_equality() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(Comparison.less() == Comparison.less(), at: 1)
+                let b = bit(Comparison.less() == Comparison.equal(), at: 2)
+                let c = bit(Comparison.equal() == Comparison.equal(), at: 4)
+                let d = bit(Comparison.greater() == Comparison.less(), at: 8)
+                let e = bit(Comparison.greater() != Comparison.equal(), at: 16)
+                let f = bit(Comparison.greater() != Comparison.greater(), at: 32)
+                return a + b + c + d + e + f
+            }
+            ";
+        assert_eq!(run(src), 21);
+    }
+
+    #[test]
     fn orders_integers_by_their_sign() {
         // As a signed `i8`, 200 would be -56, and as an unsigned `u8`, -1
         // would be 255.
