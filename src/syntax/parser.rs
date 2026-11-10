@@ -26,9 +26,9 @@ use chumsky::{
 
 use super::{
     ast::{
-        Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, ImplAlias,
-        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind,
-        Program, Span, Stmt, StmtKind, TraitFunction, TupleElement, TuplePattern, TypeName, UnOp,
+        Alias, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, Import,
+        ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
+        StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
 };
@@ -133,16 +133,63 @@ fn void_type(span: Span) -> TypeName {
     })
 }
 
-/// A line in an `impl`, which are collected into its aliases and functions.
-enum ImplItem {
-    Alias(ImplAlias),
-    Function(ImplFunction),
+/// A line in an `impl` or `trait`, which are collected into its aliases and
+/// functions.
+enum Member {
+    Alias(Alias),
+    Function(Function),
 }
 
-/// A line in a `trait`, which are collected into its aliases and functions.
-enum TraitItem {
-    Alias(String),
-    Function(TraitFunction),
+/// The aliases and functions of `members`, in order.
+fn split(members: Vec<Member>) -> (Vec<Alias>, Vec<Function>) {
+    let mut aliases = vec![];
+    let mut functions = vec![];
+    for member in members {
+        match member {
+            Member::Alias(alias) => aliases.push(alias),
+            Member::Function(function) => functions.push(function),
+        }
+    }
+    (aliases, functions)
+}
+
+/// Where a function or alias is declared, which decides how it's written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// A block, or the top level of a file.
+    Stmt,
+    Impl,
+    Trait,
+}
+
+impl Place {
+    /// What's wrong with `function` here, if anything, which is a `primitive
+    /// fn` if `is_primitive`.
+    fn function_error(self, function: &Function, is_primitive: bool) -> Option<&'static str> {
+        match self {
+            Self::Stmt if function.is_static => {
+                Some("only an `impl` or `trait` can have a `static fn`")
+            }
+            Self::Trait if is_primitive => Some("a `trait` can't have a `primitive fn`"),
+            Self::Trait => None,
+            _ if is_primitive && function.body.is_some() => {
+                Some("a `primitive fn` has no body, since the compiler implements it")
+            }
+            _ if !is_primitive && function.body.is_none() => Some("expected the function's body"),
+            _ => None,
+        }
+    }
+
+    /// What's wrong with `alias` here, if anything.
+    fn alias_error(self, alias: &Alias) -> Option<&'static str> {
+        match (self, &alias.ty) {
+            (Self::Trait, Some(_)) => {
+                Some("a `trait`'s alias has no type, since each `impl` gives one")
+            }
+            (Self::Stmt | Self::Impl, None) => Some("expected `=` and the type it stands for"),
+            _ => None,
+        }
+    }
 }
 
 /// `item`s, one per line, with blank lines allowed anywhere, as in a block
@@ -649,15 +696,24 @@ where
             span,
         });
 
-    // `alias Name = Type`.
-    let alias = just(Token::Alias)
+    // `alias Name = Type`, or `alias Name` in a `trait`.
+    let any_alias = just(Token::Alias)
         .ignore_then(ident)
-        .then_ignore(just(Token::Eq))
-        .then(type_name.clone())
-        .map_with(|(name, ty), e| Stmt {
-            kind: StmtKind::Alias { name, ty },
+        .then(just(Token::Eq).ignore_then(type_name.clone()).or_not())
+        .map_with(|(name, ty), e| Alias {
+            name,
+            ty,
             span: Span::from(e.span()),
-        });
+        })
+        .boxed();
+    let alias_in = |place: Place| {
+        any_alias.clone().validate(move |alias, e, emitter| {
+            if let Some(message) = place.alias_error(&alias) {
+                emitter.emit(Rich::custom(e.span(), message));
+            }
+            alias
+        })
+    };
 
     // `name(label: Type, ...)`, which holds a tuple of what's in brackets,
     // written like a tuple type. `name()` holds `()`.
@@ -699,10 +755,19 @@ where
         })
         .boxed();
 
-    // One statement per line.
+    // One statement per line. Only the top level can have a `primitive fn`.
     let mut stmt = Recursive::declare();
-    let (function, block) = {
-        let block = braced_lines(stmt.clone());
+    let function_in = {
+        let block = braced_lines(stmt.clone().validate(|stmt: Stmt, e, emitter| {
+            if let StmtKind::Fn(Function { body: None, .. }) = &stmt.kind {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    "only the top level can have a `primitive fn`",
+                ));
+            }
+            stmt
+        }))
+        .boxed();
 
         // The `{` must be on the same line as the `if`, and `else` on the same
         // line as the preceding `}`, so newlines never need disambiguating.
@@ -742,17 +807,44 @@ where
                 span,
             });
 
-        let function = signature
+        // `fn name(params) -> Type { ... }`, which can be a `static fn` in an
+        // `impl` or `trait`, or a `primitive fn`, which has no body. In a
+        // `trait`, its body is optional.
+        // It has a body only if one starts, so a body with an error isn't
+        // left out instead.
+        let body = block
             .clone()
-            .then(block.clone())
-            .map(|((name, params, ret, span), body)| Function {
-                name,
-                params,
-                ret,
-                body,
-                span,
-            })
+            .map(Some)
+            .or(just(Token::LBrace).not().to(None));
+        let any_function = just(Token::Static)
+            .or_not()
+            .then(just(Token::Primitive).or_not())
+            .then(signature.clone())
+            .then(body)
+            .map(
+                |(((is_static, primitive), (name, params, ret, span)), body)| {
+                    let function = Function {
+                        is_static: is_static.is_some(),
+                        name,
+                        params,
+                        ret,
+                        body,
+                        span,
+                    };
+                    (function, primitive.is_some())
+                },
+            )
             .boxed();
+        let function_in = move |place: Place| {
+            any_function
+                .clone()
+                .validate(move |(function, is_primitive), e, emitter| {
+                    if let Some(message) = place.function_error(&function, is_primitive) {
+                        emitter.emit(Rich::custom(e.span(), message));
+                    }
+                    function
+                })
+        };
 
         let return_ = just(Token::Return)
             .ignore_then(expr.clone().or_not())
@@ -793,17 +885,20 @@ where
                 .or(destructure)
                 .or(if_)
                 .or(match_)
-                .or(function.clone().map(|function| Stmt {
+                .or(function_in(Place::Stmt).map(|function| Stmt {
                     span: function.span,
                     kind: StmtKind::Fn(function),
                 }))
                 .or(group_)
                 .or(choice_)
-                .or(alias)
+                .or(alias_in(Place::Stmt).map(|alias| Stmt {
+                    span: alias.span,
+                    kind: StmtKind::Alias(alias),
+                }))
                 .or(return_)
                 .or(call),
         );
-        (function, block)
+        function_in
     };
 
     // `use /dir/other`, which can have an alias, as in `use /dir/other as
@@ -862,43 +957,9 @@ where
     // `impl Type { fn ... }`, with one function per line, like a block. Each
     // can be a method, or a `static fn`, and the standard library's can be a
     // `primitive fn`, which has no body.
-    let impl_function = just(Token::Static)
-        .or_not()
-        .then(
-            just(Token::Primitive)
-                .ignore_then(signature.clone())
-                .map(|(name, params, ret, span)| {
-                    let body = vec![];
-                    (
-                        true,
-                        Function {
-                            name,
-                            params,
-                            ret,
-                            body,
-                            span,
-                        },
-                    )
-                })
-                .or(function.map(|function| (false, function))),
-        )
-        .map(|(is_static, (is_primitive, function))| ImplFunction {
-            is_static: is_static.is_some(),
-            is_primitive,
-            function,
-        });
-    let impl_alias = just(Token::Alias)
-        .ignore_then(ident)
-        .then_ignore(just(Token::Eq))
-        .then(type_name.clone())
-        .map_with(|(name, ty), e| {
-            ImplItem::Alias(ImplAlias {
-                name,
-                ty,
-                span: Span::from(e.span()),
-            })
-        });
-
+    let impl_member = alias_in(Place::Impl)
+        .map(Member::Alias)
+        .or(function_in(Place::Impl).map(Member::Function));
     // `with` is only special here, so it can still be a label. Only a named
     // type can have an `impl`, and only a trait can follow `with`.
     let impl_ = just(Token::Impl)
@@ -909,18 +970,9 @@ where
                 .or_not(),
         )
         .map_with(|head, e| (head, Span::from(e.span())))
-        .then(braced_lines(
-            impl_alias.or(impl_function.map(ImplItem::Function)),
-        ))
-        .map(|(((ty, with), span), items)| {
-            let mut aliases = vec![];
-            let mut functions = vec![];
-            for item in items {
-                match item {
-                    ImplItem::Alias(alias) => aliases.push(alias),
-                    ImplItem::Function(function) => functions.push(function),
-                }
-            }
+        .then(braced_lines(impl_member))
+        .map(|(((ty, with), span), members)| {
+            let (aliases, functions) = split(members);
             Stmt {
                 kind: StmtKind::Impl {
                     ty,
@@ -933,38 +985,17 @@ where
         });
 
     // Like an `impl`, one function per line, but each only needs its
-    // signature. A body is its default implementation.
-    let trait_function = just(Token::Static)
-        .or_not()
-        .then(signature.clone())
-        .then(block.or_not())
-        .map(
-            |((is_static, (name, params, ret, span)), body)| TraitFunction {
-                is_static: is_static.is_some(),
-                name,
-                params,
-                ret,
-                body,
-                span,
-            },
-        );
-    // `alias Name`, whose type each implementation gives.
-    let trait_alias = just(Token::Alias).ignore_then(ident).map(TraitItem::Alias);
+    // signature. A body is its default implementation. Each alias is only
+    // named, since each `impl` gives its type.
+    let trait_member = alias_in(Place::Trait)
+        .map(Member::Alias)
+        .or(function_in(Place::Trait).map(Member::Function));
     let trait_ = just(Token::Trait)
         .ignore_then(ident)
         .map_with(|name, e| (name, Span::from(e.span())))
-        .then(braced_lines(
-            trait_alias.or(trait_function.map(TraitItem::Function)),
-        ))
-        .map(|((name, span), items)| {
-            let mut aliases = vec![];
-            let mut functions = vec![];
-            for item in items {
-                match item {
-                    TraitItem::Alias(alias) => aliases.push(alias),
-                    TraitItem::Function(function) => functions.push(function),
-                }
-            }
+        .then(braced_lines(trait_member))
+        .map(|((name, span), members)| {
+            let (aliases, functions) = split(members);
             Stmt {
                 kind: StmtKind::Trait {
                     name,
@@ -975,19 +1006,13 @@ where
             }
         });
 
-    // `primitive Name`, `primitive Name<T, U>`, or
-    // `primitive fn name(params) -> Type`, which the checker only allows in
-    // the standard library.
+    // `primitive Name` or `primitive Name<T, U>`, which the checker only
+    // allows in the standard library, like a `primitive fn`.
     let primitive = just(Token::Primitive)
-        .ignore_then(
-            signature
-                .map(|(name, params, ret, _)| StmtKind::PrimitiveFn { name, params, ret })
-                .or(ident
-                    .then(generic_params)
-                    .map(|(name, params)| StmtKind::Primitive { name, params })),
-        )
-        .map_with(|kind, e| Stmt {
-            kind,
+        .ignore_then(ident)
+        .then(generic_params)
+        .map_with(|(name, params), e| Stmt {
+            kind: StmtKind::Primitive { name, params },
             span: Span::from(e.span()),
         });
 
@@ -1056,7 +1081,9 @@ mod tests {
     fn parse_body(src: &str) -> Result<Vec<Stmt>, Vec<String>> {
         match parse(&format!("fn body() {{\n{src}\n}}")) {
             Ok(mut program) => match program.remove(0).kind {
-                StmtKind::Fn(Function { body, .. }) => Ok(body),
+                StmtKind::Fn(Function {
+                    body: Some(body), ..
+                }) => Ok(body),
                 stmt => panic!("expected a function, got {stmt:?}"),
             },
             Err(errs) => Err(errs.iter().map(ToString::to_string).collect()),
@@ -1208,7 +1235,10 @@ mod tests {
             let StmtKind::Fn(function) = &program[0].kind else {
                 panic!("expected a function");
             };
-            assert_eq!(text(&src, function.body[0].span), stmt);
+            assert_eq!(
+                text(&src, function.body.as_ref().expect("has a body")[0].span),
+                stmt
+            );
         }
         for stmt in [
             "use /dir/other",
@@ -1246,7 +1276,10 @@ mod tests {
             let StmtKind::Fn(function) = &program[0].kind else {
                 panic!("expected a function");
             };
-            assert_eq!(text(&src, function.body[0].span), head);
+            assert_eq!(
+                text(&src, function.body.as_ref().expect("has a body")[0].span),
+                head
+            );
         }
         for (stmt, head) in [
             ("impl Point {}", "impl Point"),
@@ -1268,7 +1301,7 @@ mod tests {
         let StmtKind::If {
             else_block: Some(else_block),
             ..
-        } = &function.body[0].kind
+        } = &function.body.as_ref().expect("has a body")[0].kind
         else {
             panic!("expected an `if` with an `else`");
         };
@@ -1339,7 +1372,7 @@ mod tests {
         assert_eq!(text(src, ty.span), "Point");
         assert_eq!(text(src, with.as_ref().expect("has a trait").span), "Named");
         assert_eq!(text(src, aliases[0].span), "alias Rhs = Int");
-        assert_eq!(text(src, functions[0].function.span), "fn f() -> Int");
+        assert_eq!(text(src, functions[0].span), "fn f() -> Int");
         let StmtKind::Trait { functions, .. } = &program[1].kind else {
             panic!("expected a trait");
         };
@@ -1373,7 +1406,7 @@ mod tests {
         let StmtKind::Impl { functions, .. } = &program[0].kind else {
             panic!("expected an `impl`");
         };
-        let function = &functions[0].function;
+        let function = &functions[0];
         let TypeName::Named(name) = &function.params[0].ty else {
             panic!("expected a named type");
         };
@@ -1398,7 +1431,8 @@ mod tests {
         let StmtKind::Fn(function) = &program[0].kind else {
             panic!("expected a function");
         };
-        let StmtKind::Match { arms, .. } = &function.body[0].kind else {
+        let StmtKind::Match { arms, .. } = &function.body.as_ref().expect("has a body")[0].kind
+        else {
             panic!("expected a match");
         };
         let pattern = &arms[0].pattern;
@@ -2598,13 +2632,14 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "addFive".to_string(),
                 params: vec![param(Some("to"), Some("value"), "Int")],
                 ret: TypeName::new("Int"),
-                body: vec![stmt_node(StmtKind::Return(Some(expr_node(
+                body: Some(vec![stmt_node(StmtKind::Return(Some(expr_node(
                     ExprKind::Binary(var("value"), BinOp::Add, int(5),)
-                ))))],
-                span: Span::default()
+                ))))]),
+                span: Span::default(),
             }))])
         );
     }
@@ -2614,6 +2649,7 @@ mod tests {
         assert_eq!(
             parse_body("fn f(a: Int, to b: Bool, _ c: Int, _: Int, at _: Int) {}"),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "f".to_string(),
                 params: vec![
                     // A single name is both the label and the parameter name.
@@ -2625,8 +2661,8 @@ mod tests {
                     param(Some("at"), None, "Int"),
                 ],
                 ret: TypeName::new("Void"),
-                body: vec![],
-                span: Span::default()
+                body: Some(vec![]),
+                span: Span::default(),
             }))])
         );
         for src in ["fn f(_ _: Int) {}", "fn f(a b c: Int) {}", "fn f(a) {}"] {
@@ -2648,14 +2684,15 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "reset".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![
+                body: Some(vec![
                     assign("count", expr_node(ExprKind::Int(0))),
                     stmt_node(StmtKind::Return(None))
-                ],
-                span: Span::default()
+                ]),
+                span: Span::default(),
             }))])
         );
     }
@@ -2851,11 +2888,12 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "f".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![group_("Inner", vec![])],
-                span: Span::default()
+                body: Some(vec![group_("Inner", vec![])]),
+                span: Span::default(),
             }))])
         );
     }
@@ -3046,11 +3084,12 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Fn(Function {
+                is_static: false,
                 name: "f".to_string(),
                 params: vec![],
                 ret: TypeName::new("Void"),
-                body: vec![choice_("Inner", vec![])],
-                span: Span::default()
+                body: Some(vec![choice_("Inner", vec![])]),
+                span: Span::default(),
             }))])
         );
     }
@@ -3297,11 +3336,12 @@ mod tests {
                     expr_node(ExprKind::Int(2))
                 ),
                 stmt_node(StmtKind::Fn(Function {
+                    is_static: false,
                     name: "f".to_string(),
                     params: vec![],
                     ret: TypeName::new("Void"),
-                    body: vec![],
-                    span: Span::default()
+                    body: Some(vec![]),
+                    span: Span::default(),
                 })),
                 group_("S", vec![]),
                 choice_("C", vec![]),
@@ -3311,10 +3351,11 @@ mod tests {
     }
 
     fn alias(name: &str, ty: TypeName) -> Stmt {
-        stmt_node(StmtKind::Alias {
+        stmt_node(StmtKind::Alias(Alias {
             name: name.to_string(),
-            ty,
-        })
+            ty: Some(ty),
+            span: Span::default(),
+        }))
     }
 
     #[test]
@@ -3391,21 +3432,22 @@ mod tests {
         assert_eq!(
             parse("primitive fn exit() -> Never\nprimitive fn wait(for seconds: Int)"),
             Ok(vec![
-                stmt_node(StmtKind::PrimitiveFn {
+                stmt_node(StmtKind::Fn(Function {
+                    is_static: false,
                     name: "exit".to_string(),
                     params: vec![],
                     ret: TypeName::new("Never"),
-                }),
-                stmt_node(StmtKind::PrimitiveFn {
+                    body: None,
+                    span: Span::default(),
+                })),
+                stmt_node(StmtKind::Fn(Function {
+                    is_static: false,
                     name: "wait".to_string(),
-                    params: vec![TupleElement {
-                        label: Some("for".to_string()),
-                        name: Some("seconds".to_string()),
-                        ty: TypeName::new("Int"),
-                        span: Span::default()
-                    }],
+                    params: vec![param(Some("for"), Some("seconds"), "Int")],
                     ret: TypeName::new("Void"),
-                }),
+                    body: None,
+                    span: Span::default(),
+                })),
             ])
         );
         for src in [
@@ -4202,46 +4244,37 @@ mod tests {
                     with: None,
                     aliases: vec![],
                     functions: vec![
-                        ImplFunction {
+                        Function {
                             is_static: false,
-                            is_primitive: false,
-                            function: Function {
-                                name: "score".to_string(),
-                                params: vec![],
-                                ret: TypeName::new("Int"),
-                                body: vec![stmt_node(StmtKind::Return(Some(method_call(
-                                    expr_node(ExprKind::SelfValue),
-                                    "base",
-                                    vec![],
-                                ))))],
-                                span: Span::default()
-                            },
+                            name: "score".to_string(),
+                            params: vec![],
+                            ret: TypeName::new("Int"),
+                            body: Some(vec![stmt_node(StmtKind::Return(Some(method_call(
+                                expr_node(ExprKind::SelfValue),
+                                "base",
+                                vec![],
+                            ))))]),
+                            span: Span::default(),
                         },
-                        ImplFunction {
+                        Function {
                             is_static: false,
-                            is_primitive: false,
-                            function: Function {
-                                name: "rename".to_string(),
-                                params: vec![param(Some("to"), Some("name"), "Int")],
-                                ret: TypeName::new("Void"),
-                                body: vec![],
-                                span: Span::default()
-                            },
+                            name: "rename".to_string(),
+                            params: vec![param(Some("to"), Some("name"), "Int")],
+                            ret: TypeName::new("Void"),
+                            body: Some(vec![]),
+                            span: Span::default(),
                         },
-                        ImplFunction {
+                        Function {
                             is_static: true,
-                            is_primitive: false,
-                            function: Function {
-                                name: "make".to_string(),
-                                params: vec![],
-                                ret: TypeName::new("User"),
-                                body: vec![stmt_node(StmtKind::Return(Some(method_call(
-                                    *var("User"),
-                                    "make",
-                                    vec![],
-                                ))))],
-                                span: Span::default()
-                            },
+                            name: "make".to_string(),
+                            params: vec![],
+                            ret: TypeName::new("User"),
+                            body: Some(vec![stmt_node(StmtKind::Return(Some(method_call(
+                                *var("User"),
+                                "make",
+                                vec![],
+                            ))))]),
+                            span: Span::default(),
                         },
                     ],
                 }),
@@ -4398,7 +4431,7 @@ mod tests {
                     name: "And".to_string(),
                     aliases: vec![],
                     functions: vec![
-                        TraitFunction {
+                        Function {
                             is_static: false,
                             name: "and".to_string(),
                             params: vec![param(None, Some("rhs"), "Self")],
@@ -4406,7 +4439,7 @@ mod tests {
                             body: None,
                             span: Span::default()
                         },
-                        TraitFunction {
+                        Function {
                             is_static: true,
                             name: "zero".to_string(),
                             params: vec![],
@@ -4414,7 +4447,7 @@ mod tests {
                             body: None,
                             span: Span::default()
                         },
-                        TraitFunction {
+                        Function {
                             is_static: false,
                             name: "reset".to_string(),
                             params: vec![param(Some("to"), Some("value"), "Int")],
@@ -4464,21 +4497,18 @@ mod tests {
                 ty: Name::new("Bool"),
                 with: Some(Name::new("And")),
                 aliases: vec![],
-                functions: vec![ImplFunction {
+                functions: vec![Function {
                     is_static: false,
-                    is_primitive: true,
-                    function: Function {
-                        name: "and".to_string(),
-                        params: vec![TupleElement {
-                            label: None,
-                            name: Some("rhs".to_string()),
-                            ty: TypeName::new("Self"),
-                            span: Span::default()
-                        }],
-                        ret: TypeName::new("Bool"),
-                        body: vec![],
+                    name: "and".to_string(),
+                    params: vec![TupleElement {
+                        label: None,
+                        name: Some("rhs".to_string()),
+                        ty: TypeName::new("Self"),
                         span: Span::default()
-                    },
+                    }],
+                    ret: TypeName::new("Bool"),
+                    body: None,
+                    span: Span::default(),
                 }],
             })])
         );
@@ -4488,6 +4518,42 @@ mod tests {
             "impl Bool {\nprimitive Int\n}",
         ] {
             assert!(parse(src).is_err(), "{src:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn rejects_functions_and_aliases_where_they_cannot_be_written() {
+        for (src, message) in [
+            (
+                "static fn f() {}",
+                "only an `impl` or `trait` can have a `static fn`",
+            ),
+            (
+                "fn f() {\nprimitive fn g()\n}",
+                "only the top level can have a `primitive fn`",
+            ),
+            ("fn f()", "expected the function's body"),
+            ("impl Bool {\nfn f()\n}", "expected the function's body"),
+            (
+                "impl Bool {\nprimitive fn f() {}\n}",
+                "a `primitive fn` has no body, since the compiler implements it",
+            ),
+            (
+                "trait T {\nprimitive fn f()\n}",
+                "a `trait` can't have a `primitive fn`",
+            ),
+            ("alias A", "expected `=` and the type it stands for"),
+            (
+                "impl Bool with T {\nalias A\n}",
+                "expected `=` and the type it stands for",
+            ),
+            (
+                "trait T {\nalias A = Int\n}",
+                "a `trait`'s alias has no type, since each `impl` gives one",
+            ),
+        ] {
+            let errs = parse(src).unwrap_err();
+            assert_eq!(errs[0].to_string(), message, "{src:?}");
         }
     }
 
@@ -4522,20 +4588,17 @@ mod tests {
         else {
             panic!("expected a trait and an impl, got {program:?}");
         };
-        assert_eq!(aliases, &["Rhs".to_string(), "Output".to_string()]);
+        let alias = |name: &str, ty| Alias {
+            name: name.to_string(),
+            ty,
+            span: Span::default(),
+        };
+        assert_eq!(aliases, &[alias("Rhs", None), alias("Output", None)]);
         assert_eq!(
             given,
             &[
-                ImplAlias {
-                    name: "Rhs".to_string(),
-                    ty: TypeName::new("Self"),
-                    span: Span::default()
-                },
-                ImplAlias {
-                    name: "Output".to_string(),
-                    ty: TypeName::Named(qualified("core", "Bool")),
-                    span: Span::default()
-                },
+                alias("Rhs", Some(TypeName::new("Self"))),
+                alias("Output", Some(TypeName::Named(qualified("core", "Bool")))),
             ]
         );
         for src in [

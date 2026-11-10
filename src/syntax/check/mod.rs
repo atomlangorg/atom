@@ -57,9 +57,9 @@ use std::{
 
 use super::{
     ast::{
-        self as ast, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, ImplAlias,
-        ImplFunction, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind,
-        Program, Span, Stmt, StmtKind, TraitFunction, TupleElement, TypeName, UnOp,
+        self as ast, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, Import,
+        ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
+        StmtKind, TupleElement, TypeName, UnOp,
     },
     parser::parse,
 };
@@ -417,8 +417,8 @@ struct TraitInfo<'a> {
     file: usize,
     /// The names of its aliases, such as `Rhs`, whose types each
     /// implementation gives.
-    aliases: &'a [String],
-    functions: &'a [TraitFunction],
+    aliases: &'a [ast::Alias],
+    functions: &'a [Function],
     /// A type standing for `Self`, then one for each of `aliases`, since
     /// they're a different type in each `impl`.
     stand_ins: Vec<Type>,
@@ -436,7 +436,7 @@ struct Implementation<'b, 'a> {
     self_ty: &'b Type,
     trait_name: &'b Name,
     index: usize,
-    aliases: &'a [ImplAlias],
+    aliases: &'a [ast::Alias],
     /// The index in `Checker::impl_aliases` of the types of `aliases`, if
     /// there are any.
     alias_types: Option<usize>,
@@ -732,7 +732,9 @@ impl<'a> Checker<'a> {
                         let id = self.declare_type(name, stmt);
                         types.push((file, id, stmt));
                     }
-                    StmtKind::Alias { name, ty } => {
+                    StmtKind::Alias(ast::Alias {
+                        name, ty: Some(ty), ..
+                    }) => {
                         self.declare_alias(name, stmt.span, ty, LazyType::Unchecked);
                     }
                     StmtKind::Trait {
@@ -785,21 +787,23 @@ impl<'a> Checker<'a> {
                             &function.params,
                             &function.ret,
                         );
+                        // Only a `primitive fn` has no body here.
+                        let Some(body) = &function.body else {
+                            let (name, span) = (&function.name, function.span);
+                            self.define_primitive_fn(index, None, name, span, FnKind::Function);
+                            continue;
+                        };
                         self.pending.push((
                             file,
                             Pending::Fn {
                                 index,
                                 name: &function.name,
                                 span: function.span,
-                                body: &function.body,
+                                body,
                                 kind: FnKind::Function,
                                 aliases: None,
                             },
                         ));
-                    }
-                    StmtKind::PrimitiveFn { name, params, ret } => {
-                        let index = self.declare_fn(name, stmt.span, params, ret);
-                        self.define_primitive_fn(index, None, name, stmt.span, FnKind::Function);
                     }
                     StmtKind::Impl {
                         ty,

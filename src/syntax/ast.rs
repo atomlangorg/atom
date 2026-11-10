@@ -450,10 +450,7 @@ pub enum StmtKind {
         value: Expr,
     },
     /// `name = value`: reassigns an existing `var`.
-    Assign {
-        name: String,
-        value: Expr,
-    },
+    Assign { name: String, value: Expr },
     /// `if cond { ... } else { ... }`
     ///
     /// `else if` is represented as an `else` block containing a single `If`.
@@ -462,6 +459,8 @@ pub enum StmtKind {
         then_block: Block,
         else_block: Option<Block>,
     },
+    /// A function, which can be a `primitive fn` at the top level of the
+    /// standard library, such as `exit`.
     Fn(Function),
     /// `impl Type { fn ... }`: adds methods and static functions to a type.
     /// Only allowed at the top level.
@@ -472,16 +471,16 @@ pub enum StmtKind {
         ty: Name,
         with: Option<Name>,
         /// `alias Name = Type`, giving the type of one of the trait's aliases.
-        aliases: Vec<ImplAlias>,
-        functions: Vec<ImplFunction>,
+        aliases: Vec<Alias>,
+        functions: Vec<Function>,
     },
     /// `trait Name { alias ... fn ... }`: functions that a type can
     /// implement, declared without bodies, and aliases, such as `alias Rhs`,
     /// whose types each implementation gives. Only allowed at the top level.
     Trait {
         name: String,
-        aliases: Vec<String>,
-        functions: Vec<TraitFunction>,
+        aliases: Vec<Alias>,
+        functions: Vec<Function>,
     },
     /// `group Name { let field: Type ... }`, or `group Name<T, ...> { ... }`
     /// for a generic group, whose fields can use its generic parameters as
@@ -494,10 +493,7 @@ pub enum StmtKind {
     },
     /// `alias Name = Type`: another name for a type, which can be used in
     /// place of it anywhere.
-    Alias {
-        name: String,
-        ty: TypeName,
-    },
+    Alias(Alias),
     /// `primitive Name`: a type that the compiler represents itself, such as
     /// `Int`, which can be generic, as in `primitive Fn<Input, Output>`. Only
     /// allowed at the top level of the standard library.
@@ -505,14 +501,6 @@ pub enum StmtKind {
         name: String,
         /// The names of its generic parameters, if it's generic.
         params: Vec<String>,
-    },
-    /// `primitive fn name(params) -> Type`: a function that the compiler
-    /// implements itself, such as `exit`. Only allowed at the top level of
-    /// the standard library.
-    PrimitiveFn {
-        name: String,
-        params: Vec<TupleElement>,
-        ret: TypeName,
     },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
     /// options, each holding a value of its own type. Like a group, it can be
@@ -527,71 +515,47 @@ pub enum StmtKind {
     /// pattern that `value` matches. Together, the patterns must match every
     /// possible value, and each must match something the ones before it
     /// don't.
-    Match {
-        value: Expr,
-        arms: Vec<MatchArm>,
-    },
+    Match { value: Expr, arms: Vec<MatchArm> },
     /// `(let a, let b) = value`: matches `value` against a tuple pattern,
     /// declaring the values it binds as `let` constants. The pattern must
     /// match every value it could be given.
-    Destructure {
-        pattern: Pattern,
-        value: Expr,
-    },
+    Destructure { pattern: Pattern, value: Expr },
     /// `return` or `return value`
     Return(Option<Expr>),
     /// An expression on its own line. Only function calls are allowed.
     Expr(Expr),
 }
 
-/// `fn name(label param: Type, ...) -> Type { ... }`
+/// `fn name(label param: Type, ...) -> Type { ... }`. In an `impl` or a
+/// `trait`, it can be a `static fn`, and in the standard library, it can be
+/// a `primitive fn`, which has no body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
+    /// Whether it's a `static fn`, which is called on the type itself, as in
+    /// `Int.zero()`, rather than a method, which is called on a value.
+    pub is_static: bool,
     pub name: String,
     pub params: Vec<TupleElement>,
     /// The return type. `fn f()` is the same as `fn f() -> Void`,
     /// so this is `Void` when no type is written.
     pub ret: TypeName,
-    pub body: Block,
-    /// Its signature, without its body.
-    pub span: Span,
-}
-
-/// A function declared by a `trait`, such as `fn and(_ rhs: Self) -> Bool`,
-/// where `Self` is whichever type implements it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraitFunction {
-    /// Whether it's a `static fn`, like in an `impl`.
-    pub is_static: bool,
-    pub name: String,
-    pub params: Vec<TupleElement>,
-    /// `Void` when no type is written, like in a `fn`.
-    pub ret: TypeName,
-    /// Its default implementation, which an `impl` uses unless it implements
-    /// the function itself, or `None` if every `impl` must implement it.
+    /// `None` for a `primitive fn`, which the compiler implements itself.
+    /// In a `trait`, it's the default implementation, which an `impl` uses
+    /// unless it implements the function itself, or `None` if every `impl`
+    /// must implement it.
     pub body: Option<Block>,
     /// Its signature, without its body.
     pub span: Span,
 }
 
-/// `alias Name = Type` in an `impl`, giving the type of its trait's alias.
+/// `alias Name = Type`: another name for a type, or in a `trait`, `alias
+/// Name`, whose type each `impl` gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImplAlias {
+pub struct Alias {
     pub name: String,
-    pub ty: TypeName,
+    /// `None` only in a `trait`.
+    pub ty: Option<TypeName>,
     pub span: Span,
-}
-
-/// A function in an `impl`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImplFunction {
-    /// Whether it's a `static fn`, which is called on the type itself, as in
-    /// `Int.zero()`, rather than a method, which is called on a value.
-    pub is_static: bool,
-    /// Whether it's a `primitive fn`, which the compiler implements itself,
-    /// so its `body` is empty. Only allowed in the standard library.
-    pub is_primitive: bool,
-    pub function: Function,
 }
 
 /// A group field, such as `let age: Int`. Fields can't have values.

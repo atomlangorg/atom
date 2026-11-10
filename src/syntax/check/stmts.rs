@@ -104,8 +104,7 @@ impl<'a> Checker<'a> {
             StmtKind::Use(_)
             | StmtKind::Impl { .. }
             | StmtKind::Trait { .. }
-            | StmtKind::Primitive { .. }
-            | StmtKind::PrimitiveFn { .. } => {
+            | StmtKind::Primitive { .. } => {
                 unreachable!(
                     "the parser only allows `use`, `impl`, `trait` and `primitive` at the top level"
                 )
@@ -201,11 +200,14 @@ impl<'a> Checker<'a> {
                     &function.params,
                     &function.ret,
                 );
+                // Only the top level can have a `primitive fn`, so it has a
+                // body.
+                let body = function.body.as_deref().unwrap_or_default();
                 self.fn_body(
                     index,
                     &function.name,
                     function.span,
-                    &function.body,
+                    body,
                     FnKind::Function,
                     None,
                 );
@@ -225,11 +227,15 @@ impl<'a> Checker<'a> {
             }
             // Like other names inside functions, an alias is only visible
             // after it's declared, so it's worked out straight away.
-            StmtKind::Alias { name, ty } => {
+            StmtKind::Alias(ast::Alias {
+                name, ty: Some(ty), ..
+            }) => {
                 let target = self.resolve_type(ty);
                 self.declare_alias(name, stmt.span, ty, LazyType::Checked(target));
                 (None, false)
             }
+            // Only a `trait`'s aliases have no type.
+            StmtKind::Alias(_) => (None, false),
             StmtKind::Match { value, arms } => self.match_(stmt, value, arms),
             StmtKind::Destructure { pattern, value } => self.destructure(pattern, value),
             StmtKind::Return(value) => {
