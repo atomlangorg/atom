@@ -23,6 +23,16 @@ impl IntS64 with Equal {
 }
 
 impl IntS64 with Compare {
+    fn compare(to rhs: Self) -> Comparison {
+        if self < rhs {
+            return Comparison.less()
+        }
+        if self > rhs {
+            return Comparison.greater()
+        }
+        return Comparison.equal()
+    }
+
     primitive fn isLess(than rhs: Self) -> Bool
     primitive fn isLessOrEqual(to rhs: Self) -> Bool
     primitive fn isGreater(than rhs: Self) -> Bool

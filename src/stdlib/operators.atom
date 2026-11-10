@@ -58,14 +58,28 @@ trait Equal {
 
 // Types that `<`, `<=`, `>` and `>=` can be used on, which call `isLess`,
 // `isLessOrEqual`, `isGreater` and `isGreaterOrEqual`, as in `a < b`, where `b`
-// is an `Rhs`.
+// is an `Rhs`. Those four check the result of `compare` unless they're
+// implemented too.
 trait Compare {
     alias Rhs
 
-    fn isLess(than rhs: Rhs) -> Bool
-    fn isLessOrEqual(to rhs: Rhs) -> Bool
-    fn isGreater(than rhs: Rhs) -> Bool
-    fn isGreaterOrEqual(to rhs: Rhs) -> Bool
+    fn compare(to rhs: Rhs) -> Comparison
+
+    fn isLess(than rhs: Rhs) -> Bool {
+        return self.compare(to: rhs) == Comparison.less()
+    }
+
+    fn isLessOrEqual(to rhs: Rhs) -> Bool {
+        return self.compare(to: rhs) != Comparison.greater()
+    }
+
+    fn isGreater(than rhs: Rhs) -> Bool {
+        return self.compare(to: rhs) == Comparison.greater()
+    }
+
+    fn isGreaterOrEqual(to rhs: Rhs) -> Bool {
+        return self.compare(to: rhs) != Comparison.less()
+    }
 }
 
 // How one value compares to another: `less` than it, `equal` to it, or

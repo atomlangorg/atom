@@ -1201,6 +1201,75 @@ mod tests {
     }
 
     #[test]
+    fn compare_on_integers_gives_their_comparison() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let small: IntS8 = -1
+                let byte: IntU8 = 200
+                let a = bit(1.compare(to: 2) == Comparison.less(), at: 1)
+                let b = bit(2.compare(to: 2) == Comparison.equal(), at: 2)
+                let c = bit(3.compare(to: 2) == Comparison.greater(), at: 4)
+                let d = bit(small.compare(to: 0) == Comparison.less(), at: 8)
+                let e = bit(byte.compare(to: 100) == Comparison.greater(), at: 16)
+                return a + b + c + d + e
+            }
+            ";
+        assert_eq!(run(src), 31);
+    }
+
+    #[test]
+    fn ordering_operators_default_to_compare() {
+        // Each check is one bit of the result.
+        let src = "
+            group Score {
+                let points: Int
+            }
+
+            impl Score {
+                static fn of(points: Int) -> Self {
+                    return Self { points: points }
+                }
+            }
+
+            impl Score with Compare {
+                fn compare(to rhs: Self) -> Comparison {
+                    return self.points.compare(to: rhs.points)
+                }
+            }
+
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let one = Score.of(points: 1)
+                let two = Score.of(points: 2)
+                let a = bit(one < two, at: 1)
+                let b = bit(two < two, at: 2)
+                let c = bit(two <= two, at: 4)
+                let d = bit(two <= one, at: 8)
+                let e = bit(two > one, at: 16)
+                let f = bit(two > two, at: 32)
+                let g = bit(two >= two, at: 64)
+                let h = bit(one >= two, at: 128)
+                return a + b + c + d + e + f + g + h
+            }
+            ";
+        assert_eq!(run(src), 85);
+    }
+
+    #[test]
     fn orders_integers_by_their_sign() {
         // As a signed `i8`, 200 would be -56, and as an unsigned `u8`, -1
         // would be 255.
@@ -2712,20 +2781,8 @@ mod tests {
             }
 
             impl Money with Compare {
-                fn isLess(than rhs: Self) -> Bool {
-                    return self.cents < rhs.cents
-                }
-
-                fn isLessOrEqual(to rhs: Self) -> Bool {
-                    return self.cents <= rhs.cents
-                }
-
-                fn isGreater(than rhs: Self) -> Bool {
-                    return self.cents > rhs.cents
-                }
-
-                fn isGreaterOrEqual(to rhs: Self) -> Bool {
-                    return self.cents >= rhs.cents
+                fn compare(to rhs: Self) -> Comparison {
+                    return self.cents.compare(to: rhs.cents)
                 }
             }
 
