@@ -512,8 +512,9 @@ where
             .boxed(),
     )));
 
-    // `_`, `let name`, a literal, a tuple of patterns, or `Type.option` with
-    // a tuple pattern for its value, as in `Shape.circle(radius: let radius)`.
+    // `_`, `let name`, a literal, a tuple of patterns, or an option written
+    // like it's created, with a pattern for its value, as in
+    // `Shape.circle.new(let radius)`.
     let pattern = recursive(|pattern| {
         let int = just(Token::Minus)
             .or_not()
@@ -527,12 +528,23 @@ where
             .or_not()
             .then(pattern.clone())
             .map(|(label, pattern)| TuplePattern { label, pattern });
+        let new = select! { Token::Ident("new") => () };
         let option = named_type
             .clone()
             .then_ignore(just(Token::Dot))
             .then(ident)
-            .then(comma_list(element.clone(), Token::LParen, Token::RParen))
-            .map(|((ty, option), values)| PatternKind::Option { ty, option, values });
+            .then_ignore(just(Token::Dot))
+            .then_ignore(new)
+            .then(
+                pattern
+                    .clone()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map(|((ty, option), value)| PatternKind::Option {
+                ty,
+                option,
+                value: Box::new(value),
+            });
         choice((
             just(Token::Underscore).to(PatternKind::Any),
             just(Token::Let)
@@ -642,13 +654,14 @@ where
         })
     };
 
-    // `name(label: Type, ...)`, which holds a tuple of what's in brackets,
-    // written like a tuple type. `name()` holds `()`.
+    // `name: Type`, which holds a value of that type, so `name: Void` holds
+    // nothing useful.
     let option = ident
-        .then(comma_list(element.clone(), Token::LParen, Token::RParen))
-        .map_with(|(name, values), e| ChoiceOption {
+        .then_ignore(just(Token::Colon))
+        .then(type_name.clone())
+        .map_with(|(name, ty), e| ChoiceOption {
             name,
-            values,
+            ty,
             span: Span::from(e.span()),
         });
 
@@ -1244,8 +1257,8 @@ mod tests {
                 var y: other::Number
             }
             choice Answer {
-                yes()
-                no(reason: other::Reason)
+                yes: Void
+                no: other::Reason
             }
         ";
         let program = parse_spanned(src);
@@ -1266,9 +1279,9 @@ mod tests {
         let StmtKind::Choice { options, .. } = &program[2].kind else {
             panic!("expected a choice");
         };
-        assert_eq!(text(src, options[0].span), "yes()");
-        assert_eq!(text(src, options[1].span), "no(reason: other::Reason)");
-        let TypeName::Named(name) = &options[1].values[0].ty else {
+        assert_eq!(text(src, options[0].span), "yes: Void");
+        assert_eq!(text(src, options[1].span), "no: other::Reason");
+        let TypeName::Named(name) = &options[1].ty else {
             panic!("expected a named type");
         };
         assert_eq!(text(src, name.span), "other::Reason");
@@ -1350,7 +1363,7 @@ mod tests {
         let src = "
             fn f() {
                 match a {
-                    (x: let b, y: Shape.circle(radius: 1)) => {}
+                    (x: let b, y: Shape.circle.new(1)) => {}
                 }
             }
         ";
@@ -1365,18 +1378,18 @@ mod tests {
         let pattern = &arms[0].pattern;
         assert_eq!(
             text(src, pattern.span),
-            "(x: let b, y: Shape.circle(radius: 1))"
+            "(x: let b, y: Shape.circle.new(1))"
         );
         let PatternKind::Tuple(elements) = &pattern.kind else {
             panic!("expected a tuple");
         };
         assert_eq!(text(src, elements[0].pattern.span), "let b");
         let option = &elements[1].pattern;
-        assert_eq!(text(src, option.span), "Shape.circle(radius: 1)");
-        let PatternKind::Option { values, .. } = &option.kind else {
+        assert_eq!(text(src, option.span), "Shape.circle.new(1)");
+        let PatternKind::Option { value, .. } = &option.kind else {
             panic!("expected an option");
         };
-        assert_eq!(text(src, values[0].pattern.span), "1");
+        assert_eq!(text(src, value.span), "1");
     }
 
     #[test]
@@ -1494,14 +1507,14 @@ mod tests {
     #[test]
     fn parses_generic_declarations() {
         assert_eq!(
-            parse("choice Optional<T> {\nnone()\nsome(value: T)\n}\ngroup Pair<A, B> {}"),
+            parse("choice Optional<T> {\nnone: Void\nsome: T\n}\ngroup Pair<A, B> {}"),
             Ok(vec![
                 stmt_node(StmtKind::Choice {
                     name: "Optional".to_string(),
                     params: vec!["T".to_string()],
                     options: vec![
-                        option("none", vec![]),
-                        option("some", vec![("value", TypeName::new("T"))]),
+                        option("none", TypeName::new("Void")),
+                        option("some", TypeName::new("T")),
                     ],
                 }),
                 stmt_node(StmtKind::Group {
@@ -1644,14 +1657,14 @@ mod tests {
         );
         assert_eq!(pattern("()"), pattern_node(PatternKind::Tuple(vec![])));
         assert_eq!(
-            pattern("Optional<Int>.none()"),
+            pattern("Optional<Int>.none.new(())"),
             pattern_node(PatternKind::Option {
                 ty: TypeName::Generic {
                     name: Name::new("Optional"),
                     args: vec![TypeName::new("Int")],
                 },
                 option: "none".to_string(),
-                values: vec![],
+                value: Box::new(pattern_node(PatternKind::Tuple(vec![]))),
             })
         );
         assert_eq!(
@@ -1672,21 +1685,21 @@ mod tests {
             ]))
         );
         assert_eq!(
-            pattern("Shape.pair(left: Shape.empty(), right: _)"),
+            pattern("Shape.pair.new((left: Shape.empty.new(_), right: _))"),
             pattern_node(PatternKind::Option {
                 ty: TypeName::new("Shape"),
                 option: "pair".to_string(),
-                values: vec![
+                value: Box::new(pattern_node(PatternKind::Tuple(vec![
                     element(
                         Some("left"),
                         pattern_node(PatternKind::Option {
                             ty: TypeName::new("Shape"),
                             option: "empty".to_string(),
-                            values: vec![],
+                            value: Box::new(pattern_node(PatternKind::Any)),
                         })
                     ),
                     element(Some("right"), pattern_node(PatternKind::Any)),
-                ],
+                ]))),
             })
         );
         for src in [
@@ -1696,10 +1709,17 @@ mod tests {
             "match v { 1 + 1 => {} }",
             "match v { -true => {} }",
             "match v { (x: ) => {} }",
-            // An option's value is always matched.
+            // An option's value is always matched, with exactly one pattern.
             "match v { Shape.empty => {} }",
             "match v { Shape.circle => {} }",
             "match v { (Shape.empty, _) => {} }",
+            "match v { Shape.empty.new => {} }",
+            "match v { Shape.empty.new() => {} }",
+            "match v { Shape.pair.new(_, _) => {} }",
+            "match v { Shape.pair.new(left: _) => {} }",
+            // Options are matched like they're created, with `new`.
+            "match v { Shape.circle(_) => {} }",
+            "match v { Shape.circle.make(_) => {} }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
@@ -1741,7 +1761,7 @@ mod tests {
         // Only a tuple pattern can be assigned to, and only in a function.
         for src in [
             "_ = x",
-            "Shape.a(let r) = s",
+            "Shape.a.new(let r) = s",
             "(let a) =",
             "(let a) = (1) = (2)",
         ] {
@@ -2885,21 +2905,11 @@ mod tests {
         })
     }
 
-    /// An option called `name` holding a tuple of `values`, which are each
-    /// a label and a type.
-    fn option(name: &str, values: Vec<(&str, TypeName)>) -> ChoiceOption {
-        let values = values
-            .into_iter()
-            .map(|(label, ty)| TupleElement {
-                label: Some(label.to_string()),
-                name: Some(label.to_string()),
-                ty,
-                span: Span::default(),
-            })
-            .collect();
+    /// An option called `name` holding a value of type `ty`.
+    fn option(name: &str, ty: TypeName) -> ChoiceOption {
         ChoiceOption {
             name: name.to_string(),
-            values,
+            ty,
             span: Span::default(),
         }
     }
@@ -2910,44 +2920,41 @@ mod tests {
             parse_body(
                 "
                 choice Shape {
-                    circle(radius: Int)
-                    empty()
-                    rectangle(width: Int, height: Int)
-                    pair(of: (a: Int, b: Bool))
+                    circle: Int
+                    empty: Void
+                    rectangle: (width: Int, height: Int)
+                    nested: Optional<Int>
                 }
                 "
             ),
             Ok(vec![choice_(
                 "Shape",
                 vec![
-                    option("circle", vec![("radius", TypeName::new("Int"))]),
-                    option("empty", vec![]),
+                    option("circle", TypeName::new("Int")),
+                    option("empty", TypeName::new("Void")),
                     option(
                         "rectangle",
-                        vec![
-                            ("width", TypeName::new("Int")),
-                            ("height", TypeName::new("Int")),
-                        ],
+                        TypeName::Tuple(vec![
+                            TupleElement {
+                                label: Some("width".to_string()),
+                                name: Some("width".to_string()),
+                                ty: TypeName::new("Int"),
+                                span: Span::default(),
+                            },
+                            TupleElement {
+                                label: Some("height".to_string()),
+                                name: Some("height".to_string()),
+                                ty: TypeName::new("Int"),
+                                span: Span::default(),
+                            },
+                        ]),
                     ),
                     option(
-                        "pair",
-                        vec![(
-                            "of",
-                            TypeName::Tuple(vec![
-                                TupleElement {
-                                    label: Some("a".to_string()),
-                                    name: Some("a".to_string()),
-                                    ty: TypeName::new("Int"),
-                                    span: Span::default(),
-                                },
-                                TupleElement {
-                                    label: Some("b".to_string()),
-                                    name: Some("b".to_string()),
-                                    ty: TypeName::new("Bool"),
-                                    span: Span::default(),
-                                },
-                            ]),
-                        )],
+                        "nested",
+                        TypeName::Generic {
+                            name: Name::new("Optional"),
+                            args: vec![TypeName::new("Int")],
+                        },
                     ),
                 ],
             )])
@@ -2961,8 +2968,11 @@ mod tests {
             Ok(vec![choice_("Never", vec![])])
         );
         assert_eq!(
-            parse_body("choice Unit { only() }"),
-            Ok(vec![choice_("Unit", vec![option("only", vec![])])])
+            parse_body("choice Unit { only: Void }"),
+            Ok(vec![choice_(
+                "Unit",
+                vec![option("only", TypeName::new("Void"))]
+            )])
         );
         assert_eq!(
             parse_body(
@@ -2970,10 +2980,10 @@ mod tests {
                 choice Result { // A comment.
 
                     // Another comment.
-                    success(value: Int)
+                    success: Int
 
-                    failure ( error : other::Error )
-                    split(
+                    failure : other::Error
+                    split: (
                         first: Int,
                         second: Int,
                     )
@@ -2983,17 +2993,24 @@ mod tests {
             Ok(vec![choice_(
                 "Result",
                 vec![
-                    option("success", vec![("value", TypeName::new("Int"))]),
-                    option(
-                        "failure",
-                        vec![("error", TypeName::Named(qualified("other", "Error")))],
-                    ),
+                    option("success", TypeName::new("Int")),
+                    option("failure", TypeName::Named(qualified("other", "Error"))),
                     option(
                         "split",
-                        vec![
-                            ("first", TypeName::new("Int")),
-                            ("second", TypeName::new("Int")),
-                        ],
+                        TypeName::Tuple(vec![
+                            TupleElement {
+                                label: Some("first".to_string()),
+                                name: Some("first".to_string()),
+                                ty: TypeName::new("Int"),
+                                span: Span::default(),
+                            },
+                            TupleElement {
+                                label: Some("second".to_string()),
+                                name: Some("second".to_string()),
+                                ty: TypeName::new("Int"),
+                                span: Span::default(),
+                            },
+                        ]),
                     ),
                 ],
             )])
@@ -3029,29 +3046,30 @@ mod tests {
             "choice Shape",
             "choice Shape {",
             "choice Shape { circle }",
-            "choice Shape { circle(radius:) }",
-            "choice Shape { (radius: Int) }",
-            "choice Shape { circle(: Int) }",
-            // Values are written like a tuple type's elements.
-            "choice Shape { circle(Int) }",
-            "choice Shape { circle(_ _: Int) }",
-            // The old syntax, with a type after `:`.
-            "choice Shape { circle: Int }",
-            "choice Shape { pair: (a: Int, b: Int) }",
+            "choice Shape { circle: }",
+            "choice Shape { : Int }",
+            "choice Shape { Int }",
+            // The old syntax, holding a tuple of what's in brackets.
+            "choice Shape { circle(radius: Int) }",
+            "choice Shape { empty() }",
+            "choice Shape { circle(): Int }",
+            // An option holds one type.
+            "choice Shape { pair: Int, Int }",
+            "choice Shape { pair: Int Bool }",
+            "choice Shape { _: Int }",
             // Options aren't fields, and can't have values.
-            "choice Shape { let circle(radius: Int) }",
+            "choice Shape { let circle: Int }",
             "choice Shape { circle = 1 }",
-            "choice Shape { circle(radius: Int) = 1 }",
-            "choice Shape { circle(radius: 1) }",
+            "choice Shape { circle: Int = 1 }",
+            "choice Shape { circle: 1 }",
             // Only options are allowed.
             "choice Shape { f() {} }",
             "choice Shape { fn f() {} }",
             "choice Shape { choice Inner {} }",
             // Separators.
-            "choice Shape { circle() square() }",
-            "choice Shape { circle(), square() }",
-            "choice Shape { circle(radius: Int) square() }",
-            "choice Shape { circle(); }",
+            "choice Shape { circle: Int square: Int }",
+            "choice Shape { circle: Int, square: Int }",
+            "choice Shape { circle: Int; }",
             // `{` must be on the same line.
             "choice Shape\n{}",
             // Statements after `}` need their own line.
@@ -3059,26 +3077,25 @@ mod tests {
             // Keywords.
             "choice choice {}",
             "let choice = 1",
-            "choice Shape { group() }",
+            "choice Shape { group: Int }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
     }
 
-    /// An arm matching the option `name` of `ty`, binding the element of its
-    /// value labelled `binding` to the same name if given, as in
-    /// `Shape.circle(radius: let radius)`, or holding nothing otherwise, as
-    /// in `Shape.empty()`.
+    /// An arm matching the option `name` of `ty`, binding its value to
+    /// `binding` if given, as in `Shape.circle.new(let radius)`, or matching
+    /// any value otherwise, as in `Shape.empty.new(_)`.
     fn match_option(ty: &str, name: &str, binding: Option<&str>, body: Vec<Stmt>) -> MatchArm {
-        let values = binding.map(|binding| TuplePattern {
-            label: Some(binding.to_string()),
-            pattern: pattern_node(PatternKind::Binding(binding.to_string())),
-        });
+        let value = match binding {
+            Some(binding) => PatternKind::Binding(binding.to_string()),
+            None => PatternKind::Any,
+        };
         MatchArm {
             pattern: pattern_node(PatternKind::Option {
                 ty: TypeName::new(ty),
                 option: name.to_string(),
-                values: values.into_iter().collect(),
+                value: Box::new(pattern_node(value)),
             }),
             body,
         }
@@ -3090,10 +3107,10 @@ mod tests {
             parse_body(
                 "
                 match shape {
-                    Shape.circle(radius: let radius) => {
+                    Shape.circle.new(let radius) => {
                         draw(radius)
                     }
-                    Shape.empty() => {}
+                    Shape.empty.new(_) => {}
                 }
                 "
             ),
@@ -3125,7 +3142,7 @@ mod tests {
             })])
         );
         assert_eq!(
-            parse_body("match s { A.a() => {} }"),
+            parse_body("match s { A.a.new(_) => {} }"),
             Ok(vec![stmt_node(StmtKind::Match {
                 value: *var("s"),
                 arms: vec![match_option("A", "a", None, vec![])],
@@ -3137,9 +3154,9 @@ mod tests {
                 match s.shape() { // A comment.
 
                     // Another comment.
-                    other::Shape.circle( r: let r ) => { return r }
+                    other::Shape.circle.new( let r ) => { return r }
 
-                    Shape.empty() => {
+                    Shape.empty.new(_) => {
                     }
                 }
                 "
@@ -3151,10 +3168,7 @@ mod tests {
                         pattern: pattern_node(PatternKind::Option {
                             ty: TypeName::Named(qualified("other", "Shape",)),
                             option: "circle".to_string(),
-                            values: vec![TuplePattern {
-                                label: Some("r".to_string()),
-                                pattern: pattern_node(PatternKind::Binding("r".to_string())),
-                            }],
+                            value: Box::new(pattern_node(PatternKind::Binding("r".to_string()))),
                         }),
                         body: vec![stmt_node(StmtKind::Return(Some(*var("r"))))],
                     },
@@ -3171,33 +3185,34 @@ mod tests {
             "match {}",
             "match s",
             "match s {",
-            "match s { Shape.a() }",
-            "match s { Shape.a() => }",
-            "match s { Shape.a() {} }",
+            "match s { Shape.a.new(_) }",
+            "match s { Shape.a.new(_) => }",
+            "match s { Shape.a.new(_) {} }",
             "match s { Shape => {} }",
             "match s { Shape() => {} }",
             "match s { .a() => {} }",
             "match s { => {} }",
             // An option's value is always matched.
             "match s { Shape.a => {} }",
+            "match s { Shape.a.new => {} }",
             // Only `let` bindings of a name are allowed.
-            "match s { Shape.a(r: r) => {} }",
-            "match s { Shape.a(r: var r) => {} }",
-            "match s { Shape.a(r: let) => {} }",
-            "match s { Shape.a()() => {} }",
+            "match s { Shape.a.new(r) => {} }",
+            "match s { Shape.a.new(var r) => {} }",
+            "match s { Shape.a.new(let) => {} }",
+            "match s { Shape.a.new(_)(_) => {} }",
             // Options need blocks.
-            "match s { Shape.a() => f() }",
+            "match s { Shape.a.new(_) => f() }",
             // Separators.
-            "match s { Shape.a() => {} Shape.b() => {} }",
-            "match s { Shape.a() => {}, Shape.b() => {} }",
+            "match s { Shape.a.new(_) => {} Shape.b.new(_) => {} }",
+            "match s { Shape.a.new(_) => {}, Shape.b.new(_) => {} }",
             // `{` must be on the same line.
             "match s\n{}",
-            "match s { Shape.a() =>\n{} }",
+            "match s { Shape.a.new(_) =>\n{} }",
             // Statements after `}` need their own line.
             "match s {} x = 1",
             // Keywords.
             "let match = 1",
-            "match s { Shape.match() => {} }",
+            "match s { Shape.match.new(_) => {} }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }

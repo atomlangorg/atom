@@ -78,30 +78,12 @@ impl<'a> Checker<'a> {
         }
     }
     /// The signature of `callee`, for the code at `span`. Something whose
-    /// arguments build a tuple, such as an option, is like a function whose
-    /// parameters are the tuple's elements.
+    /// arguments build a tuple, such as a value with `Call`, is like a
+    /// function whose parameters are the tuple's elements.
     pub(super) fn callee_signature(&mut self, callee: &Callee, span: Span) -> Signature<'a> {
         match callee {
-            Callee::Function(function) => self.signature_of(function, span),
-            Callee::Option { choice, index } => {
-                let option = self.options(choice.id).unwrap_or_default()[*index].clone();
-                // If its value's type is unknown, it's already been reported,
-                // and so are the types of its parameters.
-                let types = match self.option_type(choice, *index, span) {
-                    Some(value) => self.element_types(&value),
-                    None => vec![],
-                };
-                let params = option.decl.values.iter().enumerate();
-                Signature {
-                    name: format!("{choice}.{}", option.decl.name),
-                    params: params
-                        .map(|(index, value)| {
-                            ParamSignature::declared(value, types.get(index).cloned())
-                        })
-                        .collect(),
-                    returns: Some(choice.clone()),
-                    template: None,
-                }
+            Callee::Function(function) | Callee::Method { function, .. } => {
+                self.signature_of(function, span)
             }
             Callee::Value { input, returns, .. } => Signature {
                 name: input.name.clone(),
@@ -169,7 +151,7 @@ impl<'a> Checker<'a> {
     ) -> Typed {
         let arity = signature.params.len();
         let returns = self.check_args(name, args, found, signature, span);
-        // Unless it's a function, its arguments build a tuple.
+        // A value's arguments build a tuple.
         let build = |tuple: Option<&Type>, fields: Vec<ir::Expr>| match tuple {
             Some(tuple) if fields.len() == arity => ir::Expr::Construct {
                 group: tuple.id,
@@ -182,16 +164,10 @@ impl<'a> Checker<'a> {
                 function: self.callee(function, span),
                 args: lowered,
             },
-            Callee::Option { choice, index } => {
-                let value_ty = self.options(choice.id).unwrap_or_default()[index]
-                    .ty
-                    .clone();
-                ir::Expr::Choose {
-                    choice: choice.id,
-                    option: index,
-                    value: Box::new(build(value_ty.as_ref(), lowered)),
-                }
-            }
+            Callee::Method { function, receiver } => ir::Expr::Call {
+                function: self.callee(function, span),
+                args: iter::once(receiver).chain(lowered).collect(),
+            },
             Callee::Value {
                 value,
                 call: function,
@@ -205,38 +181,107 @@ impl<'a> Checker<'a> {
         };
         Typed { ty: returns, expr }
     }
-    /// The types of the parameters of the static function or option called
-    /// `method` of the generic type at `template` in `templates`, if it has
-    /// one, which can use its parameters' stand-ins. It's for the code at
-    /// `span`.
-    pub(super) fn declared_params(
+    /// The generic type that `receiver` names without its arguments, as an
+    /// index into `templates`, along with its name and what's called on it,
+    /// if `method` is called on it or on one of its static members.
+    pub(super) fn generic_call<'e>(
         &mut self,
-        template: usize,
-        method: &str,
-        span: Span,
-    ) -> Option<Vec<Option<Type>>> {
-        let generic = self.templates[template].generic.clone()?;
-        let callee = self.static_callee(&generic, method)?;
-        let signature = self.callee_signature(&callee, span);
-        Some(signature.params.into_iter().map(|param| param.ty).collect())
+        receiver: &'e Expr,
+        method: &'e str,
+    ) -> Option<(&'e Name, usize, GenericCall<'e>)> {
+        let (owner, call) = match &receiver.kind {
+            ExprKind::Field {
+                receiver: owner,
+                field,
+            } => (
+                &**owner,
+                GenericCall::Member {
+                    member: field,
+                    method,
+                },
+            ),
+            _ => (receiver, GenericCall::Static(method)),
+        };
+        let ExprKind::Var(name) = &owner.kind else {
+            return None;
+        };
+        let Ok(Binding::Generic(template)) = self.lookup(name) else {
+            return None;
+        };
+        Some((name, template, call))
     }
-    /// Checks a call to the static function or option called `method` of the
-    /// generic type called `name`, at `template` in `templates`, working out
-    /// its arguments from the types of `args`, which are matched against
-    /// `declared`. Each of `args` is checked once, in order, so once every
-    /// argument of the type is known, the rest take their types from its
-    /// parameters, as in any other call.
+    /// The signature of what `call` calls on `ty`, if it has it, without
+    /// compiling anything, for the code at `span`.
+    pub(super) fn generic_signature(
+        &mut self,
+        ty: &Type,
+        call: GenericCall,
+        span: Span,
+    ) -> Option<Signature<'a>> {
+        let function = match call {
+            GenericCall::Static(name) => self.static_function(ty, name)?,
+            GenericCall::Member { member, method } => {
+                let member = self.static_member(ty, member)?;
+                let value = self.static_member_type(ty, &member, span)?;
+                match self.member(&value, method)? {
+                    Member::Method(function) => function,
+                    Member::Field(..) => return None,
+                }
+            }
+        };
+        Some(self.signature_of(&function, span))
+    }
+    /// What `call` calls on `ty`, if it has it, along with its name, for the
+    /// code at `span`.
+    pub(super) fn generic_callee(
+        &mut self,
+        ty: &Type,
+        call: GenericCall,
+        span: Span,
+    ) -> Option<(Callee, String)> {
+        match call {
+            GenericCall::Static(name) => {
+                let function = self.static_function(ty, name)?;
+                Some((Callee::Function(function), format!("{ty}.{name}")))
+            }
+            GenericCall::Member { member, method } => {
+                let member = self.static_member(ty, member)?;
+                let Typed { ty: value, expr } = self.static_member_value(ty, member, span);
+                let value = value?;
+                let Some(Member::Method(function)) = self.member(&value, method) else {
+                    return None;
+                };
+                let callee = Callee::Method {
+                    function,
+                    receiver: expr,
+                };
+                Some((callee, format!("{value}.{method}")))
+            }
+        }
+    }
+    /// Checks a call to what `call` calls on the generic type called `name`,
+    /// at `template` in `templates`, working out its arguments from what the
+    /// call returns being `expected`, and from the types of `args`. Each of
+    /// `args` is checked once, in order, so once every argument of the type
+    /// is known, the rest take their types from its parameters, as in any
+    /// other call. Returns `None` without checking anything if the generic
+    /// type has nothing that `call` calls.
     pub(super) fn inferred_call(
         &mut self,
         name: &Name,
         template: usize,
-        method: &str,
-        declared: &[Option<Type>],
+        call: GenericCall,
         args: &[Arg],
         span: Span,
-    ) -> Typed {
+        expected: Option<&Type>,
+    ) -> Option<Typed> {
+        let generic = self.templates[template].generic.clone()?;
+        let declared = self.generic_signature(&generic, call, span)?;
         let stand_ins = self.templates[template].stand_ins.clone();
         let mut inferred = vec![None; stand_ins.len()];
+        if let (Some(returns), Some(expected)) = (&declared.returns, expected) {
+            self.infer(returns, expected, &stand_ins, &mut inferred);
+        }
         // The type, once every one of its arguments is known.
         let mut made = None;
         let mut found = vec![];
@@ -248,11 +293,15 @@ impl<'a> Checker<'a> {
                 made = Some(self.named_instance(template, args, name));
             }
             let expected = match made.clone().flatten() {
-                Some(ty) => self.param_type(&ty, method, index, span),
+                Some(ty) => self.param_type(&ty, call, index, span),
                 None => None,
             };
             let Typed { ty, expr } = self.expr_as(&arg.value, expected.as_ref());
-            if let (Some(Some(param)), Some(ty)) = (declared.get(index), &ty) {
+            let param = declared
+                .params
+                .get(index)
+                .and_then(|param| param.ty.as_ref());
+            if let (Some(param), Some(ty)) = (param, &ty) {
                 self.infer(param, ty, &stand_ins, &mut inferred);
             }
             found.push(ty);
@@ -267,35 +316,30 @@ impl<'a> Checker<'a> {
                 if found.iter().all(Option::is_some) {
                     self.error(name.span, CheckError::CannotInferGeneric(name.to_string()));
                 }
-                return Typed::UNKNOWN;
+                return Some(Typed::UNKNOWN);
             }
         };
-        let Some(ty) = made else {
-            return Typed::UNKNOWN;
-        };
-        let Some(callee) = self.static_callee(&ty, method) else {
-            return Typed::UNKNOWN;
+        let Some((callee, name)) = made.and_then(|ty| self.generic_callee(&ty, call, span)) else {
+            return Some(Typed::UNKNOWN);
         };
         let signature = self.callee_signature(&callee, span);
-        let name = format!("{ty}.{method}");
-        self.checked_call(callee, name, signature, args, (found, lowered), span)
+        Some(self.checked_call(callee, name, signature, args, (found, lowered), span))
     }
-    /// The type of the parameter at `index` of the static function or option
-    /// called `method` of `ty`, for the code at `span`.
+    /// The type of the parameter at `index` of what `call` calls on `ty`,
+    /// for the code at `span`.
     pub(super) fn param_type(
         &mut self,
         ty: &Type,
-        method: &str,
+        call: GenericCall,
         index: usize,
         span: Span,
     ) -> Option<Type> {
-        let callee = self.static_callee(ty, method)?;
-        let signature = self.callee_signature(&callee, span);
+        let signature = self.generic_signature(ty, call, span)?;
         signature.params.into_iter().nth(index)?.ty
     }
-    /// Checks a call to a method on a value, a static function on a type, or
-    /// the creation of an option of a choice, returning its return type, or
-    /// `None` if it can't be determined, along with what it compiles to.
+    /// Checks a call to a method on a value or a static function on a type,
+    /// returning its return type, or `None` if it can't be determined, along
+    /// with what it compiles to.
     pub(super) fn method_call(
         &mut self,
         receiver: &Expr,
@@ -304,19 +348,17 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<&Type>,
     ) -> Typed {
-        // A generic type's name can leave out its arguments if they're not
-        // known from `expected`, when they can be worked out from the call's.
-        if let ExprKind::Var(name) = &receiver.kind
-            && let Ok(Binding::Generic(template)) = self.lookup(name)
-            && !expected.is_some_and(|expected| self.is_made_from(expected, template))
-            && let Some(declared) = self.declared_params(template, method, span)
+        // A generic type's name can leave out its arguments when they can be
+        // worked out from the call.
+        if let Some((name, template, call)) = self.generic_call(receiver, method)
+            && let Some(typed) = self.inferred_call(name, template, call, args, span, expected)
         {
-            return self.inferred_call(name, template, method, &declared, args, span);
+            return typed;
         }
-        let receiver = self.receiver(receiver, method, expected);
-        // A field followed by arguments is called, like any other value.
-        let receiver = match receiver {
+        let (callee, name) = match self.receiver(receiver, method, expected) {
             Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
+                // A field followed by arguments is called, like any other
+                // value.
                 Some(Member::Field(index)) => {
                     let field_ty = self.field_type(&ty, index, span);
                     let value = ir::Expr::Field {
@@ -325,19 +367,14 @@ impl<'a> Checker<'a> {
                     };
                     return self.call_value(field_ty, value, method, args, span);
                 }
-                _ => Some(Receiver::Value(ty, lowered)),
-            },
-            // A static function is called like any other function, and an
-            // option is created directly, since it's known which one it is.
-            Some(Receiver::Type(ty)) if let Some(callee) = self.static_callee(&ty, method) => {
-                return self.call_callee(callee, format!("{ty}.{method}"), args, span);
-            }
-            receiver => receiver,
-        };
-        let (ty, found_method, lowered_receiver) = match receiver {
-            Some(Receiver::Value(ty, lowered)) => match self.member(&ty, method) {
-                Some(Member::Method(found)) => (ty, found, lowered),
-                _ => {
+                Some(Member::Method(function)) => {
+                    let callee = Callee::Method {
+                        function,
+                        receiver: lowered,
+                    };
+                    (callee, format!("{ty}.{method}"))
+                }
+                None => {
                     let error = self.no_member(ty, method);
                     self.error(span, error);
                     // The arguments are still checked, so their errors are
@@ -346,36 +383,30 @@ impl<'a> Checker<'a> {
                     return Typed::UNKNOWN;
                 }
             },
-            Some(Receiver::Type(ty)) => {
-                let error = self.no_static_function(ty, method);
-                self.error(span, error);
-                self.args(args, &[]);
-                return Typed::UNKNOWN;
-            }
+            Some(Receiver::Type(ty)) => match self.static_member(&ty, method) {
+                // A static function is called like any other function, and an
+                // option is a value, so it's called like any other value.
+                Some(StaticMember::Function(function)) => {
+                    (Callee::Function(function), format!("{ty}.{method}"))
+                }
+                Some(member @ StaticMember::Option(_)) => {
+                    let name = format!("{ty}.{method}");
+                    let Typed { ty, expr } = self.static_member_value(&ty, member, span);
+                    return self.call_value(ty, expr, &name, args, span);
+                }
+                None => {
+                    let error = self.no_static_function(ty, method);
+                    self.error(span, error);
+                    self.args(args, &[]);
+                    return Typed::UNKNOWN;
+                }
+            },
             None => {
                 self.args(args, &[]);
                 return Typed::UNKNOWN;
             }
         };
-        let signature = self.signature_of(&found_method, span);
-        let params: Vec<_> = signature
-            .params
-            .iter()
-            .map(|param| param.ty.clone())
-            .collect();
-        let (found, lowered_args) = self.args(args, &params);
-        let returns = self.check_args(format!("{ty}.{method}"), args, found, signature, span);
-        let found_method = self.callee(found_method, span);
-
-        // A method's receiver is its first argument.
-        let args = iter::once(lowered_receiver).chain(lowered_args).collect();
-        Typed {
-            ty: returns,
-            expr: ir::Expr::Call {
-                function: found_method,
-                args,
-            },
-        }
+        self.call_callee(callee, name, args, span)
     }
     /// Checks a call, returning what's called's return type, or `None` if it
     /// can't be determined, along with what it compiles to. A function is

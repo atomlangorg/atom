@@ -25,12 +25,12 @@ impl IntS8 with Equal {
 impl IntS8 with Compare {
     fn compare(to rhs: Self) -> Comparison {
         if self < rhs {
-            return Comparison.less()
+            return Comparison.less.new(())
         }
         if self > rhs {
-            return Comparison.greater()
+            return Comparison.greater.new(())
         }
-        return Comparison.equal()
+        return Comparison.equal.new(())
     }
 
     primitive fn isLess(than rhs: Self) -> Bool

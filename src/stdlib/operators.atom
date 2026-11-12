@@ -66,28 +66,28 @@ trait Compare {
     fn compare(to rhs: Rhs) -> Comparison
 
     fn isLess(than rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) == Comparison.less()
+        return self.compare(to: rhs) == Comparison.less.new(())
     }
 
     fn isLessOrEqual(to rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) != Comparison.greater()
+        return self.compare(to: rhs) != Comparison.greater.new(())
     }
 
     fn isGreater(than rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) == Comparison.greater()
+        return self.compare(to: rhs) == Comparison.greater.new(())
     }
 
     fn isGreaterOrEqual(to rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) != Comparison.less()
+        return self.compare(to: rhs) != Comparison.less.new(())
     }
 }
 
 // How one value compares to another: `less` than it, `equal` to it, or
 // `greater` than it.
 choice Comparison {
-    less()
-    equal()
-    greater()
+    less: Void
+    equal: Void
+    greater: Void
 }
 
 // `Comparison`s are equal if they're the same option, since none of them hold

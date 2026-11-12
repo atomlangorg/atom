@@ -111,11 +111,11 @@ pub enum PrimitiveFn {
     CallFn,
     /// `ChoiceTag.new`, which is the option that a choice is.
     ChoiceTag,
+    /// `ChoiceOption.new`, which creates the choice as that option, holding
+    /// the value.
+    NewChoice,
     /// `ChoiceOption.tag`, which is the option it already is.
     OptionTag,
-    /// `ChoiceOption.call`, which creates the choice as that option, holding
-    /// the input.
-    CallOption,
 }
 
 #[derive(Debug)]
@@ -206,13 +206,6 @@ pub enum Expr {
     Construct {
         group: usize,
         fields: Vec<Expr>,
-    },
-    /// Creates a choice, as an index into `Program::types`, as the option at
-    /// `option` in the order they're declared, holding `value`.
-    Choose {
-        choice: usize,
-        option: usize,
-        value: Box<Expr>,
     },
     /// The option of a choice at this index, in the order they're declared,
     /// which is a value of the primitive type `ChoiceOption`.

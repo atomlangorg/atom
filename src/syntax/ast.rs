@@ -568,13 +568,12 @@ pub struct Field {
     pub span: Span,
 }
 
-/// An option of a choice, such as `circle(radius: Int)` or `empty()`.
+/// An option of a choice, such as `circle: Int` or `empty: Void`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
     pub name: String,
-    /// The elements of the tuple it holds, as in `(radius: Int)`, which
-    /// each have a label.
-    pub values: Vec<TupleElement>,
+    /// The type of the value it holds.
+    pub ty: TypeName,
     pub span: Span,
 }
 
@@ -605,14 +604,14 @@ pub enum PatternKind {
     /// `(label: pattern, ...)`: matches a tuple whose elements each match,
     /// with the labels its type builds it with.
     Tuple(Vec<TuplePattern>),
-    /// `Type.option(label: pattern, ...)`: matches the option of a choice
-    /// whose value matches the tuple pattern in brackets, as in
-    /// `Shape.circle(radius: _)`. The type is a name, which can be given
-    /// generic arguments.
+    /// `Type.option.new(pattern)`: matches the option of a choice whose
+    /// value matches the pattern in brackets, as in `Shape.circle.new(_)`,
+    /// like it's created. The type is a name, which can be given generic
+    /// arguments.
     Option {
         ty: TypeName,
         option: String,
-        values: Vec<TuplePattern>,
+        value: Box<Pattern>,
     },
 }
 
@@ -626,15 +625,15 @@ impl fmt::Display for Pattern {
             }
             PatternKind::Bool(value) => write!(f, "{value}"),
             PatternKind::Tuple(elements) => write!(f, "{}", show_tuple(elements)),
-            PatternKind::Option { ty, option, values } => {
-                write!(f, "{ty}.{option}{}", show_tuple(values))
+            PatternKind::Option { ty, option, value } => {
+                write!(f, "{ty}.{option}.new({value})")
             }
         }
     }
 }
 
 /// How the tuple pattern with `elements` is written, as in `(x: 0, _)`.
-pub fn show_tuple(elements: &[TuplePattern]) -> String {
+fn show_tuple(elements: &[TuplePattern]) -> String {
     let elements: Vec<_> = elements
         .iter()
         .map(|element| match &element.label {

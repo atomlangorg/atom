@@ -293,10 +293,6 @@ impl<'a> Checker<'a> {
                     self.instantiate_expr(field, params, state)?;
                 }
             }
-            ir::Expr::Choose { choice, value, .. } => {
-                *choice = self.concrete(*choice, params, state)?;
-                self.instantiate_expr(value, params, state)?;
-            }
             ir::Expr::Field { receiver, .. } => self.instantiate_expr(receiver, params, state)?,
         }
         Some(())

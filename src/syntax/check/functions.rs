@@ -47,8 +47,8 @@ impl<'a> Checker<'a> {
             // Methods must be unique across every file, since a call can't
             // say which file's method it means.
             let existing = if is_static {
-                self.static_callee(self_ty, name)
-                    .map(|callee| callee.kind())
+                self.static_member(self_ty, name)
+                    .map(|member| member.kind())
             } else {
                 match self.member(self_ty, name) {
                     Some(Member::Field(..)) => Some(MemberKind::Field),
@@ -239,8 +239,8 @@ impl<'a> Checker<'a> {
             }
             (Some("Fn"), "call") => ir::PrimitiveFn::CallFn,
             (Some("ChoiceTag"), "new") => ir::PrimitiveFn::ChoiceTag,
+            (Some("ChoiceOption"), "new") => ir::PrimitiveFn::NewChoice,
             (Some("ChoiceOption"), "tag") => ir::PrimitiveFn::OptionTag,
-            (Some("ChoiceOption"), "call") => ir::PrimitiveFn::CallOption,
             _ => panic!("the compiler doesn't know how to implement `{shown}`"),
         };
         let Signature {

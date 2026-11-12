@@ -539,15 +539,39 @@ impl<'a> Checker<'a> {
     }
     /// Finds the static function or option of `ty` called `name`. They never
     /// share a name, since declaring one as the other is an error.
-    pub(super) fn static_callee(&self, ty: &Type, name: &str) -> Option<Callee> {
+    pub(super) fn static_member(&self, ty: &Type, name: &str) -> Option<StaticMember> {
         if let Some(function) = self.static_function(ty, name) {
-            return Some(Callee::Function(function));
+            return Some(StaticMember::Function(function));
         }
         let (index, _) = self.option(ty, name)?;
-        Some(Callee::Option {
-            choice: ty.clone(),
-            index,
-        })
+        Some(StaticMember::Option(index))
+    }
+    /// `member` of `ty` used as a value, for the code at `span`. A static
+    /// function is an `Fn`, and an option is its `ChoiceOption`, so naming it
+    /// doesn't create the choice.
+    pub(super) fn static_member_value(
+        &mut self,
+        ty: &Type,
+        member: StaticMember,
+        span: Span,
+    ) -> Typed {
+        match member {
+            StaticMember::Function(function) => self.function_value(function, span),
+            StaticMember::Option(index) => self.option_value(ty.clone(), index, span),
+        }
+    }
+    /// The type of `member` of `ty` used as a value, like
+    /// `static_member_value`, without compiling it.
+    pub(super) fn static_member_type(
+        &mut self,
+        ty: &Type,
+        member: &StaticMember,
+        span: Span,
+    ) -> Option<Type> {
+        match member {
+            StaticMember::Function(function) => self.function_type(function, span),
+            StaticMember::Option(index) => self.option_value(ty.clone(), *index, span).ty,
+        }
     }
     /// Finds the option of `ty` called `name`, if `ty` is a choice, returning
     /// its index in the order they're declared, and the type of the value it
@@ -557,25 +581,15 @@ impl<'a> Checker<'a> {
         let index = options.iter().position(|option| option.decl.name == name)?;
         Some((index, options[index].ty.clone()))
     }
-    /// The `Base` and `Value` of `ty`, if it's made from `ChoiceOption`.
-    pub(super) fn option_args(&self, ty: &Type) -> Option<(Type, Type)> {
-        let (template, args) = self.types[ty.id].instance.as_ref()?;
-        match &args[..] {
-            [base, value] if *template == self.std_template("ChoiceOption") => {
-                Some((base.clone(), value.clone()))
-            }
-            _ => None,
-        }
-    }
     /// The error for `name` not being a field or method of `ty`, which points
     /// out an option or static function with that name.
     pub(super) fn no_member(&self, ty: Type, name: &str) -> CheckError {
         let member = name.to_string();
-        match self.static_callee(&ty, name) {
-            Some(callee) => CheckError::NeedsType {
+        match self.static_member(&ty, name) {
+            Some(found) => CheckError::NeedsType {
                 ty,
                 member,
-                kind: callee.kind(),
+                kind: found.kind(),
             },
             None => CheckError::NoMember { ty, member },
         }
@@ -614,10 +628,9 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<&Type>,
     ) -> Typed {
-        // A generic type's name can leave out its arguments when one of its
-        // options is used as `expected`, as in `Optional.none`.
-        let base = expected.and_then(|expected| self.option_args(expected));
-        let expected = base.as_ref().map(|(base, _)| base).or(expected);
+        if let Some(inferred) = self.inferred_member(receiver, field, expected, span) {
+            return inferred;
+        }
         let Some(receiver) = self.receiver(receiver, field, expected) else {
             return Typed::UNKNOWN;
         };
@@ -639,27 +652,55 @@ impl<'a> Checker<'a> {
                 },
                 None => self.no_member(ty, field),
             },
-            Receiver::Type(ty) => match self.static_callee(&ty, field) {
-                Some(Callee::Function(found)) => {
-                    return self.function_value(found, span);
-                }
-                Some(Callee::Value { .. }) => unreachable!("values aren't members of types"),
-                // Naming an option doesn't create the choice, but gives its
-                // `ChoiceOption`.
-                Some(Callee::Option { index, .. }) => {
-                    let template = self.std_template("ChoiceOption");
-                    let value_ty = self.option_type(&ty, index, span);
-                    return Typed {
-                        ty: value_ty
-                            .and_then(|value| self.instance(template, vec![ty, value], span)),
-                        expr: ir::Expr::Tag(index),
-                    };
-                }
+            Receiver::Type(ty) => match self.static_member(&ty, field) {
+                Some(member) => return self.static_member_value(&ty, member, span),
                 None => self.no_static_function(ty, field),
             },
         };
         self.error(span, error);
         Typed::UNKNOWN
+    }
+    /// `member` of the generic type that `receiver` names without its
+    /// arguments, used as a value, if they can be worked out from its type
+    /// being `expected`, as in `Optional.none` where a
+    /// `ChoiceOption<Optional<Int>, Void>` is expected. It's for the code at
+    /// `span`.
+    pub(super) fn inferred_member(
+        &mut self,
+        receiver: &Expr,
+        member: &str,
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Option<Typed> {
+        let expected = expected?;
+        let ExprKind::Var(name) = &receiver.kind else {
+            return None;
+        };
+        let Ok(Binding::Generic(template)) = self.lookup(name) else {
+            return None;
+        };
+        let generic = self.templates[template].generic.clone()?;
+        let declared = self.static_member(&generic, member)?;
+        let declared = self.static_member_type(&generic, &declared, span)?;
+        let stand_ins = self.templates[template].stand_ins.clone();
+        let mut inferred = vec![None; stand_ins.len()];
+        self.infer(&declared, expected, &stand_ins, &mut inferred);
+        let args = inferred.into_iter().collect::<Option<_>>()?;
+        let Some(ty) = self.named_instance(template, args, name) else {
+            return Some(Typed::UNKNOWN);
+        };
+        let found = self.static_member(&ty, member)?;
+        Some(self.static_member_value(&ty, found, span))
+    }
+    /// The option of `ty` at `index` as a value, which is its `ChoiceOption`,
+    /// for the code at `span`.
+    pub(super) fn option_value(&mut self, ty: Type, index: usize, span: Span) -> Typed {
+        let template = self.std_template("ChoiceOption");
+        let value_ty = self.option_type(&ty, index, span);
+        Typed {
+            ty: value_ty.and_then(|value| self.instance(template, vec![ty, value], span)),
+            expr: ir::Expr::Tag(index),
+        }
     }
     /// Checks `Self { ... }`, which constructs the type of the `impl` it's
     /// in, returning that type, or `None` if it can't be determined, along

@@ -292,21 +292,21 @@ struct FieldSignature<'a> {
 
 #[derive(Debug, Clone)]
 struct OptionSignature<'a> {
-    /// Where it's declared, which gives its name and the labels of its value.
+    /// Where it's declared, which gives its name.
     decl: &'a ChoiceOption,
     /// The type of the value it holds, or `None` if it's unknown.
     ty: Option<Type>,
 }
 
-/// What's called with arguments: a function, an option of a choice, which
-/// creates it, or a value, through the standard library's `Call` trait.
+/// What's called with arguments: a function, a method on a value, or a
+/// value, through the standard library's `Call` trait.
 #[derive(Debug, Clone)]
 enum Callee {
     Function(FnRef),
-    /// The option of `choice` at `index`.
-    Option {
-        choice: Type,
-        index: usize,
+    /// `function` called on `receiver`, which is its first argument.
+    Method {
+        function: FnRef,
+        receiver: ir::Expr,
     },
     /// `value`, whose `call` takes a tuple `input`, which the arguments
     /// build. `call` and `returns` are `None` if they're unknown.
@@ -318,15 +318,31 @@ enum Callee {
     },
 }
 
-impl Callee {
-    /// What kind of member it is, if it's a static member of a type.
+/// What a type has by name, rather than its values: a static function, or
+/// an option if it's a choice, as an index in the order they're declared.
+#[derive(Debug, Clone)]
+enum StaticMember {
+    Function(FnRef),
+    Option(usize),
+}
+
+impl StaticMember {
     fn kind(&self) -> MemberKind {
         match self {
             Self::Function(_) => MemberKind::StaticFunction,
-            Self::Option { .. } => MemberKind::Option,
-            Self::Value { .. } => unreachable!("values aren't members of types"),
+            Self::Option(_) => MemberKind::Option,
         }
     }
+}
+
+/// What's called on a generic type whose name leaves out its arguments, so
+/// they're worked out from the call: a static function, as in `Box.of(1)`,
+/// or a method of a static member used as a value, as in
+/// `Optional.some.new(1)`.
+#[derive(Debug, Clone, Copy)]
+enum GenericCall<'s> {
+    Static(&'s str),
+    Member { member: &'s str, method: &'s str },
 }
 
 /// Everything known about a type, which `Type::id` indexes.

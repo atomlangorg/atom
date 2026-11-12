@@ -739,7 +739,7 @@ impl<'a> Checker<'a> {
             }
             signatures.push(OptionSignature {
                 decl: option,
-                ty: self.resolve_tuple(&option.values),
+                ty: self.resolve_type(&option.ty),
             });
         }
         self.types[id].kind = TypeKind::Choice(signatures);

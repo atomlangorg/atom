@@ -30,15 +30,13 @@ impl ChoiceTag with Equal {
 
 // An option of the choice `Base` that holds a `Value`, which is what naming an
 // option refers to, as in `Shape.circle`. `Base` must be a choice, and `Value`
-// is the tuple of what the option is declared with. Calling it creates the
-// choice, so `Shape.circle(radius: 3)` is
-// `Shape.circle.call(input: (radius: 3))`.
+// is the type the option is declared with. `new` creates the choice, as in
+// `Shape.circle.new(3)`.
 primitive ChoiceOption<Base, Value>
 
 impl ChoiceOption {
-    primitive fn tag() -> ChoiceTag<Self.Base>
-}
+    // Creates the choice as this option, holding `value`.
+    primitive fn new(_ value: Self.Value) -> Self.Base
 
-impl ChoiceOption with Call {
-    primitive fn call(input: Self.Value) -> Self.Base
+    primitive fn tag() -> ChoiceTag<Self.Base>
 }
