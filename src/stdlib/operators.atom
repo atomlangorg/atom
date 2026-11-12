@@ -85,9 +85,9 @@ trait Compare {
 // How one value compares to another: `less` than it, `equal` to it, or
 // `greater` than it.
 choice Comparison {
-    less: Void
-    equal: Void
-    greater: Void
+    less
+    equal
+    greater
 }
 
 // `Comparison`s are equal if they're the same option, since none of them hold

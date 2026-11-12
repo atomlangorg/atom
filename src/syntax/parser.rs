@@ -654,15 +654,17 @@ where
         })
     };
 
-    // `name: Type`, which holds a value of that type, so `name: Void` holds
-    // nothing useful.
+    // `name: Type`, which holds a value of that type, or `name`, which is
+    // the same as `name: Void`, so it holds nothing useful.
     let option = ident
-        .then_ignore(just(Token::Colon))
-        .then(type_name.clone())
-        .map_with(|(name, ty), e| ChoiceOption {
-            name,
-            ty,
-            span: Span::from(e.span()),
+        .then(just(Token::Colon).ignore_then(type_name.clone()).or_not())
+        .map_with(|(name, ty), e| {
+            let span = Span::from(e.span());
+            ChoiceOption {
+                name,
+                ty: ty.unwrap_or_else(|| void_type(span)),
+                span,
+            }
         });
 
     // Laid out like a group, with one option per line.
@@ -1257,7 +1259,7 @@ mod tests {
                 var y: other::Number
             }
             choice Answer {
-                yes: Void
+                yes
                 no: other::Reason
             }
         ";
@@ -1279,7 +1281,12 @@ mod tests {
         let StmtKind::Choice { options, .. } = &program[2].kind else {
             panic!("expected a choice");
         };
-        assert_eq!(text(src, options[0].span), "yes: Void");
+        assert_eq!(text(src, options[0].span), "yes");
+        // Its `Void` is where it would be written.
+        let TypeName::Named(name) = &options[0].ty else {
+            panic!("expected a named type");
+        };
+        assert_eq!(text(src, name.span), "yes");
         assert_eq!(text(src, options[1].span), "no: other::Reason");
         let TypeName::Named(name) = &options[1].ty else {
             panic!("expected a named type");
@@ -2974,6 +2981,16 @@ mod tests {
                 vec![option("only", TypeName::new("Void"))]
             )])
         );
+        // Without a type, it holds `Void`, like a function without a return
+        // type returns it.
+        assert_eq!(
+            parse_body("choice Unit { only }"),
+            parse_body("choice Unit { only: Void }")
+        );
+        assert_eq!(
+            parse_body("choice Optional<T> {\nnone\nsome: T\n}"),
+            parse_body("choice Optional<T> {\nnone: Void\nsome: T\n}")
+        );
         assert_eq!(
             parse_body(
                 "
@@ -3045,10 +3062,8 @@ mod tests {
             "choice {}",
             "choice Shape",
             "choice Shape {",
-            "choice Shape { circle }",
             "choice Shape { circle: }",
             "choice Shape { : Int }",
-            "choice Shape { Int }",
             // The old syntax, holding a tuple of what's in brackets.
             "choice Shape { circle(radius: Int) }",
             "choice Shape { empty() }",
@@ -3070,6 +3085,8 @@ mod tests {
             "choice Shape { circle: Int square: Int }",
             "choice Shape { circle: Int, square: Int }",
             "choice Shape { circle: Int; }",
+            "choice Shape { circle empty }",
+            "choice Shape { circle, empty }",
             // `{` must be on the same line.
             "choice Shape\n{}",
             // Statements after `}` need their own line.
