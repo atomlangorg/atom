@@ -1191,6 +1191,29 @@ mod tests {
     }
 
     #[test]
+    fn options_from_the_stdlib_hold_a_value_or_none() {
+        let src = "
+            fn unwrap(_ value: Option<Int>, or fallback: Int) -> Int {
+                match value {
+                    Option.some.new(let found) => {
+                        return found
+                    }
+                    Option.none.new(_) => {
+                        return fallback
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let a = unwrap(Option.some.new(5), or: 0)
+                let b = unwrap(Option<Int>.none.new(()), or: 7)
+                return a * 10 + b
+            }
+            ";
+        assert_eq!(run(src), 57);
+    }
+
+    #[test]
     fn compare_on_integers_gives_their_comparison() {
         // Each check is one bit of the result.
         let src = "
