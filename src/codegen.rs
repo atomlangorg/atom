@@ -1970,16 +1970,16 @@ mod tests {
 
             fn main() -> Int {{
                 let shape = Shape.flag(isOn: true)
-                let tag: ChoiceTag<Shape> = ChoiceTag.new(of: shape)
+                let tag: ChoiceTag<Shape> = ChoiceTag.new(shape)
                 let option = Shape.flag
                 let a = score(matched: tag == Shape.flag.tag(), worth: 1)
                 let b = score(matched: tag == Shape.circle.tag(), worth: 2)
                 let c = score(matched: tag != Shape.circle.tag(), worth: 4)
                 let d = score(matched: tag != option.tag(), worth: 8)
-                let e = score(matched: tag == ChoiceTag.new(of: option(isOn: false)), worth: 16)
-                let f = score(matched: ChoiceTag<Shape>.new(of: Shape.empty()) == Shape.empty.tag(), worth: 32)
+                let e = score(matched: tag == ChoiceTag.new(option(isOn: false)), worth: 16)
+                let f = score(matched: ChoiceTag<Shape>.new(Shape.empty()) == Shape.empty.tag(), worth: 32)
                 let read = ChoiceTag<Shape>.new
-                let g = score(matched: read(of: shape) == tag, worth: 64)
+                let g = score(matched: read(shape) == tag, worth: 64)
                 return a + b + c + d + e + f + g
             }}
             "
@@ -2033,7 +2033,7 @@ mod tests {
                 let c = read(optional: Optional.some(value: 300))
                 let d = Box.holding(0, fallback: Optional.some(value: 4000)).value
                 let shape = Optional.some(value: true)
-                if ChoiceTag.new(of: shape) == Optional<Bool>.some.tag() {
+                if ChoiceTag.new(shape) == Optional<Bool>.some.tag() {
                     return a + b + c + d
                 }
                 return 0
@@ -2066,7 +2066,7 @@ mod tests {
                 let none: ChoiceOption<Optional<Int>, Void> = Optional.none
                 let a = unwrap(some(value: 5), or: 0)
                 let b = unwrap(none(), or: 7)
-                if ChoiceTag<Optional<Int>>.new(of: some(value: 1)) == Optional<Int>.some.tag() {
+                if ChoiceTag<Optional<Int>>.new(some(value: 1)) == Optional<Int>.some.tag() {
                     return a * 10 + b
                 }
                 return 0
@@ -2087,12 +2087,12 @@ mod tests {
             let a: ChoiceOption<Shape, (size: Int)> = Shape.square
             let b: ChoiceTag<Shape> = Shape.square.tag()
             let c: Shape = Shape.square(size: 5)
-            let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(size: 5))
+            let d: ChoiceTag<Shape> = ChoiceTag.new(Shape.square(size: 5))
 
             let n: ChoiceOption<Shape, Void> = Shape.other
             let o: ChoiceTag<Shape> = Shape.other.tag()
             let p: Shape = Shape.other()
-            let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other())
+            let q: ChoiceTag<Shape> = ChoiceTag.new(Shape.other())
 
             fn main() -> Int {
                 return 0

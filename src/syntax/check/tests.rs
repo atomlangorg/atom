@@ -6268,12 +6268,12 @@ fn options_are_values_with_tags() {
         let a: ChoiceOption<Shape, (size: Int)> = Shape.square
         let b: ChoiceTag<Shape> = Shape.square.tag()
         let c: Shape = Shape.square(size: 5)
-        let d: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.square(size: 5))
+        let d: ChoiceTag<Shape> = ChoiceTag.new(Shape.square(size: 5))
 
         let n: ChoiceOption<Shape, Void> = Shape.other
         let o: ChoiceTag<Shape> = Shape.other.tag()
         let p: Shape = Shape.other()
-        let q: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.other())
+        let q: ChoiceTag<Shape> = ChoiceTag.new(Shape.other())
         ";
     assert_eq!(check_top(src), Ok(()));
 }
@@ -6445,11 +6445,11 @@ fn tags_can_be_compared() {
         "
         {SHAPE}
         fn isEmpty(shape: Shape) -> Bool {{
-            return ChoiceTag<Shape>.new(of: shape) == Shape.empty.tag()
+            return ChoiceTag<Shape>.new(shape) == Shape.empty.tag()
         }}
 
         fn isNotEmpty(shape: Shape) -> Bool {{
-            return Shape.empty.tag() != ChoiceTag.new(of: shape)
+            return Shape.empty.tag() != ChoiceTag.new(shape)
         }}
         "
     );
@@ -6529,7 +6529,7 @@ fn tags_and_options_can_have_impls() {
             }}
 
             static fn from(value: Self.Base) -> ChoiceTag<Self.Base> {{
-                return Self.new(of: value)
+                return Self.new(value)
             }}
         }}
 
@@ -6596,15 +6596,15 @@ fn rejects_wrong_values_for_tags() {
             choice Other {{
                 only()
             }}
-            let a = ChoiceTag<Shape>.new(of: Other.only())
-            let b = ChoiceTag<Shape>.new(Shape.empty())
+            let a = ChoiceTag<Shape>.new(Other.only())
+            let b = ChoiceTag<Shape>.new(of: Shape.empty())
             let c = ChoiceTag<Shape>.new()
             let d = ChoiceTag.new()
             "
         )),
         [
-            "argument `of` of `ChoiceTag<Shape>.new` expects `Shape`, found `Other`",
-            "argument to `ChoiceTag<Shape>.new` is missing the label `of`",
+            "argument `value` of `ChoiceTag<Shape>.new` expects `Shape`, found `Other`",
+            "argument to `ChoiceTag<Shape>.new` should not have a label, found `of`",
             "`ChoiceTag<Shape>.new` takes 1 argument, found 0",
             "the arguments of `ChoiceTag` can't be inferred here, so they must be given, as in `ChoiceTag<...>`",
         ]
@@ -6619,7 +6619,7 @@ fn tags_and_options_are_only_for_choices() {
             group Point {}
             let a: ChoiceTag<Int> = 1
             let b: ChoiceOption<Point, Int> = 1
-            let c = ChoiceTag<Int>.new(of: 1)
+            let c = ChoiceTag<Int>.new(1)
             let d: ChoiceTag<Missing> = 1
             alias Tag = ChoiceTag<Bool>
 
@@ -6649,7 +6649,7 @@ fn tags_are_available_from_any_file() {
                 "
                 use /shapes
                 let a: ChoiceTag<Shape> = Shape.empty.tag()
-                let b: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.empty())
+                let b: ChoiceTag<Shape> = ChoiceTag.new(Shape.empty())
                 ",
             ),
             ("/shapes", SHAPE),
@@ -7852,8 +7852,8 @@ fn generic_arguments_are_inferred_from_calls() {
         let k: Pair<Int, Bool> = Pair.copy(of: h)
         let l: Nested<Int> = Nested.boxed(value: Box.of(1))
         let m: Nested<Int> = Nested.pair(a: 1, b: true)
-        let n: ChoiceTag<Shape> = ChoiceTag.new(of: Shape.empty())
-        let o = ChoiceTag.new(of: Shape.empty()) == Shape.empty.tag()
+        let n: ChoiceTag<Shape> = ChoiceTag.new(Shape.empty())
+        let o = ChoiceTag.new(Shape.empty()) == Shape.empty.tag()
 
         "
     );
@@ -7932,7 +7932,7 @@ fn rejects_calls_whose_generic_arguments_cannot_be_inferred() {
                 let k: Box<Bool> = Box.of(1)
                 let l: Int = Box.of(1)
                 let m = Box.of(true) == 1
-                let n = ChoiceTag.new(of: 1)
+                let n = ChoiceTag.new(1)
                 let o = Box.missing(1)
                 // Arguments only take types from a generic type once all
                 // of its arguments are known, which needs `other` here.

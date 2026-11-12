@@ -20,7 +20,7 @@ primitive ChoiceTag<Base>
 
 impl ChoiceTag {
     // Creates the tag of the option that `value` is.
-    static primitive fn new(of value: Self.Base) -> Self
+    static primitive fn new(_ value: Self.Base) -> Self
 }
 
 impl ChoiceTag with Equal {

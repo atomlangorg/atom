@@ -94,7 +94,7 @@ choice Comparison {
 // a value.
 impl Comparison with Equal {
     fn isEqual(to rhs: Self) -> Bool {
-        return ChoiceTag.new(of: self) == ChoiceTag.new(of: rhs)
+        return ChoiceTag.new(self) == ChoiceTag.new(rhs)
     }
 }
 
