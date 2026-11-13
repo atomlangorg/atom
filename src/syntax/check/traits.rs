@@ -37,13 +37,14 @@ pub(super) fn signature_text(function: &Function) -> String {
 
 impl<'a> Checker<'a> {
     /// Declares the functions of `impl ty`, whose type is `self_ty`, `with`
-    /// a trait if given, returning their bodies to check, with the files
-    /// they're written in.
+    /// a trait if given, and `where` its `constraints` are met, returning
+    /// their bodies to check, with the files they're written in.
     pub(super) fn declare_impl(
         &mut self,
         ty: &'a Name,
         self_ty: Option<Type>,
         with: Option<&'a Name>,
+        constraints: &'a [ast::Constraint],
         aliases: &'a [ast::Alias],
         functions: &'a [Function],
     ) -> Vec<(usize, Pending<'a>)> {
@@ -62,12 +63,15 @@ impl<'a> Checker<'a> {
             }
         }
         // Signatures can use `Self` and the `impl`'s aliases, just like
-        // bodies.
-        let impl_aliases = self.in_impl(self_ty.clone(), None, |checker| {
+        // bodies, and the parameters it constrains implement their traits.
+        let constraints = self.in_impl(self_ty.clone(), (None, None), |checker| {
+            checker.define_constraints(constraints)
+        });
+        let impl_aliases = self.in_impl(self_ty.clone(), (None, constraints), |checker| {
             checker.define_impl_aliases(aliases, trait_index)
         });
         let mut indexes = vec![];
-        self.in_impl(self_ty.clone(), impl_aliases, |checker| {
+        self.in_impl(self_ty.clone(), (impl_aliases, constraints), |checker| {
             for function in functions {
                 let name = format!("{type_name}.{}", function.name);
                 let full_name = checker.full_name(&name);
@@ -97,6 +101,7 @@ impl<'a> Checker<'a> {
                     body,
                     kind,
                     aliases: impl_aliases,
+                    constraints,
                 };
                 pending.push((checker.cx.file, body));
             }
@@ -111,12 +116,17 @@ impl<'a> Checker<'a> {
                 self_ty.as_ref(),
                 trait_index,
                 functions,
-                impl_aliases,
+                (impl_aliases, constraints),
             );
             pending.extend(defaults);
         }
         if let Some((with, (trait_index, self_ty))) = with.zip(trait_index.zip(self_ty)) {
-            self.implementations.insert((self_ty.id, trait_index));
+            let implementation = ImplInfo {
+                aliases: impl_aliases,
+                constraints,
+            };
+            self.implementations
+                .insert((self_ty.id, trait_index), implementation);
             let implemented = functions.iter().zip(indexes).collect();
             self.check_implements(
                 Implementation {
@@ -206,7 +216,8 @@ impl<'a> Checker<'a> {
             .map(|(alias, ty)| (alias.name.as_str(), ImplAliasType::Known(Some(ty.clone()))));
         self.impl_aliases.push(alias_types.collect());
         let alias_types = Some(self.impl_aliases.len() - 1);
-        let signatures = self.in_impl(Some(stand_ins[0].clone()), alias_types, |checker| {
+        let impl_ = (alias_types, None);
+        let signatures = self.in_impl(Some(stand_ins[0].clone()), impl_, |checker| {
             let mut signatures = vec![];
             for function in functions {
                 let params = function
@@ -368,16 +379,17 @@ impl<'a> Checker<'a> {
     /// `trait_index` in `traits` uses, since it doesn't implement them in
     /// `functions`, returning their bodies to check, with the trait's file.
     /// Names mean what they do where they're written, so they're checked in
-    /// that file, but `Self`, which is `self_ty`, and the aliases, at
-    /// `aliases` in `impl_aliases`, are the `impl`'s, and they can be used like
-    /// its own functions.
+    /// that file, but `Self`, which is `self_ty`, the aliases, at `aliases`
+    /// in `impl_aliases`, and the constraints, at `constraints` in
+    /// `constraints`, are the `impl`'s, and they can be used like its own
+    /// functions.
     pub(super) fn declare_defaults(
         &mut self,
         type_name: &str,
         self_ty: Option<&Type>,
         trait_index: usize,
         functions: &'a [Function],
-        aliases: Option<usize>,
+        (aliases, constraints): (Option<usize>, Option<usize>),
     ) -> Vec<(usize, Pending<'a>)> {
         let is_implemented = |declared: &Function| {
             functions
@@ -403,7 +415,7 @@ impl<'a> Checker<'a> {
             // Declared as written in the trait, in its file, but as part of
             // the `impl`.
             let index = self.at_top_level(trait_file, None, |checker| {
-                checker.in_impl(self_ty.cloned(), aliases, |checker| {
+                checker.in_impl(self_ty.cloned(), (aliases, constraints), |checker| {
                     checker.declare_method(
                         self_ty,
                         (&declared.name, &declared.params, &declared.ret),
@@ -426,6 +438,7 @@ impl<'a> Checker<'a> {
                     body,
                     kind,
                     aliases,
+                    constraints,
                 };
                 pending.push((trait_file, body));
             }

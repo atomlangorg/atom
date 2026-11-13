@@ -209,7 +209,7 @@ impl<'a> Checker<'a> {
                     function.span,
                     body,
                     FnKind::Function,
-                    None,
+                    (None, None),
                 );
                 (None, false)
             }

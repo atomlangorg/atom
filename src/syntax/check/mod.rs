@@ -66,6 +66,7 @@ use super::{
 use crate::ir;
 
 mod calls;
+mod constraints;
 mod errors;
 mod exprs;
 mod functions;
@@ -237,6 +238,11 @@ struct Signature<'a> {
     /// of its functions. Its types can use the generic type's parameters,
     /// which `FnRef::args` give.
     template: Option<usize>,
+    /// The constraints of the `impl` that declares it, as an index into
+    /// `Checker::constraints`, if it has any, including inside one of its
+    /// functions. A method or static function is only a type's if the
+    /// type's arguments meet them.
+    constraints: Option<usize>,
 }
 
 /// A function, which a call or a function used as a value refers to.
@@ -460,6 +466,60 @@ struct Implementation<'b, 'a> {
     alias_types: Option<usize>,
 }
 
+/// An `impl` with a trait, which makes its type implement the trait.
+#[derive(Debug, Clone, Copy)]
+struct ImplInfo {
+    /// The index in `Checker::impl_aliases` of the types of its aliases.
+    aliases: Option<usize>,
+    /// Its constraints, as an index into `Checker::constraints`, which the
+    /// arguments of a type made from its generic type must meet for the
+    /// type to implement the trait.
+    constraints: Option<usize>,
+}
+
+/// The constraints of an `impl`'s `where`, on the parameters of the generic
+/// type at `template` in `Checker::templates`.
+struct Constraints<'a> {
+    template: usize,
+    constraints: Vec<ConstraintInfo<'a>>,
+}
+
+/// A constraint in an `impl`'s `where`, that what `param` stands for must
+/// implement the trait at `trait_index` in `Checker::traits`. In the `impl`,
+/// `param` implements it, with `functions` standing for the trait's.
+struct ConstraintInfo<'a> {
+    decl: &'a ast::Constraint,
+    /// The stand-in for the generic parameter it constrains.
+    param: Type,
+    trait_index: usize,
+    /// For each of the trait's aliases, in order, its name and what it is.
+    aliases: Vec<(&'a str, ConstraintAlias)>,
+    /// A function for each of the trait's, by name, as indexes into
+    /// `Checker::functions`. Each calls the function of whatever `param`
+    /// stands for, which `Checker::fn_stand_ins` says.
+    functions: HashMap<&'a str, usize>,
+}
+
+/// What an alias of a constraint's trait is, for the type it constrains.
+#[derive(Debug, Clone)]
+enum ConstraintAlias {
+    /// Given by the constraint, as in `some Equal<Rhs = Self.T>`. `None` if
+    /// it's unknown.
+    Given(Option<Type>),
+    /// Not given, so it's whatever the implementation gives, which this
+    /// stands for. It can't be used as anything else.
+    Any(Type),
+}
+
+/// A function standing for the method called `name` that the type `param`
+/// stands for has, from a constraint's trait. It's never made itself, since
+/// calls to it call that type's method instead.
+#[derive(Debug, Clone)]
+struct FnStandIn<'a> {
+    param: Type,
+    name: &'a str,
+}
+
 /// The type of an alias in an `impl`.
 #[derive(Debug, Clone)]
 enum ImplAliasType {
@@ -589,6 +649,9 @@ enum Pending<'a> {
         /// The `impl` aliases its body can use, as an index into
         /// `Checker::impl_aliases`, if it's in an `impl` that gives any.
         aliases: Option<usize>,
+        /// The constraints of the `impl` it's in, as an index into
+        /// `Checker::constraints`, if it has any.
+        constraints: Option<usize>,
     },
 }
 
@@ -613,6 +676,10 @@ struct Context<'a> {
     /// it's in an `impl` that gives any, including inside functions nested
     /// in its methods.
     impl_aliases: Option<usize>,
+    /// The index in `Checker::constraints` of the constraints of the `impl`
+    /// it's in, if it has any, including inside functions nested in its
+    /// methods. The parameters they constrain implement their traits.
+    constraints: Option<usize>,
     /// While a generic type is defined, its index in `Checker::templates`,
     /// and the stand-ins for its parameters.
     type_params: Option<(usize, Vec<Type>)>,
@@ -650,8 +717,13 @@ struct Checker<'a> {
     /// The index of each of `callees`.
     callee_ids: HashMap<FnRef, usize>,
     /// Which types implement which traits, as a type `id` and an index into
-    /// `traits`.
-    implementations: HashSet<(usize, usize)>,
+    /// `traits`, and the `impl` that implements each.
+    implementations: HashMap<(usize, usize), ImplInfo>,
+    /// The constraints of each `impl` with a `where`.
+    constraints: Vec<Constraints<'a>>,
+    /// The functions in `functions` that stand for a constraint's trait's
+    /// methods, by their indexes.
+    fn_stand_ins: HashMap<usize, FnStandIn<'a>>,
     /// For each of `functions`, what it compiles to, once its body has been
     /// checked, or `None` if it has an error.
     lowered_functions: Vec<Option<ir::Function>>,
@@ -816,12 +888,14 @@ impl<'a> Checker<'a> {
                                 body,
                                 kind: FnKind::Function,
                                 aliases: None,
+                                constraints: None,
                             },
                         ));
                     }
                     StmtKind::Impl {
                         ty,
                         with,
+                        constraints,
                         aliases,
                         functions,
                     } => {
@@ -834,8 +908,14 @@ impl<'a> Checker<'a> {
                             }
                             _ => self.resolve_named_type(ty),
                         };
-                        let declared =
-                            self.declare_impl(ty, self_ty, with.as_ref(), aliases, functions);
+                        let declared = self.declare_impl(
+                            ty,
+                            self_ty,
+                            with.as_ref(),
+                            constraints,
+                            aliases,
+                            functions,
+                        );
                         self.pending.extend(declared);
                     }
                     StmtKind::Decl {
@@ -878,7 +958,8 @@ impl<'a> Checker<'a> {
                     body,
                     kind,
                     aliases,
-                } => self.fn_body(index, name, span, body, kind, aliases),
+                    constraints,
+                } => self.fn_body(index, name, span, body, kind, (aliases, constraints)),
             }
         }
     }
@@ -1095,18 +1176,21 @@ impl<'a> Checker<'a> {
         checked
     }
     /// Runs `check` as if it were in an `impl` of `ty`, which is `None` if
-    /// it's unknown, that can use the aliases at `aliases` in `impl_aliases`.
+    /// it's unknown, that can use the aliases at `aliases` in `impl_aliases`,
+    /// and has the constraints at `constraints` in `constraints`.
     fn in_impl<T>(
         &mut self,
         ty: Option<Type>,
-        aliases: Option<usize>,
+        (aliases, constraints): (Option<usize>, Option<usize>),
         check: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let outer_type = self.cx.impl_type.replace(ty);
         let outer_aliases = std::mem::replace(&mut self.cx.impl_aliases, aliases);
+        let outer_constraints = std::mem::replace(&mut self.cx.constraints, constraints);
         let checked = check(self);
         self.cx.impl_type = outer_type;
         self.cx.impl_aliases = outer_aliases;
+        self.cx.constraints = outer_constraints;
         checked
     }
     /// The full name of something called `name` declared here, as in

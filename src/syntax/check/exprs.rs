@@ -311,7 +311,12 @@ impl<'a> Checker<'a> {
         let found = match self.member(ty, method) {
             Some(Member::Method(found)) if self.implements(ty, trait_index) => found,
             _ => {
-                self.error(span, not_implemented);
+                // It may be implemented only where its constraints are met.
+                let error = self
+                    .declared_method(ty, method)
+                    .and_then(|declared| self.unmet(ty, method, &declared))
+                    .unwrap_or(not_implemented);
+                self.error(span, error);
                 return None;
             }
         };
@@ -496,7 +501,8 @@ impl<'a> Checker<'a> {
         Some(Receiver::Value(ty?, expr))
     }
     /// Finds the field or method of `ty` called `name`. A tuple's elements
-    /// are its fields, found by the names `ty` was found with.
+    /// are its fields, found by the names `ty` was found with. A method is
+    /// only found if `ty` meets its `impl`'s constraints.
     pub(super) fn member(&self, ty: &Type, name: &str) -> Option<Member> {
         if self.elements(ty.id).is_some()
             && let Some(index) = self
@@ -510,9 +516,25 @@ impl<'a> Checker<'a> {
         if let Some(index) = fields.iter().position(|field| field.name == name) {
             return Some(Member::Field(index));
         }
+        if let Some(function) = self.constrained_method(ty, name) {
+            return Some(Member::Method(function));
+        }
+        let function = self.declared_method(ty, name)?;
+        self.meets(&function).then_some(Member::Method(function))
+    }
+    /// Finds the method of `ty` called `name`, whether or not `ty` meets its
+    /// `impl`'s constraints.
+    pub(super) fn declared_method(&self, ty: &Type, name: &str) -> Option<FnRef> {
         let (owner, args) = self.owner(ty);
         let index = *self.types[owner].methods.get(name)?;
-        Some(Member::Method(FnRef { index, args }))
+        Some(FnRef { index, args })
+    }
+    /// Finds the static function of `ty` called `name`, whether or not `ty`
+    /// meets its `impl`'s constraints.
+    pub(super) fn declared_static(&self, ty: &Type, name: &str) -> Option<FnRef> {
+        let (owner, args) = self.owner(ty);
+        let index = *self.types[owner].statics.get(name)?;
+        Some(FnRef { index, args })
     }
     /// The `id` of the type whose `impl`s declare the functions of `ty`,
     /// along with what its generic type's parameters stand for in `ty`. A
@@ -526,16 +548,27 @@ impl<'a> Checker<'a> {
         }
         (ty.id, vec![])
     }
-    /// Whether `ty` implements the trait at `trait_index` in `traits`.
+    /// Whether `ty` implements the trait at `trait_index` in `traits`, which
+    /// a type made from a generic type only does if its arguments meet the
+    /// constraints of the `impl` that implements it. A parameter that the
+    /// current `impl` constrains implements the traits it's constrained to.
     pub(super) fn implements(&self, ty: &Type, trait_index: usize) -> bool {
-        let (owner, _) = self.owner(ty);
-        self.implementations.contains(&(owner, trait_index))
-    }
-    /// Finds the static function of `ty` called `name`.
-    pub(super) fn static_function(&self, ty: &Type, name: &str) -> Option<FnRef> {
+        if self.constraint_on(ty, trait_index).is_some() {
+            return true;
+        }
         let (owner, args) = self.owner(ty);
-        let index = *self.types[owner].statics.get(name)?;
-        Some(FnRef { index, args })
+        self.implementations
+            .get(&(owner, trait_index))
+            .is_some_and(|implementation| {
+                self.unmet_constraint(implementation.constraints, &args)
+                    .is_none()
+            })
+    }
+    /// Finds the static function of `ty` called `name`, which is only found
+    /// if `ty` meets its `impl`'s constraints.
+    pub(super) fn static_function(&self, ty: &Type, name: &str) -> Option<FnRef> {
+        let function = self.declared_static(ty, name)?;
+        self.meets(&function).then_some(function)
     }
     /// Finds the static function or option of `ty` called `name`. They never
     /// share a name, since declaring one as the other is an error.
@@ -584,6 +617,12 @@ impl<'a> Checker<'a> {
     /// The error for `name` not being a field or method of `ty`, which points
     /// out an option or static function with that name.
     pub(super) fn no_member(&self, ty: Type, name: &str) -> CheckError {
+        if let Some(error) = self
+            .declared_method(&ty, name)
+            .and_then(|declared| self.unmet(&ty, name, &declared))
+        {
+            return error;
+        }
         let member = name.to_string();
         match self.static_member(&ty, name) {
             Some(found) => CheckError::NeedsType {
@@ -597,6 +636,12 @@ impl<'a> Checker<'a> {
     /// The error for `name` not being an option or static function of `ty`,
     /// which points out a field or method with that name.
     pub(super) fn no_static_function(&self, ty: Type, name: &str) -> CheckError {
+        if let Some(error) = self
+            .declared_static(&ty, name)
+            .and_then(|declared| self.unmet(&ty, name, &declared))
+        {
+            return error;
+        }
         let kind = match self.member(&ty, name) {
             Some(Member::Field(..)) => MemberKind::Field,
             Some(Member::Method(_)) => MemberKind::Method,

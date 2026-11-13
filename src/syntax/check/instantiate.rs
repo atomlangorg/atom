@@ -171,7 +171,7 @@ impl<'a> Checker<'a> {
             let mut lowered = self.lowered_functions[function.index]
                 .clone()
                 .expect(NO_ERRORS);
-            let params = match self.functions[function.index].template {
+            let mut params = match self.functions[function.index].template {
                 Some(template) => {
                     // Named after the type made from the generic type, rather
                     // than the generic type itself.
@@ -188,6 +188,12 @@ impl<'a> Checker<'a> {
                 None => HashMap::new(),
             };
             state.site = site;
+            // The aliases its constraints don't give are its arguments'.
+            if let Some(constraints) = self.functions[function.index].constraints {
+                let (file, span) = site;
+                self.cx.file = file;
+                self.add_alias_params(constraints, &mut params, span)?;
+            }
             for local in &mut lowered.locals {
                 *local = self.concrete(*local, &params, &state)?;
             }
@@ -299,7 +305,8 @@ impl<'a> Checker<'a> {
     }
     /// The index among the functions that `state` makes of the function at
     /// `callee` in `callees`, with what `params` says stand-ins stand for in
-    /// place of them in its arguments.
+    /// place of them in its arguments. A function standing for one of a
+    /// constraint's trait's methods is the method its arguments have.
     pub(super) fn instantiate_callee(
         &mut self,
         callee: usize,
@@ -313,10 +320,10 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|arg| self.substitute(arg, params, span))
             .collect::<Option<_>>()?;
-        let function = FnRef {
+        let function = self.constrained_callee(FnRef {
             index: function.index,
             args,
-        };
+        });
         Some(state.index(function, (file, span)))
     }
 }

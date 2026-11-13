@@ -8327,6 +8327,141 @@ fn generic_impls_can_implement_traits() {
 }
 
 #[test]
+fn constrained_impls_are_only_for_arguments_that_meet_them() {
+    // `Odd` can only be compared with an `Int`, not with itself.
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            group Plain {{}}
+
+            group Odd {{
+                let value: Int
+            }}
+
+            impl Odd with Equal {{
+                fn isEqual(to rhs: Int) -> Bool {{
+                    return self.value == rhs
+                }}
+            }}
+
+            impl Box with Equal where Self.T == some Equal<Rhs = Self.T> {{
+                fn isEqual(to rhs: Self) -> Bool {{
+                    return self.value == rhs.value
+                }}
+            }}
+
+            fn f(plain: Box<Plain>, odd: Box<Odd>) -> Bool {{
+                let a = Box.of(1) == Box.of(2)
+                let b = Box.of(Box.of(true)) != Box.of(Box.of(false))
+                let c = plain == plain
+                let d = odd != odd
+                let e = plain.isEqual(to: plain)
+                return a & b
+            }}
+            "
+        )),
+        [
+            "`Box<Plain>` only has `isEqual` where `Self.T == some Equal<Rhs = Self.T>`, but \
+             its `T` is `Plain`",
+            "`Box<Odd>` only has `isNotEqual` where `Self.T == some Equal<Rhs = Self.T>`, but \
+             its `T` is `Odd`",
+            "`Box<Plain>` only has `isEqual` where `Self.T == some Equal<Rhs = Self.T>`, but \
+             its `T` is `Plain`",
+        ]
+    );
+}
+
+#[test]
+fn constrained_parameters_implement_their_traits_only_in_their_impl() {
+    // Without `Rhs` given, `T` can be compared with something, but not
+    // necessarily another `T`.
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            impl Box {{
+                fn isSame(as other: Self) -> Bool {{
+                    return self.value == other.value
+                }}
+            }}
+
+            impl Box where Self.T == some Equal {{
+                fn matches(_ other: Self) -> Bool {{
+                    return self.value == other.value
+                }}
+            }}
+            "
+        )),
+        [
+            "operator `==` expects a type that implements `Equal`, found `T`",
+            "operator `==` expects `T.Rhs`, found `T`",
+        ]
+    );
+}
+
+#[test]
+fn aliases_left_out_of_constraints_are_their_arguments_once_made() {
+    // `sum` is a `T.Output` when `total` is checked, which is an `Int` in
+    // the `total` made for `Box<Int>`.
+    let src = format!(
+        "
+        {GENERICS}
+        impl Box where Self.T == some Add<Rhs = Self.T> {{
+            fn total(with rhs: Self) -> Int {{
+                let sum = self.value + rhs.value
+                return 0
+            }}
+        }}
+
+        fn main() -> Int {{
+            return Box.of(1).total(with: Box.of(2))
+        }}
+        "
+    );
+    let program = check(&parsed_files(&[("/main", &src)])).expect("`src` has no errors");
+    let total = program
+        .functions
+        .iter()
+        .find(|function| function.name.ends_with("::Box<Int>.total"))
+        .expect("`total` is made for `Box<Int>`");
+    // After `self` and `rhs`.
+    assert!(matches!(
+        program.types[total.locals[2]],
+        ir::TypeDef::Primitive(ir::Primitive::Int {
+            bits: 64,
+            signed: true
+        })
+    ));
+}
+
+#[test]
+fn constraints_must_be_on_generic_parameters() {
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            group Point {{}}
+            impl Box where Int == some Equal {{}}
+            impl Box where Self.T == some Missing {{}}
+            impl Box where Self.T == some Equal<Output = Int, Rhs = Self.T, Rhs = Int> {{}}
+            impl Point where Self.T == some Equal {{}}
+            impl Box where Self.U == some Equal {{}}
+            "
+        )),
+        [
+            "only the generic parameters of the `impl`'s type, such as `Self.T`, can be \
+             constrained, not `Int`",
+            "unknown trait `Missing`",
+            "`Output` is not declared by trait `Equal`",
+            "`Rhs` is already declared",
+            "`Self.T` can only be used in the `impl` of a generic type",
+            "`Box<T>` has no generic parameter `U`",
+        ]
+    );
+}
+
+#[test]
 fn matches_must_cover_every_value() {
     // There are too many integers to list, so they need a `_`.
     assert_eq!(

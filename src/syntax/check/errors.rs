@@ -259,6 +259,18 @@ pub enum CheckError {
     SelfParamOutsideGeneric(String),
     /// `Self.T` names a parameter the `impl`'s generic type doesn't have.
     UnknownSelfParam { ty: Type, param: String },
+    /// A constraint in an `impl`'s `where` is on a type that isn't one of
+    /// the parameters of the `impl`'s generic type.
+    ConstrainedNotParam(Type),
+    /// `ty` only has `member` where the arguments of its generic type meet
+    /// `constraint`, but its parameter `param` is `arg`, which doesn't.
+    UnmetConstraint {
+        ty: Type,
+        member: String,
+        constraint: String,
+        param: String,
+        arg: Type,
+    },
     /// A generic type was given arguments nested too deeply, which means a
     /// type uses itself with ever larger arguments.
     GenericTooDeep(String),
@@ -675,6 +687,21 @@ impl fmt::Display for CheckError {
             Self::UnknownSelfParam { ty, param } => {
                 write!(f, "`{ty}` has no generic parameter `{param}`")
             }
+            Self::ConstrainedNotParam(ty) => write!(
+                f,
+                "only the generic parameters of the `impl`'s type, such as `Self.T`, can be \
+                 constrained, not `{ty}`"
+            ),
+            Self::UnmetConstraint {
+                ty,
+                member,
+                constraint,
+                param,
+                arg,
+            } => write!(
+                f,
+                "`{ty}` only has `{member}` where `{constraint}`, but its `{param}` is `{arg}`"
+            ),
             Self::GenericTooDeep(ty) => write!(
                 f,
                 "`{ty}` nests generic types too deeply, which usually means a generic type uses itself with different arguments"

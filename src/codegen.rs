@@ -1214,6 +1214,80 @@ mod tests {
     }
 
     #[test]
+    fn options_are_equal_when_their_values_are() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let one = Option.some.new(1)
+                let nothing: Option<Int> = Option.none.new(())
+                let yes = Option.some.new(Option.some.new(true))
+                let maybe: Option<Option<Bool>> = Option.some.new(Option.none.new(()))
+                let a = bit(one == Option.some.new(1), at: 1)
+                let b = bit(one == Option.some.new(2), at: 2)
+                let c = bit(nothing == Option.none.new(()), at: 4)
+                let d = bit(one != nothing, at: 8)
+                let e = bit(yes == Option.some.new(Option.some.new(true)), at: 16)
+                let f = bit(yes == maybe, at: 32)
+                let g = bit(one.isEqual(to: nothing), at: 64)
+                return a + b + c + d + e + f + g
+            }
+            ";
+        assert_eq!(run(src), 29);
+    }
+
+    #[test]
+    fn constrained_impls_call_their_arguments_functions() {
+        // `sum` has whatever type `T`'s `add` returns, which is only known
+        // once `total` is made for a `T`.
+        let src = "
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+            }
+
+            impl Box with Equal where Self.T == some Equal<Rhs = Self.T> {
+                fn isEqual(to rhs: Self) -> Bool {
+                    return Option.some.new(self.value) == Option.some.new(rhs.value)
+                }
+            }
+
+            impl Box where Self.T == some Add<Rhs = Self.T>, Self.T == some Equal<Rhs = Self.T> {
+                fn total(with rhs: Self) -> Int {
+                    let sum = self.value + rhs.value
+                    let boxed = Box.of(sum)
+                    if rhs.value == self.value {
+                        return 1
+                    }
+                    return 2
+                }
+            }
+
+            fn main() -> Int {
+                let a = Box.of(3) == Box.of(3)
+                let b = Box.of(Box.of(true)) == Box.of(Box.of(false))
+                let c = Box.of(4).total(with: Box.of(5))
+                if a & !b {
+                    return c * 10
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 20);
+    }
+
+    #[test]
     fn compare_on_integers_gives_their_comparison() {
         // Each check is one bit of the result.
         let src = "

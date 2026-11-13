@@ -45,10 +45,16 @@ impl<'a> Checker<'a> {
         let index = self.signature(params, ret, full_name);
         if let Some(self_ty) = self_ty {
             // Methods must be unique across every file, since a call can't
-            // say which file's method it means.
+            // say which file's method it means, even when they're in `impl`s
+            // with different constraints.
             let existing = if is_static {
-                self.static_member(self_ty, name)
-                    .map(|member| member.kind())
+                if self.declared_static(self_ty, name).is_some() {
+                    Some(MemberKind::StaticFunction)
+                } else {
+                    self.option(self_ty, name).map(|_| MemberKind::Option)
+                }
+            } else if self.declared_method(self_ty, name).is_some() {
+                Some(MemberKind::Method)
             } else {
                 match self.member(self_ty, name) {
                     Some(Member::Field(..)) => Some(MemberKind::Field),
@@ -97,14 +103,15 @@ impl<'a> Checker<'a> {
             params,
             returns,
             template,
+            constraints: self.cx.constraints,
         });
         self.lowered_functions.push(None);
         self.functions.len() - 1
     }
     /// Checks the body of the function at `index` in `functions`.
-    /// `aliases` are the aliases of the `impl` a method or static function is
-    /// in, as an index into `impl_aliases`. Other functions keep the aliases
-    /// of the code they're nested in.
+    /// `aliases` and `constraints` are those of the `impl` a method or static
+    /// function is in, as indexes into `impl_aliases` and `constraints`.
+    /// Other functions keep those of the code they're nested in.
     pub(super) fn fn_body(
         &mut self,
         index: usize,
@@ -112,7 +119,7 @@ impl<'a> Checker<'a> {
         span: Span,
         body: &'a [Stmt],
         kind: FnKind,
-        aliases: Option<usize>,
+        (aliases, constraints): (Option<usize>, Option<usize>),
     ) {
         let Signature {
             name: full_name,
@@ -137,11 +144,12 @@ impl<'a> Checker<'a> {
             FnKind::Method(ty) | FnKind::Static(ty) => self.cx.impl_type.replace(ty.clone()),
             FnKind::Function => self.cx.impl_type.clone(),
         };
-        let outer_impl_aliases = match &kind {
-            FnKind::Method(_) | FnKind::Static(_) => {
-                std::mem::replace(&mut self.cx.impl_aliases, aliases)
-            }
-            FnKind::Function => self.cx.impl_aliases,
+        let (outer_impl_aliases, outer_constraints) = match &kind {
+            FnKind::Method(_) | FnKind::Static(_) => (
+                std::mem::replace(&mut self.cx.impl_aliases, aliases),
+                std::mem::replace(&mut self.cx.constraints, constraints),
+            ),
+            FnKind::Function => (self.cx.impl_aliases, self.cx.constraints),
         };
 
         // `self` is a keyword, so it can't clash with a parameter. Like any
@@ -171,6 +179,7 @@ impl<'a> Checker<'a> {
         self.cx.fn_scope_start = outer_scope_start;
         self.cx.impl_type = outer_impl_type;
         self.cx.impl_aliases = outer_impl_aliases;
+        self.cx.constraints = outer_constraints;
 
         // A `Void` function can finish without an explicit `return`.
         if !returns_always {

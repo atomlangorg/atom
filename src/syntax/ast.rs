@@ -467,9 +467,16 @@ pub enum StmtKind {
     ///
     /// `impl Type with Trait { alias ... fn ... }` implements a trait's
     /// aliases and functions, and only those.
+    ///
+    /// Either can have a `where`, as in `impl Optional with Equal where
+    /// Self.T == some Equal<Rhs = Self.T> { ... }`, so that it's only for
+    /// the types made from a generic type whose arguments meet its
+    /// constraints.
     Impl {
         ty: Name,
         with: Option<Name>,
+        /// Its `where` clause's constraints, separated by commas.
+        constraints: Vec<Constraint>,
         /// `alias Name = Type`, giving the type of one of the trait's aliases.
         aliases: Vec<Alias>,
         functions: Vec<Function>,
@@ -556,6 +563,37 @@ pub struct Alias {
     /// `None` only in a `trait`.
     pub ty: Option<TypeName>,
     pub span: Span,
+}
+
+/// A constraint in an `impl`'s `where`, such as `Self.T == some Equal<Rhs =
+/// Self.T>`: the generic parameter `ty` must be a type that implements the
+/// trait, whose implementation gives the trait's `aliases` these types. The
+/// trait's other aliases can be any type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constraint {
+    pub ty: TypeName,
+    pub trait_name: Name,
+    /// Each is written `Rhs = Self.T`, and always has a type.
+    pub aliases: Vec<Alias>,
+    pub span: Span,
+}
+
+impl fmt::Display for Constraint {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} == some {}", self.ty, self.trait_name)?;
+        if self.aliases.is_empty() {
+            return Ok(());
+        }
+        let aliases: Vec<_> = self
+            .aliases
+            .iter()
+            .map(|alias| match &alias.ty {
+                Some(ty) => format!("{} = {ty}", alias.name),
+                None => alias.name.clone(),
+            })
+            .collect();
+        write!(f, "<{}>", aliases.join(", "))
+    }
 }
 
 /// A group field, such as `let age: Int`. Fields can't have values.

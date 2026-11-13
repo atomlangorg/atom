@@ -23,8 +23,8 @@ use chumsky::{
 
 use super::{
     ast::{
-        Alias, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, Import,
-        ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
+        Alias, Arg, BinOp, ChoiceOption, Constraint, Expr, ExprKind, Field, FieldValue, Function,
+        Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
         StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
@@ -902,8 +902,49 @@ where
     let impl_member = alias_in(Place::Impl)
         .map(Member::Alias)
         .or(function_in(Place::Impl).map(Member::Function));
-    // `with` is only special here, so it can still be a label. Only a named
-    // type can have an `impl`, and only a trait can follow `with`.
+    // `Self.T == some Equal`, optionally giving the trait's aliases types, as
+    // in `some Equal<Rhs = Self.T>`. `some` is only special here, so it can
+    // still be a name, such as an option's.
+    let constraint_alias = ident
+        .then_ignore(just(Token::Eq))
+        .then(type_name.clone())
+        .map_with(|(name, ty), e| Alias {
+            name,
+            ty: Some(ty),
+            span: Span::from(e.span()),
+        });
+    let constraint = type_name
+        .clone()
+        .then_ignore(just(Token::EqEq))
+        .then_ignore(just(Token::Ident("some")))
+        .then(name.clone().labelled("trait"))
+        .then(
+            constraint_alias
+                .separated_by(just(Token::Comma))
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Lt), just(Token::Gt))
+                .or_not(),
+        )
+        .map_with(|((ty, trait_name), aliases), e| Constraint {
+            ty,
+            trait_name,
+            aliases: aliases.unwrap_or_default(),
+            span: Span::from(e.span()),
+        });
+    let where_ = just(Token::Ident("where"))
+        .ignore_then(
+            constraint
+                .separated_by(just(Token::Comma))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .or_not()
+        .map(Option::unwrap_or_default);
+
+    // `with` and `where` are only special here, so they can still be labels.
+    // Only a named type can have an `impl`, and only a trait can follow
+    // `with`.
     let impl_ = just(Token::Impl)
         .ignore_then(name.clone().labelled("type"))
         .then(
@@ -911,14 +952,16 @@ where
                 .ignore_then(name.clone().labelled("trait"))
                 .or_not(),
         )
+        .then(where_)
         .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(impl_member))
-        .map(|(((ty, with), span), members)| {
+        .map(|((((ty, with), constraints), span), members)| {
             let (aliases, functions) = split(members);
             Stmt {
                 kind: StmtKind::Impl {
                     ty,
                     with,
+                    constraints,
                     aliases,
                     functions,
                 },
@@ -1312,6 +1355,7 @@ mod tests {
             with,
             aliases,
             functions,
+            ..
         } = &program[0].kind
         else {
             panic!("expected an `impl`");
@@ -4045,6 +4089,7 @@ mod tests {
                 stmt_node(StmtKind::Impl {
                     ty: Name::new("User"),
                     with: None,
+                    constraints: vec![],
                     aliases: vec![],
                     functions: vec![
                         Function {
@@ -4084,6 +4129,7 @@ mod tests {
                 stmt_node(StmtKind::Impl {
                     ty: qualified("user", "User"),
                     with: None,
+                    constraints: vec![],
                     aliases: vec![],
                     functions: vec![],
                 }),
@@ -4277,12 +4323,14 @@ mod tests {
                 stmt_node(StmtKind::Impl {
                     ty: Name::new("Custom"),
                     with: Some(Name::new("And")),
+                    constraints: vec![],
                     aliases: vec![],
                     functions: vec![],
                 }),
                 stmt_node(StmtKind::Impl {
                     ty: Name::new("Int"),
                     with: Some(qualified("logic", "And")),
+                    constraints: vec![],
                     aliases: vec![],
                     functions: vec![],
                 }),
@@ -4293,12 +4341,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_impls_with_constraints() {
+        let param = |name: &str| TypeName::SelfParam(name.to_string(), Span::default());
+        let constraint = |ty, trait_name, aliases| Constraint {
+            ty,
+            trait_name,
+            aliases,
+            span: Span::default(),
+        };
+        let rhs = Alias {
+            name: "Rhs".to_string(),
+            ty: Some(param("A")),
+            span: Span::default(),
+        };
+        assert_eq!(
+            parse(
+                "impl Pair with Equal where Self.A == some Equal<Rhs = Self.A>, \
+                 Self.B == some other::Compare {}\nimpl Pair where Self.A == some Add {}"
+            ),
+            Ok(vec![
+                stmt_node(StmtKind::Impl {
+                    ty: Name::new("Pair"),
+                    with: Some(Name::new("Equal")),
+                    constraints: vec![
+                        constraint(param("A"), Name::new("Equal"), vec![rhs]),
+                        constraint(param("B"), qualified("other", "Compare"), vec![]),
+                    ],
+                    aliases: vec![],
+                    functions: vec![],
+                }),
+                stmt_node(StmtKind::Impl {
+                    ty: Name::new("Pair"),
+                    with: None,
+                    constraints: vec![constraint(param("A"), Name::new("Add"), vec![])],
+                    aliases: vec![],
+                    functions: vec![],
+                }),
+            ])
+        );
+        // `where` and `some` are only special in an `impl`, so they can still
+        // be names.
+        assert!(parse("fn f(where: Int, some: Int) {}\nlet x = f(where: 1, some: 2)").is_ok());
+        assert!(parse("impl Pair where Self.A == Equal {}").is_err());
+        assert!(parse("impl Pair where {}").is_err());
+    }
+
+    #[test]
     fn parses_primitive_functions_in_impls() {
         assert_eq!(
             parse("impl Bool with And {\nprimitive fn and(_ rhs: Self) -> Bool\n}"),
             Ok(vec![stmt_node(StmtKind::Impl {
                 ty: Name::new("Bool"),
                 with: Some(Name::new("And")),
+                constraints: vec![],
                 aliases: vec![],
                 functions: vec![Function {
                     is_static: false,

@@ -90,6 +90,7 @@ impl<'a> Checker<'a> {
                 params: self.tuple_params(input),
                 returns: returns.clone(),
                 template: None,
+                constraints: None,
             },
         }
     }

@@ -20,3 +20,21 @@ choice Option<Value> {
     none
     some: Value
 }
+
+// `Option`s are equal if neither holds a value, or both hold equal values,
+// which is only the case for a `Value` that can be compared with itself.
+impl Option with Equal where Self.Value == some Equal<Rhs = Self.Value> {
+    fn isEqual(to rhs: Self) -> Bool {
+        match (self, rhs) {
+            (Self.none.new(_), Self.none.new(_)) => {
+                return true
+            }
+            (Self.some.new(let l), Self.some.new(let r)) => {
+                return l == r
+            }
+            _ => {
+                return false
+            }
+        }
+    }
+}
