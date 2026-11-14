@@ -2075,6 +2075,33 @@ mod tests {
     }
 
     #[test]
+    fn options_are_equal_if_they_are_the_same_option() {
+        let src = "
+            choice Size {
+                small: Int
+                large: Int
+            }
+
+            fn score(matched: Bool, worth: Int) -> Int {
+                if matched {
+                    return worth
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let option: ChoiceOption<Size, Int> = Size.small
+                let a = score(matched: option == Size.small, worth: 1)
+                let b = score(matched: option == Size.large, worth: 2)
+                let c = score(matched: option != Size.large, worth: 4)
+                let d = score(matched: option != Size.small, worth: 8)
+                return a + b + c + d
+            }
+            ";
+        assert_eq!(run(src), 5);
+    }
+
+    #[test]
     fn generic_arguments_inferred_from_calls_compile() {
         let src = "
             choice Optional<T> {

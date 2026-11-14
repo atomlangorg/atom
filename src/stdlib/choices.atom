@@ -40,3 +40,15 @@ impl ChoiceOption {
 
     primitive fn tag() -> ChoiceTag<Self.Base>
 }
+
+// `ChoiceOption`s are equal if their tags are, since then they're the same
+// option.
+impl ChoiceOption with Equal {
+    fn isEqual(to rhs: Self) -> Bool {
+        return self.tag() == rhs.tag()
+    }
+
+    fn isNotEqual(to rhs: Self) -> Bool {
+        return self.tag() != rhs.tag()
+    }
+}
