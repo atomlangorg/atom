@@ -8154,6 +8154,75 @@ fn generic_arguments_are_inferred_for_static_members_used_as_values() {
 }
 
 #[test]
+fn members_without_a_type_are_members_of_the_type_they_are_used_as() {
+    // As in Swift, `.none` is a member of the type that the expression it
+    // starts is used as, so `.none.new(())` used as an `Option<Int>` is
+    // `Option<Int>.none.new(())`. That's also how it gets the types of its
+    // arguments, and it can be compared with a value of that type on either
+    // side.
+    let src = format!(
+        "
+        {GENERICS}
+        impl Optional {{
+            static fn empty() -> Self {{
+                return .none.new(())
+            }}
+        }}
+
+        fn pick(_ flag: Bool) -> Option<Int> {{
+            if flag {{
+                return .some.new(1)
+            }}
+            return .none.new(())
+        }}
+
+        fn f(value: Option<Int>) {{
+            let a: Option<Int> = .none.new(())
+            let b: Option<IntU8> = .some.new(255)
+            let c = pick(false) == .some.new(2)
+            let d = .none.new(()) != value
+            let e: Box<Int> = .of(1)
+            let g: Optional<Bool> = Optional.empty()
+        }}
+        "
+    );
+    assert_eq!(check_top(&src), Ok(()));
+}
+
+#[test]
+fn rejects_members_without_a_type_that_cannot_be_inferred() {
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            fn f() {{
+                let a = .none.new(())
+                // `.none` is the option itself, which isn't an `Option<Int>`.
+                let b: Option<Int> = .none
+                // The type is the one the whole expression is used as.
+                let c: ChoiceTag<Option<Int>> = .none.tag()
+                let d: Option<Int> = .missing.new(())
+                let e: Option<Int> = .some.new(true)
+                let g: Option<IntU8> = .some.new(256)
+                let h = .of(1) == Box.of(1)
+                .of(1)
+            }}
+            "
+        )),
+        [
+            "the type of `.none` can't be inferred here, so it must be given, as in `Type.none`",
+            "cannot assign `ChoiceOption<Option<Int>, Void>` to `b`, which has type `Option<Int>`",
+            "`ChoiceTag<Option<Int>>` has no static function `none`",
+            "`Option<Int>` has no option or static function `missing`",
+            "argument `value` of `ChoiceOption<Option<Int>, Int>.new` expects `Int`, found `Bool`",
+            "`256` doesn't fit in `IntU8`, which holds `0` to `255`",
+            "operator `==` expects a type that implements `Equal`, found `Box<Int>`",
+            "the type of `.of` can't be inferred here, so it must be given, as in `Type.of`",
+        ]
+    );
+}
+
+#[test]
 fn generic_types_need_the_right_arguments() {
     let src = format!(
         "

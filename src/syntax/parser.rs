@@ -71,6 +71,22 @@ fn fold_binary<'src, I: Input<'src>, E: ParserExtra<'src, I>>(
     }
 }
 
+/// `receiver.name`, or `receiver.name(args)` if it has arguments.
+fn member_of(receiver: Expr, name: String, args: Option<Vec<Arg>>) -> ExprKind {
+    let receiver = Box::new(receiver);
+    match args {
+        Some(args) => ExprKind::MethodCall {
+            receiver,
+            method: name,
+            args,
+        },
+        None => ExprKind::Field {
+            receiver,
+            field: name,
+        },
+    }
+}
+
 /// Whether `expr` is a comparison that isn't in brackets.
 fn is_comparison(expr: &Expr) -> bool {
     matches!(expr.kind, ExprKind::Binary(_, op, _) if op.is_comparison())
@@ -472,30 +488,31 @@ where
     // `a.f().b`.
     let member = just(Token::Dot)
         .ignore_then(ident)
-        .then(args.or_not())
+        .then(args.clone().or_not())
         .map_with(|member, e| (member, Span::from(e.span())));
     let with_members = |atom: Boxed<'tok, 'tok, I, Expr, Extra<'tok, 'src>>| {
         atom.foldl(
             member.clone().repeated(),
             |receiver, ((name, args), end)| {
                 let span = receiver.span.to(end);
-                let receiver = Box::new(receiver);
-                let kind = match args {
-                    Some(args) => ExprKind::MethodCall {
-                        receiver,
-                        method: name,
-                        args,
-                    },
-                    None => ExprKind::Field {
-                        receiver,
-                        field: name,
-                    },
-                };
-                Expr { kind, span }
+                Expr {
+                    kind: member_of(receiver, name, args),
+                    span,
+                }
             },
         )
         .boxed()
     };
+
+    // `.member` with nothing before it, as in `.none.new(())`, is a member of
+    // the type the expression is used as, which the checker works out.
+    let implicit_member = member.clone().map(|((name, args), span)| {
+        let receiver = Expr {
+            kind: ExprKind::ImplicitType,
+            span,
+        };
+        member_of(receiver, name, args)
+    });
 
     expr.define(operators(with_members(
         literal
@@ -504,6 +521,7 @@ where
             .or(generic_type)
             .or(name_or_call)
             .or(parenthesised)
+            .or(implicit_member)
             .map_with(|kind, e| Expr {
                 kind,
                 span: Span::from(e.span()),
@@ -1646,6 +1664,62 @@ mod tests {
             parse_body("if a < b {}"),
             Ok(vec![if_(*bin(var("a"), BinOp::Lt, var("b")), vec![], None)])
         );
+    }
+
+    #[test]
+    fn parses_members_without_a_type() {
+        let implicit = || expr_node(ExprKind::ImplicitType);
+        assert_eq!(parse_expr(".none"), field_access(implicit(), "none"));
+        assert_eq!(
+            parse_expr(".none.new(())"),
+            method_call(
+                field_access(implicit(), "none"),
+                "new",
+                vec![arg(None, expr_node(ExprKind::Tuple(vec![])))],
+            )
+        );
+        assert_eq!(
+            parse_expr("-.zero() * 2"),
+            *bin(
+                neg(Box::new(method_call(implicit(), "zero", vec![]))),
+                BinOp::Mul,
+                int(2),
+            )
+        );
+        assert_eq!(
+            parse_expr("a == .none"),
+            *bin(
+                var("a"),
+                BinOp::Eq,
+                Box::new(field_access(implicit(), "none"))
+            )
+        );
+        assert_eq!(
+            parse_body(".f()"),
+            Ok(vec![stmt_node(StmtKind::Expr(method_call(
+                implicit(),
+                "f",
+                vec![]
+            )))])
+        );
+    }
+
+    #[test]
+    fn members_without_a_type_span_their_member() {
+        let Ok(program) = super::parse("let a: Optional<Int> = .none.new(())") else {
+            panic!("should parse");
+        };
+        let StmtKind::Decl { value, .. } = &program[0].kind else {
+            panic!("expected a declaration");
+        };
+        let ExprKind::MethodCall { receiver, .. } = &value.kind else {
+            panic!("expected a method call");
+        };
+        let ExprKind::Field { receiver, .. } = &receiver.kind else {
+            panic!("expected a field");
+        };
+        // `.none`, which is where errors about its type point.
+        assert_eq!(receiver.span, Span { start: 23, end: 28 });
     }
 
     #[test]
@@ -4233,7 +4307,8 @@ mod tests {
     fn rejects_malformed_method_calls() {
         for src in [
             "x = a.",
-            "x = .f()",
+            "x = .",
+            "x = .1()",
             "x = a.1()",
             "x = a..f()",
             "x = a.f\n()",

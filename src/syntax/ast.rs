@@ -377,6 +377,12 @@ pub enum ExprKind {
         name: Name,
         args: Vec<TypeName>,
     },
+    /// What's before the `.` of a member written without a type, as in
+    /// `.none.new(())` or `.zero()`: the type that the expression it starts is
+    /// used as, such as `Optional<Int>` in `let a: Optional<Int> =
+    /// .none.new(())`. It's only ever the receiver of a member, and is written
+    /// where that member is.
+    ImplicitType,
     /// `receiver.method(label: value, ...)`: calls a function from an `impl`
     /// of the receiver's type.
     MethodCall {

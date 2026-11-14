@@ -253,6 +253,9 @@ pub enum CheckError {
     /// A generic type's name was used without arguments where they can't be
     /// inferred.
     CannotInferGeneric(String),
+    /// A member was written without a type, as in `.none`, where the type
+    /// can't be inferred.
+    CannotInferImplicitType(String),
     /// A generic type that's only for choices was given something else.
     NotAChoice { generic: String, found: Type },
     /// `Self.T` was used outside the `impl` of a generic type.
@@ -673,6 +676,10 @@ impl fmt::Display for CheckError {
             Self::CannotInferGeneric(name) => write!(
                 f,
                 "the arguments of `{name}` can't be inferred here, so they must be given, as in `{name}<...>`"
+            ),
+            Self::CannotInferImplicitType(member) => write!(
+                f,
+                "the type of `.{member}` can't be inferred here, so it must be given, as in `Type.{member}`"
             ),
             Self::NotAChoice { generic, found } => {
                 write!(

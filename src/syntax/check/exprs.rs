@@ -77,11 +77,25 @@ pub(super) fn split(typed: Vec<Typed>) -> (Vec<Option<Type>>, Vec<ir::Expr>) {
     typed.into_iter().map(|t| (t.ty, t.expr)).unzip()
 }
 
+/// Whether `expr` starts with a member written without a type, as in
+/// `.none.new(())`, whose type comes from what the whole expression is used as.
+pub(super) fn is_implicit(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::ImplicitType => true,
+        ExprKind::Field { receiver, .. } | ExprKind::MethodCall { receiver, .. } => {
+            is_implicit(receiver)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `expr` has a type of its own, rather than being made only of
-/// integer literals, which take their type from where they're used.
+/// integer literals, or starting with a member written without a type, which
+/// take their type from where they're used.
 pub(super) fn has_own_type(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Int(_) => false,
+        _ if is_implicit(expr) => false,
         ExprKind::Unary(UnOp::Neg | UnOp::BitNot, operand) | ExprKind::Paren(operand) => {
             has_own_type(operand)
         }
@@ -186,6 +200,9 @@ impl<'a> Checker<'a> {
             ExprKind::GenericType { name, .. } => {
                 self.error(span, CheckError::TypeAsValue(name.to_string()));
                 Typed::UNKNOWN
+            }
+            ExprKind::ImplicitType => {
+                unreachable!("the parser only writes an implicit type before a member")
             }
             ExprKind::SelfValue => {
                 let name = Name {
@@ -459,13 +476,23 @@ impl<'a> Checker<'a> {
     /// meant.
     ///
     /// A generic type's name can leave out its arguments when the value is
-    /// used as `expected`, if that's made from it, as in `Optional.none`.
+    /// used as `expected`, if that's made from it, as in `Optional.none`. A
+    /// member written without a type, as in `.none`, is a member of
+    /// `expected` itself, which is what the expression it starts is used as.
     pub(super) fn receiver(
         &mut self,
         receiver: &Expr,
         member: &str,
         expected: Option<&Type>,
     ) -> Option<Receiver> {
+        if let ExprKind::ImplicitType = receiver.kind {
+            let Some(ty) = expected else {
+                let error = CheckError::CannotInferImplicitType(member.to_string());
+                self.error(receiver.span, error);
+                return None;
+            };
+            return Some(Receiver::Type(ty.clone()));
+        }
         if let ExprKind::GenericType { name, args } = &receiver.kind {
             let ty = self.generic_type(name, args)?;
             return Some(Receiver::Type(ty));
@@ -497,7 +524,11 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
-        let Typed { ty, expr } = self.expr(receiver);
+        // In `.none.new(())`, the type of `.none` is what the whole expression
+        // is used as, so that's passed down to it. Any other receiver's type
+        // is its own.
+        let expected = expected.filter(|_| is_implicit(receiver));
+        let Typed { ty, expr } = self.expr_as(receiver, expected);
         Some(Receiver::Value(ty?, expr))
     }
     /// Finds the field or method of `ty` called `name`. A tuple's elements
