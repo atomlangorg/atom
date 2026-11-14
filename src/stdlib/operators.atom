@@ -66,19 +66,19 @@ trait Compare {
     fn compare(to rhs: Rhs) -> Comparison
 
     fn isLess(than rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) == Comparison.less.new(())
+        return self.compare(to: rhs) == .less.new(())
     }
 
     fn isLessOrEqual(to rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) != Comparison.greater.new(())
+        return self.compare(to: rhs) != .greater.new(())
     }
 
     fn isGreater(than rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) == Comparison.greater.new(())
+        return self.compare(to: rhs) == .greater.new(())
     }
 
     fn isGreaterOrEqual(to rhs: Rhs) -> Bool {
-        return self.compare(to: rhs) != Comparison.less.new(())
+        return self.compare(to: rhs) != .less.new(())
     }
 }
 
