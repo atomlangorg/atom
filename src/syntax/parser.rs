@@ -275,6 +275,22 @@ where
     I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
 {
     let ident = select! { Token::Ident(name) => name.to_string() }.labelled("identifier");
+    // An identifier in a type, or naming a type or trait. `some` is a
+    // keyword in types, where it can only come before a trait, as in `some
+    // Equal`, so no type or trait can be called it, and no type can be
+    // written with it.
+    let type_ident = ident
+        .validate(|name, e, emitter| {
+            if name == "some" {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    "`some` can only come before a trait, as in `some Equal`, so it can't \
+                     name a type or trait",
+                ));
+            }
+            name
+        })
+        .boxed();
 
     // `f` or `other::f`. Which file a name comes from is decided by the
     // checker. `Self` is a keyword, so it can't be qualified, and the checker
@@ -294,8 +310,27 @@ where
                 span: Span::from(e.span()),
             }))
         .boxed();
+    // A name in a type or a constraint, or of a trait, like `name`, but
+    // without `some`.
+    let type_path = just(Token::SelfType)
+        .map_with(|_, e| Name {
+            span: Span::from(e.span()),
+            ..Name::new("Self")
+        })
+        .or(type_ident
+            .clone()
+            .then_ignore(just(Token::ColonColon))
+            .or_not()
+            .then(type_ident.clone())
+            .map_with(|(file, name), e| Name {
+                file,
+                name,
+                span: Span::from(e.span()),
+            }))
+        .boxed();
 
-    // Type names are resolved by the checker, not reserved by the lexer. A
+    // Type names are resolved by the checker, not reserved by the lexer,
+    // except that none can be `some`, as `type_ident` says. A
     // tuple type is written like a function's parameters, as in
     // `(at x: Int, y: Int)`. A generic type is given its arguments, as in
     // `Optional<Int>`, and in a generic type's `impl`, `Self.T` is what its
@@ -308,7 +343,7 @@ where
         .collect::<Vec<_>>()
         .delimited_by(just(Token::Lt), just(Token::Gt));
     // A name that's a type, which can be given generic arguments.
-    let named_type = name
+    let named_type = type_path
         .clone()
         .then(type_args.clone().or_not())
         .map(|(name, args)| match args {
@@ -475,7 +510,7 @@ where
 
     // `Optional<Int>` before a `.`, as in `Optional<Int>.none`. In `a < b`,
     // there's no `>` and `.`, so it's a comparison.
-    let generic_type = name
+    let generic_type = type_path
         .clone()
         .then(type_args.clone())
         .then_ignore(just(Token::Dot).rewind())
@@ -632,7 +667,8 @@ where
         });
 
     // `<T, U>` after a type's name, naming its generic parameters.
-    let generic_params = ident
+    let generic_params = type_ident
+        .clone()
         .separated_by(just(Token::Comma))
         .at_least(1)
         .collect::<Vec<_>>()
@@ -642,7 +678,7 @@ where
 
     // Like a block, one field per line.
     let group_ = just(Token::Group)
-        .ignore_then(ident)
+        .ignore_then(type_ident.clone())
         .then(generic_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(field))
@@ -657,7 +693,7 @@ where
 
     // `alias Name = Type`, or `alias Name` in a `trait`.
     let any_alias = just(Token::Alias)
-        .ignore_then(ident)
+        .ignore_then(type_ident.clone())
         .then(just(Token::Eq).ignore_then(type_name.clone()).or_not())
         .map_with(|(name, ty), e| Alias {
             name,
@@ -689,7 +725,7 @@ where
 
     // Laid out like a group, with one option per line.
     let choice_ = just(Token::Choice)
-        .ignore_then(ident)
+        .ignore_then(type_ident.clone())
         .then(generic_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(option))
@@ -924,9 +960,11 @@ where
         .or(function_in(Place::Impl).map(Member::Function));
     // `Self.T == some Equal`, optionally giving the trait's aliases types, as
     // in `some Equal<Rhs = Self.T>`, or `Self.T == Void`, for exactly that
-    // type. `some` is only special here, so it can still be a name, such as
-    // an option's.
-    let constraint_alias = ident
+    // type. `some` is a keyword anywhere in a constraint, as it is in types,
+    // so it always starts a trait, but it can still be a name outside them,
+    // such as an option's.
+    let constraint_alias = type_ident
+        .clone()
         .then_ignore(just(Token::Eq))
         .then(type_name.clone())
         .map_with(|(name, ty), e| Alias {
@@ -935,7 +973,7 @@ where
             span: Span::from(e.span()),
         });
     let trait_bound = just(Token::Ident("some"))
-        .ignore_then(name.clone().labelled("trait"))
+        .ignore_then(type_path.clone().labelled("trait"))
         .then(
             constraint_alias
                 .separated_by(just(Token::Comma))
@@ -971,10 +1009,10 @@ where
     // Only a named type can have an `impl`, and only a trait can follow
     // `with`.
     let impl_ = just(Token::Impl)
-        .ignore_then(name.clone().labelled("type"))
+        .ignore_then(type_path.clone().labelled("type"))
         .then(
             just(Token::Ident("with"))
-                .ignore_then(name.clone().labelled("trait"))
+                .ignore_then(type_path.clone().labelled("trait"))
                 .or_not(),
         )
         .then(where_)
@@ -1001,7 +1039,7 @@ where
         .map(Member::Alias)
         .or(function_in(Place::Trait).map(Member::Function));
     let trait_ = just(Token::Trait)
-        .ignore_then(ident)
+        .ignore_then(type_ident.clone())
         .map_with(|name, e| (name, Span::from(e.span())))
         .then(braced_lines(trait_member))
         .map(|((name, span), members)| {
@@ -1019,7 +1057,7 @@ where
     // `primitive Name` or `primitive Name<T, U>`, which the checker only
     // allows in the standard library, like a `primitive fn`.
     let primitive = just(Token::Primitive)
-        .ignore_then(ident)
+        .ignore_then(type_ident.clone())
         .then(generic_params)
         .map_with(|(name, params), e| Stmt {
             kind: StmtKind::Primitive { name, params },
@@ -4519,8 +4557,55 @@ mod tests {
         // `where` and `some` are only special in an `impl`, so they can still
         // be names.
         assert!(parse("fn f(where: Int, some: Int) {}\nlet x = f(where: 1, some: 2)").is_ok());
+        // `some` is a keyword anywhere in a constraint, as
+        // `rejects_some_as_a_type_or_trait` tests.
         assert!(parse("impl Pair where Self.A == {}").is_err());
         assert!(parse("impl Pair where {}").is_err());
+    }
+
+    #[test]
+    fn rejects_some_as_a_type_or_trait() {
+        // `some` is a keyword in types, where it only comes before a trait,
+        // so neither a type nor a trait can be called it.
+        let message = "`some` can only come before a trait, as in `some Equal`, so it can't \
+                       name a type or trait";
+        for src in [
+            "let x: some = 1",
+            "fn f(x: some) {}",
+            "fn f() -> some {}",
+            "fn f(x: Optional<some>) {}",
+            "fn f(x: (a: some)) {}",
+            "fn f(x: other::some) {}",
+            "fn f(x: some::Int) {}",
+            "let x = some<Int>.none",
+            "group some {}",
+            "group Box<some> {}",
+            "choice some {}",
+            "alias some = Int",
+            "primitive some",
+            "impl some {}",
+            "trait some {}",
+            "impl Pair with some {}",
+            "impl Pair with other::some {}",
+            "impl Pair where Self.A == some {}",
+            "impl Pair where Self.A == Optional<some> {}",
+            "impl Pair where some == Int {}",
+            "impl Pair where Self.A == some some {}",
+            "impl Pair where Self.A == some Equal<some = Int> {}",
+        ] {
+            let errs = parse(src).unwrap_err();
+            assert_eq!(errs[0].to_string(), message, "{src:?}");
+        }
+        // Outside types, it's still a name.
+        for src in [
+            "let some = 1\nlet a = some < 1\nlet b = some.x\nlet c = some(1)",
+            "let a = some::f()\nlet b = Option.some.new(1)",
+            "fn f(some some: Int) {}",
+            "choice Option<Value> {\nnone\nsome: Value\n}",
+            "fn f() {\nmatch x {\n.some.new(let y) => {}\nOption.some.new(_) => {}\n}\n}",
+        ] {
+            assert!(parse(src).is_ok(), "{src:?} should parse");
+        }
     }
 
     #[test]
