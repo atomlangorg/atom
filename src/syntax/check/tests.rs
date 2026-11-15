@@ -997,6 +997,140 @@ fn require_alone_doesnt_return_on_every_path() {
 }
 
 #[test]
+fn if_binds_its_pattern_only_in_its_first_block() {
+    assert_eq!(
+        check_top(
+            "
+            fn f(_ user: Option<Int>) -> Int {
+                if user => .some.new(let u) {
+                    return u
+                } else if (user, 2) => (.none.new(_), let n) {
+                    return n
+                }
+                return 0
+            }
+            "
+        ),
+        Ok(())
+    );
+    let undeclared = || Err(vec![CheckError::Undeclared("u".to_string())]);
+    assert_eq!(
+        check_body(
+            "
+            let user = Option.some.new(1)
+            if user => .some.new(let u) {} else {
+                let x = u
+            }
+            "
+        ),
+        undeclared()
+    );
+    assert_eq!(
+        check_body(
+            "
+            let user = Option.some.new(1)
+            if user => .some.new(let u) {}
+            let x = u
+            "
+        ),
+        undeclared()
+    );
+}
+
+#[test]
+fn require_binds_its_pattern_only_after_it() {
+    assert_eq!(
+        check_top(
+            "
+            fn f(_ user: Option<Int>) -> Int {
+                require user => .some.new(let u) else {
+                    return 0
+                }
+                require u => 3 else {
+                    exit()
+                }
+                return u
+            }
+            "
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        check_body(
+            "
+            let user = Option.some.new(1)
+            require user => .some.new(let u) else {
+                let x = u
+                return
+            }
+            "
+        ),
+        Err(vec![CheckError::Undeclared("u".to_string())])
+    );
+    // Its `else` must still never finish.
+    assert_eq!(
+        check_body(
+            "
+            let user = Option.some.new(1)
+            require user => .some.new(let u) else {}
+            "
+        ),
+        Err(vec![CheckError::RequireElseFinishes])
+    );
+}
+
+#[test]
+fn conditions_check_their_patterns_like_match_arms() {
+    // Patterns don't have to match every value, and their values can be
+    // any type.
+    assert_eq!(check_body("if 1 => 2 {}"), Ok(()));
+    assert_eq!(
+        messages(
+            "
+            let user = Option.some.new(1)
+            if user => true {}
+            "
+        ),
+        ["pattern `true` can't match `Option<Int>`"]
+    );
+    assert_eq!(
+        messages(
+            "
+            let user = Option.some.new(1)
+            require user => .circle.new(let r) else {
+                return
+            }
+            "
+        ),
+        ["`Option<Int>` has no option `circle`"]
+    );
+    // A binding can't reuse a name, even after a `require`'s `else`.
+    assert_eq!(
+        check_body(
+            "
+            let u = 1
+            let user = Option.some.new(1)
+            require user => .some.new(let u) else {
+                return
+            }
+            "
+        ),
+        Err(vec![CheckError::Redeclared("u".to_string())])
+    );
+    // Uses of a binding whose pattern has an error aren't reported.
+    assert_eq!(
+        check_body(
+            "
+            if missing => .some.new(let u) {
+                let x = u
+            }
+            "
+        ),
+        Err(vec![CheckError::Undeclared("missing".to_string())])
+    );
+}
+
+#[test]
 fn checks_statements_inside_blocks() {
     assert_eq!(
         check_body(

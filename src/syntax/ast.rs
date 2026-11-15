@@ -457,18 +457,21 @@ pub enum StmtKind {
     },
     /// `name = value`: reassigns an existing `var`.
     Assign { name: String, value: Expr },
-    /// `if cond { ... } else { ... }`
+    /// `if cond { ... } else { ... }`, where the values `cond` binds are
+    /// only visible in the first block.
     ///
     /// `else if` is represented as an `else` block containing a single `If`.
     If {
-        cond: Expr,
+        cond: Condition,
         then_block: Block,
         else_block: Option<Block>,
     },
-    /// `require cond else { ... }`: runs the `else` block if `cond` is
-    /// false, like an `if !cond`. The `else` block must not finish, such as
-    /// by returning, so the code after it only runs if `cond` is true.
-    Require { cond: Expr, else_block: Block },
+    /// `require cond else { ... }`: runs the `else` block if `cond` doesn't
+    /// hold, like an `if` with only an `else`. The `else` block must not
+    /// finish, such as by returning, so the code after it only runs if `cond`
+    /// holds. The values `cond` binds are visible after it, but not in the
+    /// `else` block.
+    Require { cond: Condition, else_block: Block },
     /// A function, which can be a `primitive fn` at the top level of the
     /// standard library, such as `exit`.
     Fn(Function),
@@ -637,6 +640,17 @@ pub struct ChoiceOption {
     /// The type of the value it holds.
     pub ty: TypeName,
     pub span: Span,
+}
+
+/// What an `if` or `require` checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Condition {
+    /// A `Bool`, which holds if it's `true`, as in `if ready`.
+    Bool(Expr),
+    /// `value => pattern`, which holds if `value` matches `pattern`, binding
+    /// the values it binds like a `match` arm, as in
+    /// `if user => .some.new(let u)`.
+    Match { value: Expr, pattern: Pattern },
 }
 
 /// A pattern in a `match`, and the block run when it's the first to match.

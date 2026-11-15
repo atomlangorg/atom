@@ -18,6 +18,48 @@
 
 use super::*;
 
+/// What the condition of an `if` or `require` compiles to.
+pub(super) enum CheckedCondition {
+    /// A `Bool`.
+    Bool(ir::Expr),
+    /// A value of the type at `ty` in `Program::types`, and the pattern it
+    /// must match.
+    Match {
+        value: ir::Expr,
+        ty: usize,
+        pattern: ir::Pattern,
+    },
+}
+
+impl CheckedCondition {
+    /// What runs `then_block` if the condition holds, or `else_block` if it
+    /// doesn't. A pattern compiles to a `match`, whose second arm matches
+    /// everything the pattern doesn't.
+    fn branch(self, then_block: Vec<ir::Stmt>, else_block: Vec<ir::Stmt>) -> ir::Stmt {
+        match self {
+            Self::Bool(cond) => ir::Stmt::If {
+                cond,
+                then_block,
+                else_block,
+            },
+            Self::Match { value, ty, pattern } => ir::Stmt::Match {
+                value,
+                ty,
+                arms: vec![
+                    ir::MatchArm {
+                        pattern,
+                        body: then_block,
+                    },
+                    ir::MatchArm {
+                        pattern: ir::Pattern::Any,
+                        body: else_block,
+                    },
+                ],
+            },
+        }
+    }
+}
+
 impl<'a> Checker<'a> {
     /// The type of the top-level value at `index` in `globals`, checking its
     /// declaration if that hasn't been done yet.
@@ -175,34 +217,39 @@ impl<'a> Checker<'a> {
                 then_block,
                 else_block,
             } => {
+                // The values the condition binds are only visible in the
+                // first block.
+                self.cx.scopes.push(HashMap::new());
                 let (cond, never) = self.condition(cond, "if");
-                let (then_block, then_returns) = self.block(then_block);
+                let (then_block, then_returns) = self.stmts(then_block);
+                self.cx.scopes.pop();
                 let (else_block, else_returns) = match else_block {
                     Some(else_block) => self.block(else_block),
                     None => (vec![], false),
                 };
-                let lowered = ir::Stmt::If {
-                    cond: cond.expr,
-                    then_block,
-                    else_block,
-                };
-                (Some(lowered), never || then_returns && else_returns)
+                let lowered = cond.map(|cond| cond.branch(then_block, else_block));
+                (lowered, never || then_returns && else_returns)
             }
-            // Compiles to an `if` that does nothing when `cond` is true.
+            // Compiles to an `if` that does nothing when `cond` holds.
             StmtKind::Require { cond, else_block } => {
+                // The values the condition binds are only visible after the
+                // `else` block, which only runs when they aren't bound.
+                self.cx.scopes.push(HashMap::new());
                 let (cond, never) = self.condition(cond, "require");
+                let bindings = self.cx.scopes.pop().expect("pushed above");
                 let (else_block, else_returns) = self.block(else_block);
                 // Once the condition is known to be `Never`, the `else` block
                 // can never run, so it doesn't matter whether it finishes.
                 if !never && !else_returns {
                     self.error(stmt.span, CheckError::RequireElseFinishes);
                 }
-                let lowered = ir::Stmt::If {
-                    cond: cond.expr,
-                    then_block: vec![],
-                    else_block,
-                };
-                (Some(lowered), never)
+                self.cx
+                    .scopes
+                    .last_mut()
+                    .expect("statements are only checked inside functions")
+                    .extend(bindings);
+                let lowered = cond.map(|cond| cond.branch(vec![], else_block));
+                (lowered, never)
             }
             // Inside functions, functions and groups are only visible after
             // they're declared.
@@ -297,16 +344,39 @@ impl<'a> Checker<'a> {
         }
     }
     /// Checks the condition of the statement starting with `keyword`, which
-    /// must be a `Bool`, also returning whether it evaluates a `Never`.
-    pub(super) fn condition(&mut self, cond: &Expr, keyword: &'static str) -> (Typed, bool) {
-        let checked = self.evaluating(|checker| checker.expr(cond));
-        if let Some(found) = &checked.0.ty
-            && *found != self.std_type("Bool")
-        {
-            let found = found.clone();
-            self.error(cond.span, CheckError::ConditionNotBool { keyword, found });
+    /// is either a `Bool`, or a value and a pattern, which doesn't have to
+    /// match every value it could be. The values the pattern binds are
+    /// declared in the current scope. Returns what it compiles to, or `None`
+    /// if its pattern has an error or its value's type is unknown, along with
+    /// whether it evaluates a `Never`.
+    pub(super) fn condition(
+        &mut self,
+        cond: &'a Condition,
+        keyword: &'static str,
+    ) -> (Option<CheckedCondition>, bool) {
+        match cond {
+            Condition::Bool(cond) => {
+                let (Typed { ty, expr }, never) = self.evaluating(|checker| checker.expr(cond));
+                if let Some(found) = ty
+                    && found != self.std_type("Bool")
+                {
+                    self.error(cond.span, CheckError::ConditionNotBool { keyword, found });
+                }
+                (Some(CheckedCondition::Bool(expr)), never)
+            }
+            Condition::Match { value, pattern } => {
+                let (Typed { ty, expr }, never) = self.evaluating(|checker| checker.expr(value));
+                let (pattern, _) = self.pattern(pattern, ty.as_ref());
+                let lowered = ty
+                    .zip(pattern)
+                    .map(|(ty, pattern)| CheckedCondition::Match {
+                        value: expr,
+                        ty: ty.id,
+                        pattern,
+                    });
+                (lowered, never)
+            }
         }
-        checked
     }
     /// Checks expressions with `check`, also returning whether they evaluate
     /// a `Never`.

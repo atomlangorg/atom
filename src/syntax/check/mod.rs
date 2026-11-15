@@ -57,9 +57,9 @@ use std::{
 
 use super::{
     ast::{
-        self as ast, Arg, BinOp, ChoiceOption, Expr, ExprKind, Field, FieldValue, Function, Import,
-        ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
-        StmtKind, TupleElement, TypeName, UnOp,
+        self as ast, Arg, BinOp, ChoiceOption, Condition, Expr, ExprKind, Field, FieldValue,
+        Function, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program,
+        Span, Stmt, StmtKind, TupleElement, TypeName, UnOp,
     },
     parser::parse,
 };

@@ -23,9 +23,9 @@ use chumsky::{
 
 use super::{
     ast::{
-        Alias, Arg, BinOp, Bound, ChoiceOption, Constraint, Expr, ExprKind, Field, FieldValue,
-        Function, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program,
-        Span, Stmt, StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
+        Alias, Arg, BinOp, Bound, ChoiceOption, Condition, Constraint, Expr, ExprKind, Field,
+        FieldValue, Function, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind,
+        Program, Span, Stmt, StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
 };
@@ -766,6 +766,17 @@ where
         }))
         .boxed();
 
+        // A `Bool`, or a value then the pattern it must match, as in
+        // `user => .some.new(let u)`.
+        let condition = expr
+            .clone()
+            .then(just(Token::FatArrow).ignore_then(pattern.clone()).or_not())
+            .map(|(value, pattern)| match pattern {
+                Some(pattern) => Condition::Match { value, pattern },
+                None => Condition::Bool(value),
+            })
+            .boxed();
+
         // The `{` must be on the same line as the `if`, and `else` on the same
         // line as the preceding `}`, so newlines never need disambiguating.
         let if_ = recursive(|if_| {
@@ -773,7 +784,7 @@ where
                 just(Token::Else).ignore_then(block.clone().or(if_.map(|stmt| vec![stmt])));
 
             just(Token::If)
-                .ignore_then(expr.clone())
+                .ignore_then(condition.clone())
                 .map_with(|cond, e| (cond, Span::from(e.span())))
                 .then(block.clone())
                 .then(else_block.or_not())
@@ -790,7 +801,7 @@ where
         // Like an `if`, with `else` on the same line as the condition, but
         // with only an `else` block.
         let require = just(Token::Require)
-            .ignore_then(expr.clone())
+            .ignore_then(condition)
             .map_with(|cond, e| (cond, Span::from(e.span())))
             .then_ignore(just(Token::Else))
             .then(block.clone())
@@ -2439,10 +2450,100 @@ mod tests {
 
     fn if_(cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>) -> Stmt {
         stmt_node(StmtKind::If {
-            cond,
+            cond: Condition::Bool(cond),
             then_block,
             else_block,
         })
+    }
+
+    /// `value => .some.new(let name)`.
+    fn some_binding(value: Expr, name: &str) -> Condition {
+        Condition::Match {
+            value,
+            pattern: pattern_node(PatternKind::Option {
+                ty: None,
+                option: "some".to_string(),
+                value: Box::new(pattern_node(PatternKind::Binding(name.to_string()))),
+            }),
+        }
+    }
+
+    #[test]
+    fn parses_if_with_a_pattern() {
+        assert_eq!(
+            parse_body(
+                "
+                if user => .some.new(let u) {
+                    x = u
+                } else if (a, b) => (0, let n) {
+                    x = n
+                } else {
+                    x = 0
+                }
+                "
+            ),
+            Ok(vec![stmt_node(StmtKind::If {
+                cond: some_binding(*var("user"), "u"),
+                then_block: vec![assign("x", *var("u"))],
+                else_block: Some(vec![stmt_node(StmtKind::If {
+                    cond: Condition::Match {
+                        value: expr_node(ExprKind::Tuple(vec![
+                            arg(None, *var("a")),
+                            arg(None, *var("b")),
+                        ])),
+                        pattern: pattern_node(PatternKind::Tuple(vec![
+                            TuplePattern {
+                                label: None,
+                                pattern: pattern_node(PatternKind::Int {
+                                    value: 0,
+                                    negative: false,
+                                }),
+                            },
+                            TuplePattern {
+                                label: None,
+                                pattern: pattern_node(PatternKind::Binding("n".to_string())),
+                            },
+                        ])),
+                    },
+                    then_block: vec![assign("x", *var("n"))],
+                    else_block: Some(vec![assign("x", expr_node(ExprKind::Int(0)))]),
+                })]),
+            })])
+        );
+    }
+
+    #[test]
+    fn parses_require_with_a_pattern() {
+        assert_eq!(
+            parse_body(
+                "
+                require user => .some.new(let u) else {
+                    return
+                }
+                "
+            ),
+            Ok(vec![stmt_node(StmtKind::Require {
+                cond: some_binding(*var("user"), "u"),
+                else_block: vec![stmt_node(StmtKind::Return(None))],
+            })])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_conditions_with_patterns() {
+        for src in [
+            // Missing the pattern or the value.
+            "if user => {}",
+            "if => let u {}",
+            "require user => else {}",
+            // Only one pattern, and it can't be an expression.
+            "if user => let u => let v {}",
+            "if user => u + 1 {}",
+            // The pattern comes after the value, like a `match`'s value.
+            "if .some.new(let u) => user {}",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]
@@ -2711,14 +2812,14 @@ mod tests {
                 "
             ),
             Ok(vec![stmt_node(StmtKind::Require {
-                cond: *bin(not(var("a")), BinOp::And, var("b")),
+                cond: Condition::Bool(*bin(not(var("a")), BinOp::And, var("b"))),
                 else_block: vec![stmt_node(StmtKind::Return(None))],
             })])
         );
         assert_eq!(
             parse_body("require c else {}"),
             Ok(vec![stmt_node(StmtKind::Require {
-                cond: *var("c"),
+                cond: Condition::Bool(*var("c")),
                 else_block: vec![],
             })])
         );

@@ -2777,6 +2777,58 @@ mod tests {
     }
 
     #[test]
+    fn if_with_a_pattern_runs_its_first_block_when_it_matches() {
+        let src = "
+            fn describe(_ value: Option<Int>, and other: Int) -> Int {
+                if value => .some.new(let n) {
+                    return n
+                } else if other => 0 {
+                    return 1
+                }
+                return 2
+            }
+
+            fn main() -> Int {
+                let a = describe(Option.some.new(5), and: 0)
+                let b = describe(Option.none.new(()), and: 0)
+                let c = describe(Option.none.new(()), and: 9)
+                return a * 100 + b * 10 + c
+            }
+            ";
+        assert_eq!(run(src), 512);
+    }
+
+    #[test]
+    fn require_with_a_pattern_binds_its_values_after_it() {
+        let src = "
+            fn sum(_ first: Option<Int>, _ second: Option<Int>) -> Int {
+                require (first, second) => (.some.new(let a), .some.new(let b)) else {
+                    return 0
+                }
+                return a + b
+            }
+
+            fn main() -> Int {
+                let a = sum(Option.some.new(3), Option.some.new(4))
+                let b = sum(Option.some.new(3), Option.none.new(()))
+                return a * 10 + b
+            }
+            ";
+        assert_eq!(run(src), 70);
+
+        let src = "
+            fn main() -> Int {
+                let user: Option<Int> = Option.none.new(())
+                require user => .some.new(let u) else {
+                    exit()
+                }
+                return u
+            }
+            ";
+        assert_eq!(run_executable("require_pattern_exits", src).code(), Some(1));
+    }
+
+    #[test]
     fn exit_stops_the_program_from_inside_a_statement() {
         let src = "
             fn describe(_ never: Never) -> Int {
