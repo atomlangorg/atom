@@ -27,14 +27,16 @@ pub(super) enum Receiver {
     Type(Type),
 }
 
-/// A field or method of a type, which are found with `.name` on a value.
+/// A field or methods of a type, which are found with `.name` on a value.
 /// Whether it's called is decided by the brackets after it, not by which kind
 /// it is.
 pub(super) enum Member {
     /// The field's index in the order its group or tuple declares them,
     /// whose type is found with `Checker::field_type`.
     Field(usize),
-    Method(FnRef),
+    /// One or more methods, which a call chooses between with
+    /// `Checker::overload`.
+    Method,
 }
 
 /// The result of checking an expression.
@@ -325,19 +327,17 @@ impl<'a> Checker<'a> {
             Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `{trait_name}`"),
         };
-        let found = match self.member(ty, method) {
-            Some(Member::Method(found)) if self.implements(ty, trait_index) => found,
-            _ => {
+        match self.trait_fn(ty, trait_index, method) {
+            Some(found) if self.implements(ty, trait_index) => Some(found),
+            found => {
                 // It may be implemented only where its constraints are met.
-                let error = self
-                    .declared_method(ty, method)
+                let error = found
                     .and_then(|declared| self.unmet(ty, method, &declared))
                     .unwrap_or(not_implemented);
                 self.error(span, error);
-                return None;
+                None
             }
-        };
-        Some(found)
+        }
     }
     /// Checks `lhs op rhs`, which calls a function of a trait from the
     /// standard library, as `BinOp::trait_function` says, such as
@@ -531,7 +531,7 @@ impl<'a> Checker<'a> {
         let Typed { ty, expr } = self.expr_as(receiver, expected);
         Some(Receiver::Value(ty?, expr))
     }
-    /// Finds the field or method of `ty` called `name`. A tuple's elements
+    /// Finds the field or methods of `ty` called `name`. A tuple's elements
     /// are its fields, found by the names `ty` was found with. A method is
     /// only found if `ty` meets its `impl`'s constraints.
     pub(super) fn member(&self, ty: &Type, name: &str) -> Option<Member> {
@@ -547,25 +547,52 @@ impl<'a> Checker<'a> {
         if let Some(index) = fields.iter().position(|field| field.name == name) {
             return Some(Member::Field(index));
         }
-        if let Some(function) = self.constrained_method(ty, name) {
-            return Some(Member::Method(function));
+        (!self.methods(ty, name, false).is_empty()).then_some(Member::Method)
+    }
+    /// The methods of `ty` called `name`, or its static functions if
+    /// `is_static`, which are only found if `ty` meets their `impl`s'
+    /// constraints. A parameter that the current `impl` constrains has the
+    /// methods of the traits it's constrained to.
+    pub(super) fn methods(&self, ty: &Type, name: &str, is_static: bool) -> Vec<FnRef> {
+        if !is_static && let Some(function) = self.constrained_method(ty, name) {
+            return vec![function];
         }
-        let function = self.declared_method(ty, name)?;
-        self.meets(&function).then_some(Member::Method(function))
+        let mut declared = self.declared_methods(ty, name, is_static);
+        declared.retain(|function| self.meets(function));
+        declared
     }
-    /// Finds the method of `ty` called `name`, whether or not `ty` meets its
-    /// `impl`'s constraints.
-    pub(super) fn declared_method(&self, ty: &Type, name: &str) -> Option<FnRef> {
+    /// The methods of `ty` called `name`, or its static functions if
+    /// `is_static`, whether or not `ty` meets their `impl`s' constraints, in
+    /// the order they're declared.
+    pub(super) fn declared_methods(&self, ty: &Type, name: &str, is_static: bool) -> Vec<FnRef> {
         let (owner, args) = self.owner(ty);
-        let index = *self.types[owner].methods.get(name)?;
-        Some(FnRef { index, args })
+        let info = &self.types[owner];
+        let table = if is_static {
+            &info.statics
+        } else {
+            &info.methods
+        };
+        let indexes = table.get(name).map(Vec::as_slice).unwrap_or_default();
+        indexes
+            .iter()
+            .map(|&index| FnRef {
+                index,
+                args: args.clone(),
+            })
+            .collect()
     }
-    /// Finds the static function of `ty` called `name`, whether or not `ty`
-    /// meets its `impl`'s constraints.
-    pub(super) fn declared_static(&self, ty: &Type, name: &str) -> Option<FnRef> {
-        let (owner, args) = self.owner(ty);
-        let index = *self.types[owner].statics.get(name)?;
-        Some(FnRef { index, args })
+    /// The error for `ty` not having its method called `name`, or its static
+    /// function if `is_static`, because it doesn't meet the constraints of
+    /// their `impl`s, if that's why.
+    pub(super) fn unmet_methods(
+        &self,
+        ty: &Type,
+        name: &str,
+        is_static: bool,
+    ) -> Option<CheckError> {
+        self.declared_methods(ty, name, is_static)
+            .iter()
+            .find_map(|declared| self.unmet(ty, name, declared))
     }
     /// The `id` of the type whose `impl`s declare the functions of `ty`,
     /// along with what its generic type's parameters stand for in `ty`. A
@@ -595,45 +622,48 @@ impl<'a> Checker<'a> {
                     .is_none()
             })
     }
-    /// Finds the static function of `ty` called `name`, which is only found
-    /// if `ty` meets its `impl`'s constraints.
-    pub(super) fn static_function(&self, ty: &Type, name: &str) -> Option<FnRef> {
-        let function = self.declared_static(ty, name)?;
-        self.meets(&function).then_some(function)
-    }
-    /// Finds the static function or option of `ty` called `name`. They never
-    /// share a name, since declaring one as the other is an error.
+    /// Finds the static functions or option of `ty` called `name`. They
+    /// never share a name, since declaring one as the other is an error.
     pub(super) fn static_member(&self, ty: &Type, name: &str) -> Option<StaticMember> {
-        if let Some(function) = self.static_function(ty, name) {
-            return Some(StaticMember::Function(function));
+        if !self.methods(ty, name, true).is_empty() {
+            return Some(StaticMember::Function);
         }
         let (index, _) = self.option(ty, name)?;
         Some(StaticMember::Option(index))
     }
-    /// `member` of `ty` used as a value, for the code at `span`. A static
-    /// function is an `Fn`, and an option is its `ChoiceOption`, so naming it
-    /// doesn't create the choice.
+    /// `member` of `ty`, called `name`, used as a value, which is expected
+    /// to be `expected`, for the code at `span`. A static function is an
+    /// `Fn`, and an option is its `ChoiceOption`, so naming it doesn't create
+    /// the choice.
     pub(super) fn static_member_value(
         &mut self,
         ty: &Type,
-        member: StaticMember,
+        (name, member): (&str, StaticMember),
+        expected: Option<&Type>,
         span: Span,
     ) -> Typed {
         match member {
-            StaticMember::Function(function) => self.function_value(function, span),
+            StaticMember::Function => match self.function_as_value(ty, name, expected, span) {
+                Some(function) => self.function_value(function, span),
+                None => Typed::UNKNOWN,
+            },
             StaticMember::Option(index) => self.option_value(ty.clone(), index, span),
         }
     }
-    /// The type of `member` of `ty` used as a value, like
-    /// `static_member_value`, without compiling it.
+    /// The type of `member` of `ty`, called `name`, used as a value, like
+    /// `static_member_value`, without compiling it, or `None` if it's unknown
+    /// or it's one of several static functions.
     pub(super) fn static_member_type(
         &mut self,
         ty: &Type,
-        member: &StaticMember,
+        (name, member): (&str, &StaticMember),
         span: Span,
     ) -> Option<Type> {
         match member {
-            StaticMember::Function(function) => self.function_type(function, span),
+            StaticMember::Function => match &self.methods(ty, name, true)[..] {
+                [function] => self.function_type(&function.clone(), span),
+                _ => None,
+            },
             StaticMember::Option(index) => self.option_value(ty.clone(), *index, span).ty,
         }
     }
@@ -648,10 +678,7 @@ impl<'a> Checker<'a> {
     /// The error for `name` not being a field or method of `ty`, which points
     /// out an option or static function with that name.
     pub(super) fn no_member(&self, ty: Type, name: &str) -> CheckError {
-        if let Some(error) = self
-            .declared_method(&ty, name)
-            .and_then(|declared| self.unmet(&ty, name, &declared))
-        {
+        if let Some(error) = self.unmet_methods(&ty, name, false) {
             return error;
         }
         let member = name.to_string();
@@ -667,15 +694,12 @@ impl<'a> Checker<'a> {
     /// The error for `name` not being an option or static function of `ty`,
     /// which points out a field or method with that name.
     pub(super) fn no_static_function(&self, ty: Type, name: &str) -> CheckError {
-        if let Some(error) = self
-            .declared_static(&ty, name)
-            .and_then(|declared| self.unmet(&ty, name, &declared))
-        {
+        if let Some(error) = self.unmet_methods(&ty, name, true) {
             return error;
         }
         let kind = match self.member(&ty, name) {
             Some(Member::Field(..)) => MemberKind::Field,
-            Some(Member::Method(_)) => MemberKind::Method,
+            Some(Member::Method) => MemberKind::Method,
             None if self.options(ty.id).is_some() => {
                 return CheckError::NoOption {
                     ty,
@@ -721,7 +745,7 @@ impl<'a> Checker<'a> {
                         },
                     };
                 }
-                Some(Member::Method(_)) => CheckError::MemberNotValue {
+                Some(Member::Method) => CheckError::MemberNotValue {
                     ty,
                     member: field.to_string(),
                     kind: MemberKind::Method,
@@ -729,7 +753,9 @@ impl<'a> Checker<'a> {
                 None => self.no_member(ty, field),
             },
             Receiver::Type(ty) => match self.static_member(&ty, field) {
-                Some(member) => return self.static_member_value(&ty, member, span),
+                Some(member) => {
+                    return self.static_member_value(&ty, (field, member), expected, span);
+                }
                 None => self.no_static_function(ty, field),
             },
         };
@@ -757,7 +783,7 @@ impl<'a> Checker<'a> {
         };
         let generic = self.templates[template].generic.clone()?;
         let declared = self.static_member(&generic, member)?;
-        let declared = self.static_member_type(&generic, &declared, span)?;
+        let declared = self.static_member_type(&generic, (member, &declared), span)?;
         let stand_ins = self.templates[template].stand_ins.clone();
         let mut inferred = vec![None; stand_ins.len()];
         self.infer(&declared, expected, &stand_ins, &mut inferred);
@@ -766,7 +792,7 @@ impl<'a> Checker<'a> {
             return Some(Typed::UNKNOWN);
         };
         let found = self.static_member(&ty, member)?;
-        Some(self.static_member_value(&ty, found, span))
+        Some(self.static_member_value(&ty, (member, found), Some(expected), span))
     }
     /// The option of `ty` at `index` as a value, which is its `ChoiceOption`,
     /// for the code at `span`.

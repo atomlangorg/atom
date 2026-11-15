@@ -67,6 +67,13 @@ impl<'a> Checker<'a> {
         let constraints = self.in_impl(self_ty.clone(), (None, None), |checker| {
             checker.define_constraints(constraints)
         });
+        // The functions are the generic type's, but in the `impl`, `Self` is
+        // the type its constraints say it is, as in `ChoiceOption<Base, Void>`
+        // for `where Self.Value == Void`.
+        let owner = self_ty;
+        let self_ty = owner
+            .clone()
+            .map(|owner| self.constrained_type(owner, constraints));
         let impl_aliases = self.in_impl(self_ty.clone(), (None, constraints), |checker| {
             checker.define_impl_aliases(aliases, trait_index)
         });
@@ -76,7 +83,7 @@ impl<'a> Checker<'a> {
                 let name = format!("{type_name}.{}", function.name);
                 let full_name = checker.full_name(&name);
                 let index = checker.declare_method(
-                    self_ty.as_ref(),
+                    owner.as_ref(),
                     (&function.name, &function.params, &function.ret),
                     function.span,
                     function.is_static,
@@ -110,23 +117,31 @@ impl<'a> Checker<'a> {
             let implemented: Vec<_> = functions.iter().zip(&indexes).collect();
             self.infer_impl_aliases(ty, with, trait_index, aliases, &implemented);
         }
+        let mut implemented: HashMap<_, _> = functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .zip(indexes.iter().copied())
+            .collect();
         if let Some(trait_index) = trait_index {
             let defaults = self.declare_defaults(
                 &type_name,
-                self_ty.as_ref(),
+                (owner.as_ref(), self_ty.as_ref()),
                 trait_index,
-                functions,
+                (functions, &mut implemented),
                 (impl_aliases, constraints),
             );
             pending.extend(defaults);
         }
-        if let Some((with, (trait_index, self_ty))) = with.zip(trait_index.zip(self_ty)) {
+        if let Some((with, (trait_index, (owner, self_ty)))) =
+            with.zip(trait_index.zip(owner.zip(self_ty)))
+        {
             let implementation = ImplInfo {
                 aliases: impl_aliases,
                 constraints,
+                functions: implemented,
             };
             self.implementations
-                .insert((self_ty.id, trait_index), implementation);
+                .insert((owner.id, trait_index), implementation);
             let implemented = functions.iter().zip(indexes).collect();
             self.check_implements(
                 Implementation {
@@ -377,18 +392,19 @@ impl<'a> Checker<'a> {
     }
     /// Declares the default implementations that `impl ty with` the trait at
     /// `trait_index` in `traits` uses, since it doesn't implement them in
-    /// `functions`, returning their bodies to check, with the trait's file.
-    /// Names mean what they do where they're written, so they're checked in
-    /// that file, but `Self`, which is `self_ty`, the aliases, at `aliases`
-    /// in `impl_aliases`, and the constraints, at `constraints` in
-    /// `constraints`, are the `impl`'s, and they can be used like its own
-    /// functions.
+    /// `functions`, returning their bodies to check, with the trait's file,
+    /// and adding their indexes in `functions` to `implemented`, by name,
+    /// which has the indexes of `functions`. Names mean what they do
+    /// where they're written, so they're checked in that file, but `Self`,
+    /// which is `self_ty`, the aliases, at `aliases` in `impl_aliases`, and
+    /// the constraints, at `constraints` in `constraints`, are the `impl`'s,
+    /// and they can be used like its own functions, which are `owner`'s.
     pub(super) fn declare_defaults(
         &mut self,
         type_name: &str,
-        self_ty: Option<&Type>,
+        (owner, self_ty): (Option<&Type>, Option<&Type>),
         trait_index: usize,
-        functions: &'a [Function],
+        (functions, implemented): (&'a [Function], &mut HashMap<&'a str, usize>),
         (aliases, constraints): (Option<usize>, Option<usize>),
     ) -> Vec<(usize, Pending<'a>)> {
         let is_implemented = |declared: &Function| {
@@ -417,7 +433,7 @@ impl<'a> Checker<'a> {
             let index = self.at_top_level(trait_file, None, |checker| {
                 checker.in_impl(self_ty.cloned(), (aliases, constraints), |checker| {
                     checker.declare_method(
-                        self_ty,
+                        owner,
                         (&declared.name, &declared.params, &declared.ret),
                         declared.span,
                         declared.is_static,
@@ -425,6 +441,7 @@ impl<'a> Checker<'a> {
                     )
                 })
             });
+            implemented.insert(&declared.name, index);
             let kind = if declared.is_static {
                 FnKind::Static(self_ty.cloned())
             } else {

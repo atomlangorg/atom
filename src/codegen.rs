@@ -1930,6 +1930,97 @@ mod tests {
     }
 
     #[test]
+    fn options_holding_void_create_their_choice_without_a_value() {
+        let src = format!(
+            "
+            {SHAPE}
+            {DESCRIBE_SHAPE}
+            fn orNothing(_ value: Option<Int>) -> Int {{
+                match value {{
+                    .some.new(let found) => {{
+                        return found
+                    }}
+                    .none.new(_) => {{
+                        return 5
+                    }}
+                }}
+            }}
+
+            fn main() -> Int {{
+                let empty = Shape.empty
+                let a = describe(shape: empty.new())
+                let b = describe(shape: Shape.empty.new())
+                let shape: Shape = .empty.new()
+                let c = describe(shape: shape)
+                let d = orNothing(Option.none.new())
+                let e = orNothing(.none.new())
+                return a + b + c + d + e
+            }}
+            "
+        );
+        assert_eq!(run(&src), 310);
+    }
+
+    #[test]
+    fn calls_choose_between_methods_sharing_a_name() {
+        // Each method is one digit of the result. `Box<Int>` uses its
+        // specialised `get`, which has the same signature as the other.
+        let src = "
+            group Box<T> {
+                let value: T
+            }
+
+            impl Box {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { value: value }
+                }
+
+                fn get() -> Self.T {
+                    return self.value
+                }
+
+                fn show(_ value: Int) -> Int {
+                    return 1
+                }
+
+                fn show(_ value: Bool) -> Int {
+                    return 20
+                }
+
+                fn show(times value: Int) -> Int {
+                    return 300 * value
+                }
+
+                fn make() -> Int {
+                    return 4000
+                }
+
+                fn make() -> Bool {
+                    return true
+                }
+            }
+
+            impl Box where Self.T == Int {
+                fn get() -> Int {
+                    return self.value + 50000
+                }
+            }
+
+            fn main() -> Int {
+                let box = Box.of(true)
+                let a = box.show(1) + box.show(true) + box.show(times: 1)
+                let b: Int = box.make()
+                let c: Bool = box.make()
+                if c & box.get() {
+                    return a + b + Box.of(0).get()
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 54321);
+    }
+
+    #[test]
     fn stored_options_can_be_chosen_while_running() {
         let src = "
             choice Number {

@@ -23,9 +23,9 @@ use chumsky::{
 
 use super::{
     ast::{
-        Alias, Arg, BinOp, ChoiceOption, Constraint, Expr, ExprKind, Field, FieldValue, Function,
-        Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program, Span, Stmt,
-        StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
+        Alias, Arg, BinOp, Bound, ChoiceOption, Constraint, Expr, ExprKind, Field, FieldValue,
+        Function, Import, ImportPath, MatchArm, Mutability, Name, Pattern, PatternKind, Program,
+        Span, Stmt, StmtKind, TupleElement, TuplePattern, TypeName, UnOp,
     },
     lexer::{self, Token},
 };
@@ -923,8 +923,9 @@ where
         .map(Member::Alias)
         .or(function_in(Place::Impl).map(Member::Function));
     // `Self.T == some Equal`, optionally giving the trait's aliases types, as
-    // in `some Equal<Rhs = Self.T>`. `some` is only special here, so it can
-    // still be a name, such as an option's.
+    // in `some Equal<Rhs = Self.T>`, or `Self.T == Void`, for exactly that
+    // type. `some` is only special here, so it can still be a name, such as
+    // an option's.
     let constraint_alias = ident
         .then_ignore(just(Token::Eq))
         .then(type_name.clone())
@@ -933,11 +934,8 @@ where
             ty: Some(ty),
             span: Span::from(e.span()),
         });
-    let constraint = type_name
-        .clone()
-        .then_ignore(just(Token::EqEq))
-        .then_ignore(just(Token::Ident("some")))
-        .then(name.clone().labelled("trait"))
+    let trait_bound = just(Token::Ident("some"))
+        .ignore_then(name.clone().labelled("trait"))
         .then(
             constraint_alias
                 .separated_by(just(Token::Comma))
@@ -946,10 +944,17 @@ where
                 .delimited_by(just(Token::Lt), just(Token::Gt))
                 .or_not(),
         )
-        .map_with(|((ty, trait_name), aliases), e| Constraint {
-            ty,
-            trait_name,
+        .map(|(name, aliases)| Bound::Trait {
+            name,
             aliases: aliases.unwrap_or_default(),
+        });
+    let constraint = type_name
+        .clone()
+        .then_ignore(just(Token::EqEq))
+        .then(trait_bound.or(type_name.clone().map(Bound::Type)))
+        .map_with(|(ty, bound), e| Constraint {
+            ty,
+            bound,
             span: Span::from(e.span()),
         });
     let where_ = just(Token::Ident("where"))
@@ -4436,10 +4441,9 @@ mod tests {
     #[test]
     fn parses_impls_with_constraints() {
         let param = |name: &str| TypeName::SelfParam(name.to_string(), Span::default());
-        let constraint = |ty, trait_name, aliases| Constraint {
+        let constraint = |ty, name, aliases| Constraint {
             ty,
-            trait_name,
-            aliases,
+            bound: Bound::Trait { name, aliases },
             span: Span::default(),
         };
         let rhs = Alias {
@@ -4472,10 +4476,50 @@ mod tests {
                 }),
             ])
         );
+        // Without `some`, it's a type that the parameter must be.
+        let equal = |ty, bound| Constraint {
+            ty,
+            bound: Bound::Type(bound),
+            span: Span::default(),
+        };
+        assert_eq!(
+            parse(
+                "impl Pair where Self.A == Void, Self.B == Optional<Self.A> {}\n\
+                 impl Pair where Self.A == Int, Self.B == some Equal {}"
+            ),
+            Ok(vec![
+                stmt_node(StmtKind::Impl {
+                    ty: Name::new("Pair"),
+                    with: None,
+                    constraints: vec![
+                        equal(param("A"), TypeName::new("Void")),
+                        equal(
+                            param("B"),
+                            TypeName::Generic {
+                                name: Name::new("Optional"),
+                                args: vec![param("A")],
+                            },
+                        ),
+                    ],
+                    aliases: vec![],
+                    functions: vec![],
+                }),
+                stmt_node(StmtKind::Impl {
+                    ty: Name::new("Pair"),
+                    with: None,
+                    constraints: vec![
+                        equal(param("A"), TypeName::new("Int")),
+                        constraint(param("B"), Name::new("Equal"), vec![]),
+                    ],
+                    aliases: vec![],
+                    functions: vec![],
+                }),
+            ])
+        );
         // `where` and `some` are only special in an `impl`, so they can still
         // be names.
         assert!(parse("fn f(where: Int, some: Int) {}\nlet x = f(where: 1, some: 2)").is_ok());
-        assert!(parse("impl Pair where Self.A == Equal {}").is_err());
+        assert!(parse("impl Pair where Self.A == {}").is_err());
         assert!(parse("impl Pair where {}").is_err());
     }
 

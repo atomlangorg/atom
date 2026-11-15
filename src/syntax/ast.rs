@@ -475,9 +475,9 @@ pub enum StmtKind {
     /// aliases and functions, and only those.
     ///
     /// Either can have a `where`, as in `impl Optional with Equal where
-    /// Self.T == some Equal<Rhs = Self.T> { ... }`, so that it's only for
-    /// the types made from a generic type whose arguments meet its
-    /// constraints.
+    /// Self.T == some Equal<Rhs = Self.T> { ... }` or `impl ChoiceOption
+    /// where Self.Value == Void { ... }`, so that it's only for the types
+    /// made from a generic type whose arguments meet its constraints.
     Impl {
         ty: Name,
         with: Option<Name>,
@@ -572,26 +572,40 @@ pub struct Alias {
 }
 
 /// A constraint in an `impl`'s `where`, such as `Self.T == some Equal<Rhs =
-/// Self.T>`: the generic parameter `ty` must be a type that implements the
-/// trait, whose implementation gives the trait's `aliases` these types. The
-/// trait's other aliases can be any type.
+/// Self.T>` or `Self.T == Void`, which the generic parameter `ty` must meet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constraint {
     pub ty: TypeName,
-    pub trait_name: Name,
-    /// Each is written `Rhs = Self.T`, and always has a type.
-    pub aliases: Vec<Alias>,
+    pub bound: Bound,
     pub span: Span,
+}
+
+/// What a constraint's generic parameter must be, after its `==`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bound {
+    /// `some Equal<Rhs = Self.T>`: a type that implements the trait, whose
+    /// implementation gives the trait's `aliases` these types. The trait's
+    /// other aliases can be any type.
+    Trait {
+        name: Name,
+        /// Each is written `Rhs = Self.T`, and always has a type.
+        aliases: Vec<Alias>,
+    },
+    /// `Void`: exactly this type, which it is in the `impl`.
+    Type(TypeName),
 }
 
 impl fmt::Display for Constraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} == some {}", self.ty, self.trait_name)?;
-        if self.aliases.is_empty() {
+        let (name, aliases) = match &self.bound {
+            Bound::Trait { name, aliases } => (name, aliases),
+            Bound::Type(ty) => return write!(f, "{} == {ty}", self.ty),
+        };
+        write!(f, "{} == some {name}", self.ty)?;
+        if aliases.is_empty() {
             return Ok(());
         }
-        let aliases: Vec<_> = self
-            .aliases
+        let aliases: Vec<_> = aliases
             .iter()
             .map(|alias| match &alias.ty {
                 Some(ty) => format!("{} = {ty}", alias.name),

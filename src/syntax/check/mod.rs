@@ -72,6 +72,7 @@ mod exprs;
 mod functions;
 mod imports;
 mod instantiate;
+mod overloads;
 mod patterns;
 mod stmts;
 #[cfg(test)]
@@ -81,6 +82,7 @@ mod types;
 
 pub use errors::{CheckError, MemberKind};
 use exprs::{Member, Receiver, Typed, call, split};
+use overloads::OverloadCall;
 use patterns::Space;
 use types::int_range;
 
@@ -325,18 +327,19 @@ enum Callee {
     },
 }
 
-/// What a type has by name, rather than its values: a static function, or
-/// an option if it's a choice, as an index in the order they're declared.
+/// What a type has by name, rather than its values: one or more static
+/// functions, which a call chooses between with `Checker::overload`, or an
+/// option if it's a choice, as an index in the order they're declared.
 #[derive(Debug, Clone)]
 enum StaticMember {
-    Function(FnRef),
+    Function,
     Option(usize),
 }
 
 impl StaticMember {
     fn kind(&self) -> MemberKind {
         match self {
-            Self::Function(_) => MemberKind::StaticFunction,
+            Self::Function => MemberKind::StaticFunction,
             Self::Option(_) => MemberKind::Option,
         }
     }
@@ -360,14 +363,16 @@ struct TypeInfo<'a> {
     /// the only one that can construct it if it's a group.
     file: usize,
     kind: TypeKind<'a>,
-    /// Its methods by name. Methods aren't names in any scope, and are only
-    /// found through the type of the value they're called on, wherever
-    /// they're declared. They share names with the type's fields.
-    methods: HashMap<&'a str, usize>,
+    /// Its methods by name, in the order they're declared, since several can
+    /// share a name, and a call chooses between them. Methods aren't names
+    /// in any scope, and are only found through the type of the value
+    /// they're called on, wherever they're declared. They share names with
+    /// the type's fields.
+    methods: HashMap<&'a str, Vec<usize>>,
     /// Its static functions by name, which are found like methods but on the
     /// type itself. They have their own names, separate from the type's
     /// fields and methods.
-    statics: HashMap<&'a str, usize>,
+    statics: HashMap<&'a str, Vec<usize>>,
     /// The generic type it's made from, as an index into `Checker::templates`,
     /// and its arguments, if it's made from one. Its methods and static
     /// functions are those of the type made from the generic type with its
@@ -467,21 +472,37 @@ struct Implementation<'b, 'a> {
 }
 
 /// An `impl` with a trait, which makes its type implement the trait.
-#[derive(Debug, Clone, Copy)]
-struct ImplInfo {
+#[derive(Debug, Clone)]
+struct ImplInfo<'a> {
     /// The index in `Checker::impl_aliases` of the types of its aliases.
     aliases: Option<usize>,
     /// Its constraints, as an index into `Checker::constraints`, which the
     /// arguments of a type made from its generic type must meet for the
     /// type to implement the trait.
     constraints: Option<usize>,
+    /// The functions implementing the trait's, including its default
+    /// implementations, as indexes into `Checker::functions`, by name.
+    functions: HashMap<&'a str, usize>,
 }
 
 /// The constraints of an `impl`'s `where`, on the parameters of the generic
 /// type at `template` in `Checker::templates`.
 struct Constraints<'a> {
     template: usize,
+    /// Those that a parameter implements a trait.
     constraints: Vec<ConstraintInfo<'a>>,
+    /// Those that a parameter is a type.
+    equal: Vec<EqualConstraint<'a>>,
+}
+
+/// A constraint in an `impl`'s `where`, that what `param` stands for must be
+/// `ty`, which can use the generic type's parameters. In the `impl`, `param`
+/// is `ty`.
+struct EqualConstraint<'a> {
+    decl: &'a ast::Constraint,
+    /// The stand-in for the generic parameter it constrains.
+    param: Type,
+    ty: Type,
 }
 
 /// A constraint in an `impl`'s `where`, that what `param` stands for must
@@ -517,6 +538,8 @@ enum ConstraintAlias {
 #[derive(Debug, Clone)]
 struct FnStandIn<'a> {
     param: Type,
+    /// The trait's index in `Checker::traits`.
+    trait_index: usize,
     name: &'a str,
 }
 
@@ -718,7 +741,7 @@ struct Checker<'a> {
     callee_ids: HashMap<FnRef, usize>,
     /// Which types implement which traits, as a type `id` and an index into
     /// `traits`, and the `impl` that implements each.
-    implementations: HashMap<(usize, usize), ImplInfo>,
+    implementations: HashMap<(usize, usize), ImplInfo<'a>>,
     /// The constraints of each `impl` with a `where`.
     constraints: Vec<Constraints<'a>>,
     /// The functions in `functions` that stand for a constraint's trait's
@@ -730,6 +753,12 @@ struct Checker<'a> {
     /// Whether a `Never` has been evaluated since `evaluating` started
     /// checking some expressions.
     evaluated_never: bool,
+    /// How many `trial`s are running, which check something only to see what
+    /// they'd find, and forget its errors.
+    trials: usize,
+    /// The errors found during `trials` that would only be found once, such
+    /// as those of a top-level value, which are reported once they finish.
+    kept: Vec<FileError>,
     globals: Vec<Global<'a>>,
     aliases: Vec<Alias<'a>>,
     /// Indexes into `globals`, in the order their types were worked out, so

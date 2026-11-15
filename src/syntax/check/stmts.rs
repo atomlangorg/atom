@@ -37,9 +37,13 @@ impl<'a> Checker<'a> {
         // needs it first.
         let (file, name, type_name, value) = (global.file, global.name, global.ty, global.value);
         self.globals[index].state = LazyType::Checking;
+        let start = self.errors.len();
         let Typed { ty, expr } = self.at_top_level(file, None, |checker| {
             checker.decl_type(name, type_name, value)
         });
+        // It's only checked once, so its errors are kept even if it's
+        // checked while trying a call's arguments.
+        self.keep_errors(start);
 
         self.globals[index].state = LazyType::Checked(ty.clone());
         self.globals[index].lowered = Some(expr);

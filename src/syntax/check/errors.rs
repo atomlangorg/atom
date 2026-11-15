@@ -274,6 +274,18 @@ pub enum CheckError {
         param: String,
         arg: Type,
     },
+    /// A call has none of the functions that share its name that it could
+    /// mean, which are `candidates`.
+    NoMatchingOverload {
+        function: String,
+        candidates: Vec<String>,
+    },
+    /// A call or a function used as a value could mean more than one of the
+    /// functions that share its name, which are `candidates`.
+    AmbiguousOverload {
+        function: String,
+        candidates: Vec<String>,
+    },
     /// A generic type was given arguments nested too deeply, which means a
     /// type uses itself with ever larger arguments.
     GenericTooDeep(String),
@@ -698,6 +710,22 @@ impl fmt::Display for CheckError {
                 f,
                 "only the generic parameters of the `impl`'s type, such as `Self.T`, can be \
                  constrained, not `{ty}`"
+            ),
+            Self::NoMatchingOverload {
+                function,
+                candidates,
+            } => write!(
+                f,
+                "no `{function}` takes these arguments, since it can only be {}",
+                quoted_list(candidates, "or")
+            ),
+            Self::AmbiguousOverload {
+                function,
+                candidates,
+            } => write!(
+                f,
+                "`{function}` is ambiguous here, since it could be {}",
+                quoted_list(candidates, "or")
             ),
             Self::UnmetConstraint {
                 ty,

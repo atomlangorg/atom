@@ -6221,16 +6221,17 @@ fn rejects_wrong_option_values() {
             let c = Shape.circle.new()
             let d = Shape.circle.new(1, 2)
             let e = Shape.empty.new(1)
+            // An option holding `Void` can leave it out.
             let f = Shape.empty.new()
             "
         )),
         [
             "argument `value` of `ChoiceOption<Shape, Int>.new` expects `Int`, found `Bool`",
             "argument to `ChoiceOption<Shape, Int>.new` should not have a label, found `radius`",
-            "`ChoiceOption<Shape, Int>.new` takes 1 argument, found 0",
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+             `Value` is `Int`",
             "`ChoiceOption<Shape, Int>.new` takes 1 argument, found 2",
             "argument `value` of `ChoiceOption<Shape, Void>.new` expects `Void`, found `Int`",
-            "`ChoiceOption<Shape, Void>.new` takes 1 argument, found 0",
         ]
     );
 }
@@ -6346,6 +6347,7 @@ fn rejects_wrong_values_for_stored_options() {
                 let d = circle.new(1, 2)
                 let empty = Shape.empty
                 let e = empty.new(1)
+                // An option holding `Void` can leave it out.
                 let f = empty.new()
             }}
             "
@@ -6353,10 +6355,10 @@ fn rejects_wrong_values_for_stored_options() {
         [
             "argument `value` of `ChoiceOption<Shape, Int>.new` expects `Int`, found `Bool`",
             "argument to `ChoiceOption<Shape, Int>.new` should not have a label, found `radius`",
-            "`ChoiceOption<Shape, Int>.new` takes 1 argument, found 0",
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+             `Value` is `Int`",
             "`ChoiceOption<Shape, Int>.new` takes 1 argument, found 2",
             "argument `value` of `ChoiceOption<Shape, Void>.new` expects `Void`, found `Int`",
-            "`ChoiceOption<Shape, Void>.new` takes 1 argument, found 0",
         ]
     );
 }
@@ -8593,6 +8595,374 @@ fn constraints_must_be_on_generic_parameters() {
             "`Self.T` can only be used in the `impl` of a generic type",
             "`Box<T>` has no generic parameter `U`",
         ]
+    );
+}
+
+#[test]
+fn type_constraints_make_their_parameter_that_type() {
+    assert_eq!(
+        check_top(&format!(
+            "
+            {GENERICS}
+            impl Box where Self.T == Int {{
+                fn doubled() -> Int {{
+                    return self.value * 2
+                }}
+
+                static fn zero() -> Self {{
+                    return Self {{ value: 0 }}
+                }}
+            }}
+
+            impl Box where Self.T == Optional<Bool> {{
+                fn isEmpty() -> Bool {{
+                    match self.value {{
+                        .none.new(_) => {{
+                            return true
+                        }}
+                        .some.new(_) => {{
+                            return false
+                        }}
+                    }}
+                }}
+            }}
+
+            let a: Int = Box.of(2).doubled()
+            let b: Box<Int> = Box.zero()
+            let c: Int = Box<Int>.zero().doubled()
+            let d: Bool = Box.of(Optional<Bool>.some.new(true)).isEmpty()
+            "
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            impl Box where Self.T == Int {{
+                fn doubled() -> Int {{
+                    return self.value * 2
+                }}
+            }}
+
+            impl Box where Self.T == Bool {{
+                fn count() -> Int {{
+                    return self.value
+                }}
+            }}
+
+            let a: Int = Box.of(true).doubled()
+            let b: Box<Bool> = Box<Bool>.of(true)
+            let c = b.doubled()
+            "
+        )),
+        [
+            "`count` must return `Int`, found `Bool`",
+            "`Box<Bool>` only has `doubled` where `Self.T == Int`, but its `T` is `Bool`",
+            "`Box<Bool>` only has `doubled` where `Self.T == Int`, but its `T` is `Bool`",
+        ]
+    );
+}
+
+#[test]
+fn type_constraints_must_be_on_generic_parameters_and_types() {
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            impl Box where Int == Bool {{}}
+            impl Box where Self.T == Missing {{}}
+            impl Box where Self.T == Equal {{}}
+            impl Box where Self.U == Int {{}}
+            "
+        )),
+        [
+            "only the generic parameters of the `impl`'s type, such as `Self.T`, can be \
+             constrained, not `Int`",
+            "unknown type `Missing`",
+            "`Equal` is not a type",
+            "`Box<T>` has no generic parameter `U`",
+        ]
+    );
+}
+
+#[test]
+fn options_holding_void_can_create_their_choice_without_a_value() {
+    assert_eq!(
+        check_top(&format!(
+            "
+            {SHAPE}
+            {GENERICS}
+            let a: Shape = Shape.empty.new()
+            let b: Shape = .nothing.new()
+            let empty = Shape.empty
+            let c: Shape = empty.new()
+            let d: Optional<Int> = Optional.none.new()
+            let e: Optional<Int> = .none.new()
+            let f: Optional<Int> = Optional<Int>.none.new()
+            let g: Shape = Shape.empty.new(())
+            "
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {SHAPE}
+            let a = Shape.circle.new()
+            let b: Shape = .circle.new()
+            "
+        )),
+        [
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+             `Value` is `Int`",
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+             `Value` is `Int`",
+        ]
+    );
+    assert_eq!(
+        pointed_at_top(&format!(
+            "
+            {SHAPE}
+            let a = Shape.circle.new()
+            "
+        )),
+        ["Shape.circle.new()"]
+    );
+}
+
+/// A type whose methods share names, told apart by their labels, parameter
+/// types and return types.
+const PRINTER: &str = "
+    group Printer {}
+    impl Printer {
+        static fn new() -> Printer {
+            return Self {}
+        }
+
+        fn show(_ value: Int) -> Int {
+            return 1
+        }
+
+        fn show(_ value: Bool) -> Int {
+            return 2
+        }
+
+        fn show(value: Int) -> Int {
+            return 3
+        }
+
+        fn show() -> Int {
+            return 4
+        }
+
+        fn make() -> Int {
+            return 5
+        }
+
+        fn make() -> Bool {
+            return true
+        }
+    }
+    ";
+
+#[test]
+fn methods_sharing_a_name_are_told_apart_by_their_signatures() {
+    assert_eq!(
+        check_top(&format!(
+            "
+            {PRINTER}
+            let printer = Printer.new()
+            let a: Int = printer.show(1)
+            let b: Int = printer.show(true)
+            let c: Int = printer.show(value: 1)
+            let d: Int = printer.show()
+            let e: Int = printer.make()
+            let f: Bool = printer.make()
+            let g: Int = printer.make() + 1
+            "
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {PRINTER}
+            let printer = Printer.new()
+            let a = printer.make()
+            let b = printer.show(printer)
+            let c = printer.show(other: 1)
+            let d = printer.show(missing)
+            "
+        )),
+        [
+            "`Printer.make` is ambiguous here, since it could be `fn make() -> Int` or \
+             `fn make() -> Bool`",
+            "no `Printer.show` takes these arguments, since it can only be \
+             `fn show(_ value: Int) -> Int` or `fn show(_ value: Bool) -> Int`",
+            "no `Printer.show` takes these arguments, since it can only be \
+             `fn show(_ value: Int) -> Int`, `fn show(_ value: Bool) -> Int`, \
+             `fn show(value: Int) -> Int` or `fn show() -> Int`",
+            "`missing` is not declared",
+        ]
+    );
+}
+
+#[test]
+fn methods_with_the_same_signature_must_be_in_specialised_impls() {
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {PRINTER}
+            impl Printer {{
+                fn show(_ other: Int) -> Int {{
+                    return 0
+                }}
+
+                fn make() -> Bool {{
+                    return false
+                }}
+
+                fn make(_ value: Int) -> Bool {{
+                    return false
+                }}
+            }}
+            "
+        )),
+        [
+            "`Printer` already has a method `show`",
+            "`Printer` already has a method `make`",
+        ]
+    );
+}
+
+#[test]
+fn the_most_specialised_method_with_the_same_signature_is_chosen() {
+    assert_eq!(
+        check_top(&format!(
+            "
+            {GENERICS}
+            impl Box where Self.T == Int {{
+                fn get() -> Int {{
+                    return self.value + 1
+                }}
+            }}
+
+            let a: Int = Box.of(1).get()
+            let b: Bool = Box.of(true).get()
+            "
+        )),
+        Ok(())
+    );
+    // Both specialised `describe`s are for `Box<Int>`.
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {GENERICS}
+            impl Box where Self.T == some Equal<Rhs = Self.T> {{
+                fn describe() -> Int {{
+                    return 1
+                }}
+            }}
+
+            impl Box where Self.T == Int {{
+                fn describe() -> Int {{
+                    return 2
+                }}
+            }}
+
+            let a = Box.of(true).describe()
+            let b = Box.of(1).describe()
+            "
+        )),
+        [
+            "`Box<Int>.describe` is ambiguous here, since it could be `fn describe() -> Int` \
+             or `fn describe() -> Int`"
+        ]
+    );
+}
+
+#[test]
+fn static_functions_sharing_a_name_are_told_apart_by_their_signatures() {
+    let maker = "
+        group Maker {}
+        impl Maker {
+            static fn make(from value: Int) -> Int {
+                return value
+            }
+
+            static fn make(from value: Bool) -> Int {
+                return 0
+            }
+        }
+        ";
+    assert_eq!(
+        check_top(&format!(
+            "
+            {maker}
+            let a: Int = Maker.make(from: 1)
+            let b: Int = Maker.make(from: true)
+            let c: Fn<(from: Bool), Int> = Maker.make
+            let d: Int = c(from: false)
+            "
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {maker}
+            let a = Maker.make
+            "
+        )),
+        [
+            "`Maker.make` is ambiguous here, since it could be `fn make(from value: Int) -> Int` \
+             or `fn make(from value: Bool) -> Int`"
+        ]
+    );
+}
+
+#[test]
+fn operators_call_the_method_implementing_their_trait() {
+    assert_eq!(
+        check_top(
+            "
+            group Number {
+                let value: Int
+            }
+
+            impl Number with Equal {
+                fn isEqual(to rhs: Number) -> Bool {
+                    return self.value == rhs.value
+                }
+            }
+
+            impl Number {
+                fn isEqual(to rhs: Int) -> Bool {
+                    return self.value == rhs
+                }
+            }
+
+            fn f(a: Number, b: Number) -> Bool {
+                return (a == b) & (a != b) & a.isEqual(to: 1) & a.isEqual(to: b)
+            }
+            "
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn values_used_while_choosing_a_method_report_their_errors_once() {
+    assert_eq!(
+        messages_top(&format!(
+            "
+            {PRINTER}
+            let a: Int = Printer.new().show(b)
+            let b: Int = true
+            "
+        )),
+        ["cannot assign `Bool` to `b`, which has type `Int`"]
     );
 }
 

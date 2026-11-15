@@ -16,7 +16,7 @@
 
 //! Functions' signatures and bodies, and functions used as values.
 
-use super::*;
+use super::{overloads::same_signature, *};
 
 impl<'a> Checker<'a> {
     /// Declares a function, returning its index into `functions`.
@@ -31,11 +31,12 @@ impl<'a> Checker<'a> {
         self.declare(name, span, Binding::Function(index));
         index
     }
-    /// Declares a method or static function of `self_ty`, which is `None` if
-    /// it's unknown, returning its index into `functions`.
+    /// Declares a method or static function of `owner`, the type whose
+    /// `impl` declares it, which is `None` if it's unknown, returning its
+    /// index into `functions`.
     pub(super) fn declare_method(
         &mut self,
-        self_ty: Option<&Type>,
+        owner: Option<&Type>,
         method: (&'a String, &'a [TupleElement], &TypeName),
         span: Span,
         is_static: bool,
@@ -43,44 +44,56 @@ impl<'a> Checker<'a> {
     ) -> usize {
         let (name, params, ret) = method;
         let index = self.signature(params, ret, full_name);
-        if let Some(self_ty) = self_ty {
-            // Methods must be unique across every file, since a call can't
-            // say which file's method it means, even when they're in `impl`s
-            // with different constraints.
-            let existing = if is_static {
-                if self.declared_static(self_ty, name).is_some() {
-                    Some(MemberKind::StaticFunction)
-                } else {
-                    self.option(self_ty, name).map(|_| MemberKind::Option)
-                }
-            } else if self.declared_method(self_ty, name).is_some() {
-                Some(MemberKind::Method)
+        let Some(owner) = owner else {
+            return index;
+        };
+        // Methods can share a name if they're told apart by their labels,
+        // parameter types or return type, or by one being in an `impl` with
+        // constraints, which is more specialised. Otherwise, they must be
+        // unique across every file, since a call can't say which file's
+        // method it means.
+        let signature = &self.functions[index];
+        let clashes = self
+            .declared_methods(owner, name, is_static)
+            .iter()
+            .map(|declared| &self.functions[declared.index])
+            .any(|declared| {
+                declared.constraints.is_none()
+                    && signature.constraints.is_none()
+                    && same_signature(declared, signature)
+            });
+        let existing = if clashes {
+            Some(if is_static {
+                MemberKind::StaticFunction
             } else {
-                match self.member(self_ty, name) {
-                    Some(Member::Field(..)) => Some(MemberKind::Field),
-                    Some(Member::Method(_)) => Some(MemberKind::Method),
-                    None => None,
-                }
-            };
-            if let Some(existing) = existing {
-                self.error(
-                    span,
-                    CheckError::MemberRedeclared {
-                        ty: self_ty.clone(),
-                        member: name.clone(),
-                        existing,
-                    },
-                );
-            } else {
-                let info = &mut self.types[self_ty.id];
-                let table = if is_static {
-                    &mut info.statics
-                } else {
-                    &mut info.methods
-                };
-                table.insert(name, index);
+                MemberKind::Method
+            })
+        } else if is_static {
+            self.option(owner, name).map(|_| MemberKind::Option)
+        } else {
+            match self.member(owner, name) {
+                Some(Member::Field(..)) => Some(MemberKind::Field),
+                _ => None,
             }
+        };
+        if let Some(existing) = existing {
+            self.error(
+                span,
+                CheckError::MemberRedeclared {
+                    ty: owner.clone(),
+                    member: name.clone(),
+                    existing,
+                },
+            );
+            return index;
         }
+        let info = &mut self.types[owner.id];
+        let table = if is_static {
+            &mut info.statics
+        } else {
+            &mut info.methods
+        };
+        table.entry(name).or_default().push(index);
         index
     }
     /// Resolves the parameter and return types of the function called
@@ -321,12 +334,22 @@ impl<'a> Checker<'a> {
     /// The generic type whose `impl` the code being checked is in, as an
     /// index into `templates`, if it's in one, including inside one of its
     /// functions.
+    ///
+    /// The type of an `impl` whose constraints say what some of its generic
+    /// type's parameters are, such as `ChoiceOption<Base, Void>` for `impl
+    /// ChoiceOption where Self.Value == Void`, is made from its generic type
+    /// with those types, and its other parameters stand for themselves.
     pub(super) fn generic_context(&self) -> Option<usize> {
         let Some(Some(ty)) = &self.cx.impl_type else {
             return None;
         };
         let (template, _) = self.types[ty.id].instance.as_ref()?;
-        (self.templates[*template].generic.as_ref() == Some(ty)).then_some(*template)
+        let is_generic = self.templates[*template].generic.as_ref() == Some(ty);
+        let is_constrained = self
+            .cx
+            .constraints
+            .is_some_and(|constraints| self.constraints[constraints].template == *template);
+        (is_generic || is_constrained).then_some(*template)
     }
     /// The type `Fn<Input, Output>` of `function`, or `None` if it's unknown.
     /// Its `Input` is the tuple its arguments build, which is read by its

@@ -36,24 +36,26 @@ impl<'a> Checker<'a> {
         }
         let template = self.generic_context();
         let mut constraints = vec![];
+        let mut equal = vec![];
         for decl in decls {
             // Everything is resolved, so each part's errors are found.
             let param = self.resolve_type(&decl.ty);
-            let trait_index = self.resolve_trait(&decl.trait_name);
-            let param = match (param, template) {
-                (Some(param), Some(template))
-                    if self.templates[template].stand_ins.contains(&param) =>
-                {
-                    Some(param)
+            let (trait_name, aliases) = match &decl.bound {
+                ast::Bound::Trait { name, aliases } => (name, aliases),
+                ast::Bound::Type(ty) => {
+                    let ty = self.resolve_type(ty);
+                    if let Some(param) = self.constrained_param(param, template, decl)
+                        && let Some(ty) = ty
+                    {
+                        equal.push(EqualConstraint { decl, param, ty });
+                    }
+                    continue;
                 }
-                (Some(param), _) => {
-                    self.error(decl.span, CheckError::ConstrainedNotParam(param));
-                    None
-                }
-                (None, _) => None,
             };
+            let trait_index = self.resolve_trait(trait_name);
+            let param = self.constrained_param(param, template, decl);
             let mut given = HashMap::new();
-            for alias in &decl.aliases {
+            for alias in aliases {
                 let ty = alias.ty.as_ref().and_then(|ty| self.resolve_type(ty));
                 if let Some(trait_index) = trait_index
                     && !self.traits[trait_index]
@@ -62,7 +64,7 @@ impl<'a> Checker<'a> {
                         .any(|declared| declared.name == alias.name)
                 {
                     let error = CheckError::NotInTrait {
-                        trait_name: decl.trait_name.to_string(),
+                        trait_name: trait_name.to_string(),
                         member: alias.name.clone(),
                     };
                     self.error(alias.span, error);
@@ -108,12 +110,53 @@ impl<'a> Checker<'a> {
         self.constraints.push(Constraints {
             template,
             constraints,
+            equal,
         });
         let index = self.constraints.len() - 1;
         for constraint in 0..count {
             self.declare_constraint_fns(index, constraint);
         }
         Some(index)
+    }
+    /// `param`, which `decl` constrains, if it's one of the parameters of the
+    /// generic type at `template` in `templates`, reporting an error if it
+    /// isn't. `None` if it's unknown.
+    fn constrained_param(
+        &mut self,
+        param: Option<Type>,
+        template: Option<usize>,
+        decl: &ast::Constraint,
+    ) -> Option<Type> {
+        match (param, template) {
+            (Some(param), Some(template))
+                if self.templates[template].stand_ins.contains(&param) =>
+            {
+                Some(param)
+            }
+            (Some(param), _) => {
+                self.error(decl.span, CheckError::ConstrainedNotParam(param));
+                None
+            }
+            (None, _) => None,
+        }
+    }
+    /// The type of the `impl` whose constraints are at `constraints` in
+    /// `constraints`, if it has any, where its generic type is `generic`.
+    /// Each parameter that a constraint says is a type is that type.
+    pub(super) fn constrained_type(&mut self, generic: Type, constraints: Option<usize>) -> Type {
+        let Some(constraints) = constraints else {
+            return generic;
+        };
+        let params: HashMap<_, _> = self.constraints[constraints]
+            .equal
+            .iter()
+            .map(|equal| (equal.param.id, equal.ty.clone()))
+            .collect();
+        if params.is_empty() {
+            return generic;
+        }
+        let span = self.constraints[constraints].equal[0].decl.span;
+        self.substitute(&generic, &params, span).unwrap_or(generic)
     }
     /// Declares a function for each of the methods of the trait of the
     /// constraint at `constraint` in the constraints at `index` in
@@ -171,6 +214,7 @@ impl<'a> Checker<'a> {
                 function,
                 FnStandIn {
                     param: param.clone(),
+                    trait_index,
                     name: &declared.name,
                 },
             );
@@ -199,12 +243,30 @@ impl<'a> Checker<'a> {
         let Constraints {
             template,
             constraints,
+            ..
         } = &self.constraints[index];
         let index = constraints
             .iter()
             .filter(|constraint| constraint.param == *ty)
             .find_map(|constraint| constraint.functions.get(name).copied())?;
         let args = self.templates[*template].stand_ins.clone();
+        Some(FnRef { index, args })
+    }
+    /// The function of `ty` that implements the function called `name` of
+    /// the trait at `trait_index` in `traits`, if it has an implementation of
+    /// the trait, whether or not it meets that implementation's constraints.
+    /// A parameter that the current `impl` constrains to implement the trait
+    /// has the function standing for it.
+    pub(super) fn trait_fn(&self, ty: &Type, trait_index: usize, name: &str) -> Option<FnRef> {
+        if let Some(constraint) = self.constraint_on(ty, trait_index) {
+            let index = *constraint.functions.get(name)?;
+            let template = self.constraints[self.cx.constraints?].template;
+            let args = self.templates[template].stand_ins.clone();
+            return Some(FnRef { index, args });
+        }
+        let (owner, args) = self.owner(ty);
+        let implementation = self.implementations.get(&(owner, trait_index))?;
+        let index = *implementation.functions.get(name)?;
         Some(FnRef { index, args })
     }
     /// Whether `function`'s arguments meet the constraints of the `impl` that
@@ -216,42 +278,56 @@ impl<'a> Checker<'a> {
     /// The first of the constraints at `constraints` in `constraints`, if
     /// there are any, that `args`, the arguments of their generic type,
     /// don't meet.
+    /// Returns the constraint's declaration, and the stand-in for the
+    /// parameter it constrains.
     pub(super) fn unmet_constraint(
         &self,
         constraints: Option<usize>,
         args: &[Type],
-    ) -> Option<&ConstraintInfo<'a>> {
+    ) -> Option<(&'a ast::Constraint, &Type)> {
         let Constraints {
             template,
             constraints,
+            equal,
         } = &self.constraints[constraints?];
         let params = self.params(*template, args);
-        constraints.iter().find(|constraint| {
-            let arg = &params[&constraint.param.id];
-            let given_match = constraint.aliases.iter().all(|(name, alias)| {
-                let ConstraintAlias::Given(Some(given)) = alias else {
-                    return true;
-                };
-                // An unknown type has already been reported.
-                self.alias_of(arg, constraint.trait_index, name).is_none_or(
-                    |(found, found_params)| self.same_type(given, &params, &found, &found_params),
-                )
-            });
-            !(self.implements(arg, constraint.trait_index) && given_match)
-        })
+        let none = HashMap::new();
+        let unequal = equal
+            .iter()
+            .find(|equal| !self.same_type(&equal.ty, &params, &params[&equal.param.id], &none))
+            .map(|equal| (equal.decl, &equal.param));
+        let unimplemented = || {
+            let constraint = constraints.iter().find(|constraint| {
+                let arg = &params[&constraint.param.id];
+                let given_match = constraint.aliases.iter().all(|(name, alias)| {
+                    let ConstraintAlias::Given(Some(given)) = alias else {
+                        return true;
+                    };
+                    // An unknown type has already been reported.
+                    self.alias_of(arg, constraint.trait_index, name).is_none_or(
+                        |(found, found_params)| {
+                            self.same_type(given, &params, &found, &found_params)
+                        },
+                    )
+                });
+                !(self.implements(arg, constraint.trait_index) && given_match)
+            })?;
+            Some((constraint.decl, &constraint.param))
+        };
+        unequal.or_else(unimplemented)
     }
     /// The error for `ty` not having its `member`, which is `declared`,
     /// because it doesn't meet the constraints of its `impl`, if that's why.
     pub(super) fn unmet(&self, ty: &Type, member: &str, declared: &FnRef) -> Option<CheckError> {
         let constraints = self.functions[declared.index].constraints;
-        let constraint = self.unmet_constraint(constraints, &declared.args)?;
+        let (decl, param) = self.unmet_constraint(constraints, &declared.args)?;
         let template = self.constraints[constraints?].template;
-        let arg = self.params(template, &declared.args)[&constraint.param.id].clone();
+        let arg = self.params(template, &declared.args)[&param.id].clone();
         Some(CheckError::UnmetConstraint {
             ty: ty.clone(),
             member: member.to_string(),
-            constraint: constraint.decl.to_string(),
-            param: constraint.param.name.clone(),
+            constraint: decl.to_string(),
+            param: param.name.clone(),
             arg,
         })
     }
@@ -367,7 +443,12 @@ impl<'a> Checker<'a> {
     /// for a function of a constraint's trait, when it's the function of the
     /// type its parameter stands for in `function`'s arguments.
     pub(super) fn constrained_callee(&self, function: FnRef) -> FnRef {
-        let Some(FnStandIn { param, name }) = self.fn_stand_ins.get(&function.index) else {
+        let Some(&FnStandIn {
+            ref param,
+            trait_index,
+            name,
+        }) = self.fn_stand_ins.get(&function.index)
+        else {
             return function;
         };
         let template = self.functions[function.index]
@@ -375,6 +456,6 @@ impl<'a> Checker<'a> {
             .expect("only generic types have constraints");
         let ty = &self.params(template, &function.args)[&param.id];
         // The constraint was met where the function was used.
-        self.declared_method(ty, name).expect(NO_ERRORS)
+        self.trait_fn(ty, trait_index, name).expect(NO_ERRORS)
     }
 }

@@ -211,47 +211,66 @@ impl<'a> Checker<'a> {
         };
         Some((name, template, call))
     }
-    /// The signature of what `call` calls on `ty`, if it has it, without
-    /// compiling anything, for the code at `span`.
+    /// The signature of what `call` calls on `ty` with `args`, if it has it,
+    /// without compiling anything, for the code at `span`. If `ty` has
+    /// several functions that share its name, it's the only one with the
+    /// labels of `args`, if there is one.
     pub(super) fn generic_signature(
         &mut self,
         ty: &Type,
         call: GenericCall,
+        args: &[Arg],
         span: Span,
     ) -> Option<Signature<'a>> {
-        let function = match call {
-            GenericCall::Static(name) => self.static_function(ty, name)?,
+        let (owner, name, is_static) = match call {
+            GenericCall::Static(name) => (ty.clone(), name, true),
             GenericCall::Member { member, method } => {
-                let member = self.static_member(ty, member)?;
-                let value = self.static_member_type(ty, &member, span)?;
-                match self.member(&value, method)? {
-                    Member::Method(function) => function,
-                    Member::Field(..) => return None,
-                }
+                let found = self.static_member(ty, member)?;
+                let value = self.static_member_type(ty, (member, &found), span)?;
+                let Member::Method = self.member(&value, method)? else {
+                    return None;
+                };
+                (value, method, false)
             }
         };
+        let mut methods = self.methods(&owner, name, is_static);
+        if methods.len() > 1 {
+            methods.retain(|function| self.has_labels(function, args));
+        }
+        let [function] = &methods[..] else {
+            return None;
+        };
+        let function = function.clone();
         Some(self.signature_of(&function, span))
     }
-    /// What `call` calls on `ty`, if it has it, along with its name, for the
-    /// code at `span`.
+    /// What `call` calls on `ty`, if it has it, along with its name, for
+    /// `overloaded`, whose arguments have already been checked. Returns `None`
+    /// if it can't be found, which has been reported if `ty` has functions
+    /// with its name.
     pub(super) fn generic_callee(
         &mut self,
         ty: &Type,
         call: GenericCall,
-        span: Span,
+        overloaded: OverloadCall,
     ) -> Option<(Callee, String)> {
         match call {
             GenericCall::Static(name) => {
-                let function = self.static_function(ty, name)?;
+                if self.declared_methods(ty, name, true).is_empty() {
+                    return None;
+                }
+                let function = self.overload(ty, name, true, overloaded)?;
                 Some((Callee::Function(function), format!("{ty}.{name}")))
             }
             GenericCall::Member { member, method } => {
-                let member = self.static_member(ty, member)?;
-                let Typed { ty: value, expr } = self.static_member_value(ty, member, span);
+                let found = self.static_member(ty, member)?;
+                let span = overloaded.span;
+                let Typed { ty: value, expr } =
+                    self.static_member_value(ty, (member, found), None, span);
                 let value = value?;
-                let Some(Member::Method(function)) = self.member(&value, method) else {
+                let Some(Member::Method) = self.member(&value, method) else {
                     return None;
                 };
+                let function = self.overload(&value, method, false, overloaded)?;
                 let callee = Callee::Method {
                     function,
                     receiver: expr,
@@ -277,7 +296,7 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
     ) -> Option<Typed> {
         let generic = self.templates[template].generic.clone()?;
-        let declared = self.generic_signature(&generic, call, span)?;
+        let declared = self.generic_signature(&generic, call, args, span)?;
         let stand_ins = self.templates[template].stand_ins.clone();
         let mut inferred = vec![None; stand_ins.len()];
         if let (Some(returns), Some(expected)) = (&declared.returns, expected) {
@@ -294,7 +313,7 @@ impl<'a> Checker<'a> {
                 made = Some(self.named_instance(template, args, name));
             }
             let expected = match made.clone().flatten() {
-                Some(ty) => self.param_type(&ty, call, index, span),
+                Some(ty) => self.param_type(&ty, call, args, index, span),
                 None => None,
             };
             let Typed { ty, expr } = self.expr_as(&arg.value, expected.as_ref());
@@ -320,22 +339,30 @@ impl<'a> Checker<'a> {
                 return Some(Typed::UNKNOWN);
             }
         };
-        let Some((callee, name)) = made.and_then(|ty| self.generic_callee(&ty, call, span)) else {
+        let overloaded = OverloadCall {
+            args,
+            found: Some(&found),
+            expected,
+            span,
+        };
+        let Some((callee, name)) = made.and_then(|ty| self.generic_callee(&ty, call, overloaded))
+        else {
             return Some(Typed::UNKNOWN);
         };
         let signature = self.callee_signature(&callee, span);
         Some(self.checked_call(callee, name, signature, args, (found, lowered), span))
     }
-    /// The type of the parameter at `index` of what `call` calls on `ty`,
-    /// for the code at `span`.
+    /// The type of the parameter at `index` of what `call` calls on `ty`
+    /// with `args`, for the code at `span`.
     pub(super) fn param_type(
         &mut self,
         ty: &Type,
         call: GenericCall,
+        args: &[Arg],
         index: usize,
         span: Span,
     ) -> Option<Type> {
-        let signature = self.generic_signature(ty, call, span)?;
+        let signature = self.generic_signature(ty, call, args, span)?;
         signature.params.into_iter().nth(index)?.ty
     }
     /// Checks a call to a method on a value or a static function on a type,
@@ -368,7 +395,16 @@ impl<'a> Checker<'a> {
                     };
                     return self.call_value(field_ty, value, method, args, span);
                 }
-                Some(Member::Method(function)) => {
+                Some(Member::Method) => {
+                    let overloaded = OverloadCall {
+                        args,
+                        found: None,
+                        expected,
+                        span,
+                    };
+                    let Some(function) = self.overload(&ty, method, false, overloaded) else {
+                        return Typed::UNKNOWN;
+                    };
                     let callee = Callee::Method {
                         function,
                         receiver: lowered,
@@ -387,12 +423,22 @@ impl<'a> Checker<'a> {
             Some(Receiver::Type(ty)) => match self.static_member(&ty, method) {
                 // A static function is called like any other function, and an
                 // option is a value, so it's called like any other value.
-                Some(StaticMember::Function(function)) => {
+                Some(StaticMember::Function) => {
+                    let overloaded = OverloadCall {
+                        args,
+                        found: None,
+                        expected,
+                        span,
+                    };
+                    let Some(function) = self.overload(&ty, method, true, overloaded) else {
+                        return Typed::UNKNOWN;
+                    };
                     (Callee::Function(function), format!("{ty}.{method}"))
                 }
                 Some(member @ StaticMember::Option(_)) => {
                     let name = format!("{ty}.{method}");
-                    let Typed { ty, expr } = self.static_member_value(&ty, member, span);
+                    let Typed { ty, expr } =
+                        self.static_member_value(&ty, (method, member), None, span);
                     return self.call_value(ty, expr, &name, args, span);
                 }
                 None => {
