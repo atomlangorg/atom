@@ -1,7 +1,7 @@
-// Fields have types but no values.
+// Fields have types but no values, and can't be reassigned.
 group User {
-    let age: Int
-    var isAdmin: Bool
+    age: Int
+    isAdmin: Bool
 }
 
 let maxAge = 120
@@ -15,6 +15,11 @@ impl User {
     // their own `impl`, so other code uses `User.new(...)`.
     static fn new(age: Int, isAdmin: Bool) -> User {
         return Self { age: age, isAdmin: isAdmin }
+    }
+
+    // A group can't be changed, so a changed copy is made instead.
+    fn revokeAdmin() -> User {
+        return Self { age: self.age, isAdmin: false }
     }
 
     // Methods can only reach each other through `self`.

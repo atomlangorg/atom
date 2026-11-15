@@ -1248,7 +1248,7 @@ mod tests {
         // once `total` is made for a `T`.
         let src = "
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -1317,7 +1317,7 @@ mod tests {
         // Each check is one bit of the result.
         let src = "
             group Score {
-                let points: Int
+                points: Int
             }
 
             impl Score {
@@ -1443,13 +1443,13 @@ mod tests {
     fn groups_have_fields_and_methods() {
         let src = "
             group Point {
-                let x: Int
-                let y: Int
+                x: Int
+                y: Int
             }
 
             group Line {
-                let start: Point
-                let end: Point
+                start: Point
+                end: Point
             }
 
             impl Point {
@@ -1505,8 +1505,8 @@ mod tests {
         let src = "
             fn main() -> Int {
                 group Pair {
-                    let first: Int
-                    let second: Int
+                    first: Int
+                    second: Int
                 }
                 fn first(of pair: Pair) -> Int {
                     return pair.first
@@ -1557,7 +1557,7 @@ mod tests {
                 "/shapes/square",
                 "
                 group Square {
-                    let side: Int
+                    side: Int
                 }
 
                 impl Square {
@@ -1898,7 +1898,7 @@ mod tests {
             {SHAPE}
             {DESCRIBE_SHAPE}
             group Maker {{
-                let make: ChoiceOption<Shape, Int>
+                make: ChoiceOption<Shape, Int>
             }}
 
             impl Maker {{
@@ -1967,7 +1967,7 @@ mod tests {
         // specialised `get`, which has the same signature as the other.
         let src = "
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -2201,7 +2201,7 @@ mod tests {
             }
 
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -2313,8 +2313,8 @@ mod tests {
             "
             {SHAPE}
             group Point {{
-                let x: Int
-                let y: Int
+                x: Int
+                y: Int
             }}
 
             impl Point {{
@@ -2356,7 +2356,7 @@ mod tests {
             }}
 
             group Canvas {{
-                let shape: Shape
+                shape: Shape
             }}
 
             impl Canvas {{
@@ -2462,8 +2462,8 @@ mod tests {
             "
             {SHAPE}
             group Point {{
-                let x: Int
-                let y: Int
+                x: Int
+                y: Int
             }}
 
             impl Point {{
@@ -2732,7 +2732,7 @@ mod tests {
     fn self_type_is_the_type_of_its_impl() {
         let src = "
             group Counter {
-                let count: Int
+                count: Int
             }
 
             impl Counter {
@@ -2758,7 +2758,7 @@ mod tests {
         // implementing `And` and `Or`.
         let src = "
             group Flags {
-                let bits: Int
+                bits: Int
             }
 
             impl Flags with And {
@@ -2811,7 +2811,7 @@ mod tests {
     fn not_calls_not() {
         let src = "
             group Flags {
-                let bits: Int
+                bits: Int
             }
 
             impl Flags with Not {
@@ -2910,7 +2910,7 @@ mod tests {
         // own, which is only `true` if they're far apart.
         let src = "
             group Point {
-                let x: Int
+                x: Int
             }
 
             impl Point with Equal {
@@ -2926,7 +2926,7 @@ mod tests {
             }
 
             group Loose {
-                let x: Int
+                x: Int
             }
 
             impl Loose with Equal {
@@ -2970,7 +2970,7 @@ mod tests {
     fn arithmetic_and_ordering_operators_call_their_traits() {
         let src = "
             group Money {
-                let cents: Int
+                cents: Int
             }
 
             impl Money {
@@ -3046,8 +3046,8 @@ mod tests {
     fn tuples_are_built_and_read() {
         let src = "
             group Line {
-                let start: (x: Int, y: Int)
-                let end: (x: Int, y: Int)
+                start: (x: Int, y: Int)
+                end: (x: Int, y: Int)
             }
 
             impl Line {
@@ -3186,7 +3186,7 @@ mod tests {
             }
 
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -3204,8 +3204,8 @@ mod tests {
             }
 
             group Pair<A, B> {
-                let first: A
-                let second: B
+                first: A
+                second: B
             }
 
             impl Pair {
@@ -3246,7 +3246,7 @@ mod tests {
     fn values_implementing_call_can_be_called() {
         let src = "
             group Adder {
-                let base: Int
+                base: Int
             }
 
             impl Adder with Call {
@@ -3262,7 +3262,7 @@ mod tests {
             }
 
             group Scale {
-                let by: Int
+                by: Int
             }
 
             impl Scale with Call {
@@ -3272,8 +3272,8 @@ mod tests {
             }
 
             group Tools {
-                let adder: Adder
-                let scale: Scale
+                adder: Adder
+                scale: Scale
             }
 
             impl Tools {
@@ -3372,7 +3372,7 @@ mod tests {
             }
 
             group Tools {
-                let double: Fn<(_: Int), Int>
+                double: Fn<(_: Int), Int>
             }
 
             impl Tools {
@@ -3457,7 +3457,7 @@ mod tests {
     fn generic_types_are_read_by_the_names_they_were_found_with() {
         let src = "
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -3528,8 +3528,8 @@ mod tests {
     fn static_functions_can_be_used_as_values() {
         let src = "
             group Point {
-                let x: Int
-                let y: Int
+                x: Int
+                y: Int
             }
 
             impl Point {
@@ -3543,7 +3543,7 @@ mod tests {
             }
 
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -3592,7 +3592,7 @@ mod tests {
     fn fn_can_use_generic_parameters() {
         let src = "
             group Box<T> {
-                let value: T
+                value: T
             }
 
             impl Box {
@@ -3658,7 +3658,7 @@ mod tests {
     fn trait_functions_are_called_like_any_other() {
         let src = "
             group Counter {
-                let count: Int
+                count: Int
             }
 
             trait Start {

@@ -1,8 +1,8 @@
 use /users/user
 
 group Team {
-    let lead: User
-    let size: Int
+    lead: User
+    size: Int
 }
 
 impl Team {

@@ -648,18 +648,17 @@ where
             span: Span::from(e.span()),
         });
 
-    // `let name: Type` or `var name: Type`. A value is parsed only so that it
-    // can be reported clearly.
-    let field = mutability
-        .then(ident)
+    // `name: Type`. Fields can't be reassigned, so a changed group is made
+    // with `Self { ... }` instead. A value is parsed only so that it can be
+    // reported clearly.
+    let field = ident
         .then(annotation.clone())
         .then(just(Token::Eq).ignore_then(expr.clone()).or_not())
-        .validate(|(((mutability, name), ty), value), e, emitter| {
+        .validate(|((name, ty), value), e, emitter| {
             if value.is_some() {
                 emitter.emit(Rich::custom(e.span(), "group fields can't have values"));
             }
             Field {
-                mutability,
                 name,
                 ty,
                 span: Span::from(e.span()),
@@ -1361,8 +1360,8 @@ mod tests {
         let src = "
             fn f(to value: Int, other: Bool) {}
             group Point {
-                let x: Int
-                var y: other::Number
+                x: Int
+                y: other::Number
             }
             choice Answer {
                 yes
@@ -1378,8 +1377,8 @@ mod tests {
         let StmtKind::Group { fields, .. } = &program[1].kind else {
             panic!("expected a group");
         };
-        assert_eq!(text(src, fields[0].span), "let x: Int");
-        assert_eq!(text(src, fields[1].span), "var y: other::Number");
+        assert_eq!(text(src, fields[0].span), "x: Int");
+        assert_eq!(text(src, fields[1].span), "y: other::Number");
         let TypeName::Named(name) = &fields[1].ty else {
             panic!("expected a named type");
         };
@@ -2937,9 +2936,8 @@ mod tests {
         }
     }
 
-    fn field(mutability: Mutability, name: &str, ty: &str) -> Field {
+    fn field(name: &str, ty: &str) -> Field {
         Field {
-            mutability,
             name: name.to_string(),
             ty: TypeName::new(ty),
             span: Span::default(),
@@ -2960,16 +2958,16 @@ mod tests {
             parse_body(
                 "
                 group User {
-                    let age: Int
-                    var isAdmin: Bool
+                    age: Int
+                    isAdmin: Bool
                 }
                 "
             ),
             Ok(vec![group_(
                 "User",
                 vec![
-                    field(Mutability::Let, "age", "Int"),
-                    field(Mutability::Var, "isAdmin", "Bool"),
+                    field("age", "Int"),
+                    field("isAdmin", "Bool"),
                 ],
             )])
         );
@@ -2982,10 +2980,10 @@ mod tests {
             Ok(vec![group_("Empty", vec![])])
         );
         assert_eq!(
-            parse_body("group Point { let x: Int }"),
+            parse_body("group Point { x: Int }"),
             Ok(vec![group_(
                 "Point",
-                vec![field(Mutability::Let, "x", "Int")]
+                vec![field("x", "Int")]
             )])
         );
         assert_eq!(
@@ -2994,17 +2992,17 @@ mod tests {
                 group Post { // A comment.
 
                     // Another comment.
-                    let author: User
+                    author: User
 
-                    var likes : Int
+                    likes : Int
                 }
                 "
             ),
             Ok(vec![group_(
                 "Post",
                 vec![
-                    field(Mutability::Let, "author", "User"),
-                    field(Mutability::Var, "likes", "Int"),
+                    field("author", "User"),
+                    field("likes", "Int"),
                 ],
             )])
         );
@@ -3034,8 +3032,8 @@ mod tests {
     #[test]
     fn rejects_group_field_values() {
         for src in [
-            "group User { let age: Int = 3 }",
-            "group User { var isAdmin: Bool = true }",
+            "group User { age: Int = 3 }",
+            "group User { isAdmin: Bool = true }",
         ] {
             let errs = parse_body(src).unwrap_err();
             assert_eq!(
@@ -3044,7 +3042,7 @@ mod tests {
                 "{src:?}"
             );
         }
-        assert!(parse_body("group User { let age = 3 }").is_err());
+        assert!(parse_body("group User { age = 3 }").is_err());
     }
 
     #[test]
@@ -3054,11 +3052,12 @@ mod tests {
             "group {}",
             "group User",
             "group User {",
-            "group User { let }",
-            "group User { let age }",
-            "group User { let age: }",
-            // Fields need `let` or `var`.
-            "group User { age: Int }",
+            "group User { age }",
+            "group User { age: }",
+            "group User { : Int }",
+            // Fields can't be reassigned, so they can't be `let` or `var`.
+            "group User { let age: Int }",
+            "group User { var isAdmin: Bool }",
             // Only fields are allowed.
             "group User { x = 1 }",
             "group User { f() }",
@@ -3067,9 +3066,9 @@ mod tests {
             "group User { fn f() {} }",
             "group User { group Inner {} }",
             // Separators.
-            "group User { let a: Int var b: Int }",
-            "group User { let a: Int, var b: Int }",
-            "group User { let a: Int; }",
+            "group User { a: Int b: Int }",
+            "group User { a: Int, b: Int }",
+            "group User { a: Int; }",
             // `{` must be on the same line.
             "group User\n{}",
             // Statements after `}` need their own line.
@@ -3077,7 +3076,7 @@ mod tests {
             // Keywords.
             "group group {}",
             "let group = 1",
-            "group User { let let: Int }",
+            "group User { let: Int }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }

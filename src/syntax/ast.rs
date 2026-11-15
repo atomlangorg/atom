@@ -495,7 +495,7 @@ pub enum StmtKind {
         aliases: Vec<Alias>,
         functions: Vec<Function>,
     },
-    /// `group Name { let field: Type ... }`, or `group Name<T, ...> { ... }`
+    /// `group Name { field: Type ... }`, or `group Name<T, ...> { ... }`
     /// for a generic group, whose fields can use its generic parameters as
     /// types.
     Group {
@@ -616,10 +616,10 @@ impl fmt::Display for Constraint {
     }
 }
 
-/// A group field, such as `let age: Int`. Fields can't have values.
+/// A group field, such as `age: Int`. Fields can't have values, and can't be
+/// reassigned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
-    pub mutability: Mutability,
     pub name: String,
     /// The field's type.
     pub ty: TypeName,

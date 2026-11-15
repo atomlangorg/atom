@@ -546,12 +546,11 @@ mod tests {
     #[test]
     fn lexes_group() {
         assert_eq!(
-            lex("group User { let age: Int }"),
+            lex("group User { age: Int }"),
             vec![
                 Token::Group,
                 Token::Ident("User"),
                 Token::LBrace,
-                Token::Let,
                 Token::Ident("age"),
                 Token::Colon,
                 Token::Ident("Int"),

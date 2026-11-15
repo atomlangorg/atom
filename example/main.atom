@@ -29,7 +29,8 @@ fn main() -> Int {
     y = bump(y, by: 2, twice: true)
 
     let owner = User.new(age: y, isAdmin: false)
-    let manager = User.new(age: 30, isAdmin: true)
+    var manager = User.new(age: 30, isAdmin: true)
+    manager = manager.revokeAdmin()
     let crew = Team.new(
         ledBy: choose(
             owner,

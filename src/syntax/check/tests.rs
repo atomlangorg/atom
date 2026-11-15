@@ -202,7 +202,7 @@ fn boolean_operators_call_and_and_or() {
 fn not_calls_not_and_keeps_its_type() {
     let src = "
         group Flags {
-            let bits: Int
+            bits: Int
         }
 
         impl Flags with Not {
@@ -224,7 +224,7 @@ fn not_calls_not_and_keeps_its_type() {
         messages_top(
             "
             group Flags {
-                let bits: Int
+                bits: Int
             }
             fn f(flags: Flags) -> Bool {
                 let a: Bool = !flags
@@ -243,7 +243,7 @@ fn not_calls_not_and_keeps_its_type() {
 fn any_type_implementing_and_or_or_can_use_their_operators() {
     let src = "
         group Flags {
-            let bits: Int
+            bits: Int
         }
 
         impl Flags with And {
@@ -278,7 +278,7 @@ fn boolean_operators_need_their_trait_and_the_same_type() {
         messages_top(
             "
             group Flags {
-                let bits: Int
+                bits: Int
             }
 
             // An `and` method alone isn't enough.
@@ -316,7 +316,7 @@ fn boolean_operators_need_their_trait_and_the_same_type() {
 fn boolean_operators_do_not_need_their_implementation_imported() {
     let flags = "
         group Flags {
-            let bits: Int
+            bits: Int
         }
         ";
     let and = "
@@ -802,9 +802,9 @@ fn std_types_are_groups() {
         check_body(
             "
             group Wrapper {
-                let int: Int
-                let bool: Bool
-                let unit: Unit
+                int: Int
+                bool: Bool
+                unit: Unit
             }
             fn unwrap(wrapper: Wrapper) -> Wrapper {
                 return wrapper
@@ -1668,11 +1668,11 @@ fn groups_can_be_used_as_types() {
         check_body(
             "
             group User {
-                let age: Int
-                var isAdmin: Bool
+                age: Int
+                isAdmin: Bool
             }
             group Post {
-                let author: User
+                author: User
             }
             fn pick(first a: User, or b: User) -> User {
                 let user: User = a
@@ -1696,8 +1696,8 @@ fn accepts_empty_and_unit_groups() {
             "
             group Empty {}
             group Nothing {
-                let value: Unit
-                let empty: Empty
+                value: Unit
+                empty: Empty
             }
             "
         ),
@@ -1736,10 +1736,10 @@ fn different_groups_are_different_types() {
         messages(
             "
             group A {
-                let x: Int
+                x: Int
             }
             group B {
-                let x: Int
+                x: Int
             }
             fn f(a: A) -> B {
                 return a
@@ -1775,8 +1775,8 @@ fn rejects_unknown_field_types() {
         check_body(
             "
             group User {
-                let age: int
-                var friend: Person
+                age: int
+                friend: Person
             }
             "
         ),
@@ -1793,8 +1793,8 @@ fn rejects_duplicate_fields() {
         messages(
             "
             group User {
-                let age: Int
-                var age: Bool
+                age: Int
+                age: Bool
             }
             "
         ),
@@ -1809,10 +1809,10 @@ fn fields_can_reuse_outer_names() {
             "
             let age = 1
             group A {
-                let age: Int
+                age: Int
             }
             group B {
-                let age: Int
+                age: Int
             }
             "
         ),
@@ -1829,10 +1829,10 @@ fn top_level_groups_can_be_used_in_any_order() {
                 return f(user: user)
             }
             group Post {
-                let author: User
+                author: User
             }
             group User {
-                let address: Address
+                address: Address
             }
             group Address {}
             "
@@ -1849,7 +1849,7 @@ fn nested_groups_must_be_declared_before_use() {
             fn outer() {
                 fn f(user: User) {}
                 group Post {
-                    let author: User
+                    author: User
                 }
                 group User {}
             }
@@ -1868,11 +1868,11 @@ fn groups_cannot_contain_themselves() {
         check_body(
             "
             group Node {
-                let next: Node
+                next: Node
             }
             fn f() {
                 group Inner {
-                    let inner: Inner
+                    inner: Inner
                 }
             }
             "
@@ -1888,16 +1888,16 @@ fn groups_cannot_contain_themselves() {
         check_top(
             "
             group A {
-                let b: B
+                b: B
             }
             group B {
-                let c: C
+                c: C
             }
             group C {
-                let a: A
+                a: A
             }
             group D {
-                let a: A
+                a: A
             }
             "
         ),
@@ -1915,8 +1915,8 @@ fn groups_can_contain_the_same_group_twice() {
         check_top(
             "
             group Line {
-                let start: Point
-                let end: Point
+                start: Point
+                end: Point
             }
             group Point {}
             "
@@ -1997,7 +1997,7 @@ fn rejects_using_values_and_functions_as_types() {
                 let b: a = 1
                 let c: x = 1
                 group S {
-                    let field: f
+                    field: f
                 }
             }
             "
@@ -2620,7 +2620,7 @@ fn aliases_qualify_types_and_functions() {
                 "/users/user",
                 "
                 group User {
-                    let age: Int
+                    age: Int
                 }
                 impl User {
                     static fn new() -> User {
@@ -2874,7 +2874,7 @@ fn files_can_import_each_other() {
                 "
                 use /b
                 group A {
-                    let b: B
+                    b: B
                 }
                 fn f(b: B) -> Int {
                     return g(b: b)
@@ -2902,8 +2902,8 @@ fn files_can_import_each_other() {
 fn groups_cannot_contain_themselves_across_files() {
     assert_eq!(
         file_messages(&[
-            ("/a", "use /b\ngroup A {\nlet b: B\n}"),
-            ("/b", "use /a\ngroup B {\nlet a: A\n}"),
+            ("/a", "use /b\ngroup A {\nb: B\n}"),
+            ("/b", "use /a\ngroup B {\na: A\n}"),
         ]),
         ["/a: `A` contains itself", "/b: `B` contains itself"]
     );
@@ -3047,7 +3047,7 @@ fn errors_point_at_the_first_line_of_statements_with_blocks() {
         pointed_at_top(
             "
             group Point {
-                let x: Point
+                x: Point
             }
             "
         ),
@@ -3079,12 +3079,12 @@ fn errors_point_at_redeclarations() {
         pointed_at_top(
             "
             group Point {
-                let x: Int
-                let x: Int
+                x: Int
+                x: Int
             }
             "
         ),
-        ["let x: Int"]
+        ["x: Int"]
     );
     assert_eq!(
         pointed_at_top(
@@ -3129,8 +3129,8 @@ fn errors_point_at_patterns() {
 fn errors_point_at_groups_being_constructed() {
     const POINT: &str = "
         group Point {
-            let x: Int
-            let y: Int
+            x: Int
+            y: Int
         }
     ";
     let in_impl = |construct: &str| {
@@ -3248,8 +3248,8 @@ fn errors_name_their_file() {
 
 const USER: &str = "
     group User {
-        let age: Int
-        var isAdmin: Bool
+        age: Int
+        isAdmin: Bool
     }
     impl User {
         static fn new(age: Int, isAdmin: Bool) -> User {
@@ -3265,8 +3265,8 @@ fn constructs_groups() {
             "
             {USER}
             group Team {{
-                let lead: User
-                let size: Int
+                lead: User
+                size: Int
             }}
             group Empty {{}}
             impl Team {{
@@ -3387,7 +3387,7 @@ fn unknown_field_types_accept_any_value() {
         messages_top(
             "
             group Box {
-                let value: Missing
+                value: Missing
             }
             impl Box {
                 static fn make() -> Box {
@@ -3978,8 +3978,8 @@ fn self_is_immutable_and_not_a_name() {
 
 const TEAM: &str = "
     group User {
-        let age: Int
-        var isAdmin: Bool
+        age: Int
+        isAdmin: Bool
     }
     impl User {
         static fn new(age: Int, isAdmin: Bool) -> User {
@@ -3987,8 +3987,8 @@ const TEAM: &str = "
         }
     }
     group Team {
-        let lead: User
-        let size: Int
+        lead: User
+        size: Int
     }
     impl Team {
         static fn new(lead: User, size: Int) -> Team {
@@ -4066,7 +4066,7 @@ fn unknown_field_types_are_not_reported_again() {
         messages_top(
             "
             group Box {
-                let value: Missing
+                value: Missing
             }
             fn f(box: Box) -> Int {
                 return box.value + true
@@ -4190,7 +4190,7 @@ fn fields_need_no_import() {
                 "/user",
                 "
                 group User {
-                    let age: Int
+                    age: Int
                 }
                 impl User {
                     static fn new(age: Int) -> User {
@@ -4232,7 +4232,7 @@ fn suggests_colons_after_files() {
 
 const POINT: &str = "
     group Point {
-        let x: Int
+        x: Int
     }
     impl Int {
         static fn zero() -> Int {
@@ -4419,7 +4419,7 @@ fn static_functions_have_their_own_names() {
         check_top(
             "
             group Point {
-                let x: Int
+                x: Int
             }
             impl Point {
                 static fn x() -> Bool {
@@ -4517,7 +4517,7 @@ fn stdlib_is_a_package() {
 fn self_type_is_the_type_of_its_impl() {
     let src = "
         group Point {
-            let x: Int
+            x: Int
         }
         choice Shape {
             circle: Int
@@ -4580,7 +4580,7 @@ fn self_type_errors_use_the_impl_type() {
         messages_top(
             "
             group Point {
-                let x: Int
+                x: Int
             }
             impl Point {
                 fn f() -> Self {
@@ -4599,7 +4599,7 @@ fn rejects_self_type_outside_impl() {
         messages_top(
             "
             group Node {
-                let next: Self
+                next: Self
             }
             alias Current = Self
             impl Self {}
@@ -4641,7 +4641,7 @@ fn self_type_in_an_unknown_impl_is_not_reported_again() {
 /// `Custom` and the `And` trait, for trait tests.
 const AND: &str = "
     group Custom {
-        let value: Int
+        value: Int
     }
 
     trait And {
@@ -4771,7 +4771,7 @@ fn impls_infer_aliases_they_do_not_give() {
 fn operators_work_with_inferred_aliases() {
     let src = "
         group Flags {
-            let bits: Int
+            bits: Int
         }
 
         impl Flags with And {
@@ -5085,7 +5085,7 @@ fn impls_use_default_trait_functions() {
         }
 
         group Box {
-            let width: Int
+            width: Int
         }
 
         impl Box with Size {
@@ -5358,7 +5358,7 @@ fn equality_operators_call_equal() {
     // `isNotEqual`. Integer literals take the other operand's type.
     let src = "
         group Point {
-            let x: Int
+            x: Int
         }
 
         impl Point with Equal {
@@ -5377,7 +5377,7 @@ fn equality_operators_call_equal() {
         messages_top(
             "
             group Point {
-                let x: Int
+                x: Int
             }
             fn f(a: Point, byte: IntU8) -> Bool {
                 let b = byte == 256
@@ -5858,7 +5858,7 @@ fn imports_every_file_in_a_module() {
                 "/users/user",
                 "
                 group User {
-                    let age: Int
+                    age: Int
                 }
                 impl User {
                     static fn new(age: Int) -> User {
@@ -6283,7 +6283,7 @@ fn stored_options_create_their_choice_with_new() {
         "
         {SHAPE}
         group Maker {{
-            let make: ChoiceOption<Shape, Int>
+            make: ChoiceOption<Shape, Int>
         }}
 
         fn make(with option: ChoiceOption<Shape, Int>) -> Shape {{
@@ -6310,7 +6310,7 @@ fn options_are_not_called() {
             "
             {SHAPE}
             group Maker {{
-                let make: ChoiceOption<Shape, Int>
+                make: ChoiceOption<Shape, Int>
             }}
 
             fn f(maker: Maker) {{
@@ -6579,7 +6579,7 @@ fn tag_types_can_be_used_anywhere() {
         alias ShapeTag = ChoiceTag<Shape>
 
         group Holder {
-            let tag: ChoiceTag<Later>
+            tag: ChoiceTag<Later>
         }
 
         choice Nested {
@@ -6651,7 +6651,7 @@ fn tags_and_options_are_only_for_choices() {
             alias Tag = ChoiceTag<Bool>
 
             group Holder<T> {
-                let tag: ChoiceTag<T>
+                tag: ChoiceTag<T>
             }
             "
         ),
@@ -6801,7 +6801,7 @@ fn rejects_recursive_choices() {
                 node: List
             }
             group Node {
-                let next: Link
+                next: Link
             }
             choice Link {
                 none: Unit
@@ -7140,7 +7140,7 @@ fn tuples_can_be_in_any_type() {
         check_top(
             "
             group Line {
-                let start: (x: Int, y: Int)
+                start: (x: Int, y: Int)
             }
             choice Path {
                 line: (from: Line, to: Line)
@@ -7154,7 +7154,7 @@ fn tuples_can_be_in_any_type() {
         messages_top(
             "
             group Node {
-                let next: (node: Node, _: Int)
+                next: (node: Node, _: Int)
             }
             trait Pair {
                 fn pair() -> (first: Self, second: Int)
@@ -7386,7 +7386,7 @@ fn destructuring_must_match_every_value() {
 /// Types that implement `Call`, for call tests.
 const CALLABLES: &str = "
     group Adder {
-        let base: Int
+        base: Int
     }
 
     impl Adder with Call {
@@ -7412,8 +7412,8 @@ const CALLABLES: &str = "
     }
 
     group Tools {
-        let adder: Adder
-        let negate: Negator
+        adder: Adder
+        negate: Negator
     }
     ";
 
@@ -7639,8 +7639,8 @@ fn call_takes_a_whole_tuple_as_its_input() {
 fn static_functions_are_values_of_type_fn() {
     let src = "
         group Point {
-            let x: Int
-            let y: Int
+            x: Int
+            y: Int
         }
 
         impl Point {
@@ -7654,7 +7654,7 @@ fn static_functions_are_values_of_type_fn() {
         }
 
         group Box<T> {
-            let value: T
+            value: T
         }
 
         impl Box {
@@ -7683,8 +7683,8 @@ fn static_functions_are_values_of_type_fn() {
 fn static_functions_are_called_like_other_functions() {
     let src = "
         group Point {
-            let x: Int
-            let y: Int
+            x: Int
+            y: Int
         }
 
         impl Point {
@@ -7808,7 +7808,7 @@ const GENERICS: &str = "
     }
 
     group Box<T> {
-        let value: T
+        value: T
     }
 
     impl Box {
@@ -7832,8 +7832,8 @@ fn generic_arguments_are_inferred_from_calls() {
         }}
 
         group Pair<A, B> {{
-            let first: A
-            let second: B
+            first: A
+            second: B
         }}
 
         impl Pair {{
@@ -7896,7 +7896,7 @@ fn inferred_arguments_take_types_from_those_already_known() {
         }
 
         group Box<T> {
-            let value: T
+            value: T
         }
 
         impl Box {
@@ -8033,14 +8033,14 @@ fn generic_types_can_be_used_with_any_arguments() {
         "
         {GENERICS}
         group Pair<A, B> {{
-            let first: A
-            let second: B
+            first: A
+            second: B
         }}
 
         alias Maybe = Optional<(x: Int, y: Bool)>
 
         group Holder {{
-            let boxes: Pair<Box<Int>, Optional<Box<Bool>>>
+            boxes: Pair<Box<Int>, Optional<Box<Bool>>>
         }}
 
         fn f(holder: Holder, maybe: Maybe) -> Int {{
@@ -8348,12 +8348,12 @@ fn generic_types_are_checked_once() {
     // from it.
     let src = "
         group Box<T, T> {
-            let value: T
-            let value: Missing
+            value: T
+            value: Missing
         }
 
         group Counter<T> {
-            let value: T
+            value: T
         }
 
         impl Counter {
@@ -8379,7 +8379,7 @@ fn generic_types_are_checked_once() {
 fn generic_types_cannot_contain_themselves() {
     let src = "
         group Wrap<T> {
-            let inner: Wrap<T>
+            inner: Wrap<T>
         }
 
         choice Optional<T> {
@@ -8388,7 +8388,7 @@ fn generic_types_cannot_contain_themselves() {
         }
 
         group Grow<T> {
-            let next: Optional<Grow<(_: T)>>
+            next: Optional<Grow<(_: T)>>
         }
 
         fn f() {
@@ -8415,7 +8415,7 @@ fn generic_functions_cannot_use_themselves_with_larger_arguments() {
     // Each type made from `Box` would need its own `nested`, forever.
     let src = "
         group Box<T> {
-            let value: T
+            value: T
         }
 
         impl Box {
@@ -8473,7 +8473,7 @@ fn constrained_impls_are_only_for_arguments_that_meet_them() {
             group Plain {{}}
 
             group Odd {{
-                let value: Int
+                value: Int
             }}
 
             impl Odd with Equal {{
@@ -8928,7 +8928,7 @@ fn operators_call_the_method_implementing_their_trait() {
         check_top(
             "
             group Number {
-                let value: Int
+                value: Int
             }
 
             impl Number with Equal {
@@ -9194,7 +9194,7 @@ fn aliases_can_be_used_in_any_order() {
                 "
                 alias Spot = Point
                 group Point {
-                    let x: Int
+                    x: Int
                 }
                 impl Spot {
                     static fn at(x: Int) -> Point {
@@ -9348,7 +9348,7 @@ fn accepts_every_integer_type() {
 fn literals_take_their_type_from_where_theyre_used() {
     let src = "
         group Pixel {
-            let red: IntU8
+            red: IntU8
         }
 
         impl Pixel {
