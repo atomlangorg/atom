@@ -21,6 +21,20 @@ choice Option<Value> {
     some: Value
 }
 
+impl Option {
+    // The value held by `some`. Stops the program with `exit` if it's `none`.
+    fn unwrap() -> Self.Value {
+        match self {
+            .none.new(_) => {
+                exit()
+            }
+            .some.new(let value) => {
+                return value
+            }
+        }
+    }
+}
+
 // `Option`s are equal if neither holds a value, or both hold equal values,
 // which is only the case for a `Value` that can be compared with itself.
 impl Option with Equal where Self.Value == some Equal<Rhs = Self.Value> {

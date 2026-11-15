@@ -1252,6 +1252,28 @@ mod tests {
     }
 
     #[test]
+    fn unwrap_gives_the_value_of_some() {
+        let src = "
+            fn main() -> Int {
+                let nested = Option.some.new(Option.some.new(4))
+                return Option.some.new(5).unwrap() * 10 + nested.unwrap().unwrap()
+            }
+            ";
+        assert_eq!(run(src), 54);
+    }
+
+    #[test]
+    fn unwrap_exits_on_none() {
+        let src = "
+            fn main() -> Int {
+                let nothing: Option<Int> = Option.none.new(())
+                return nothing.unwrap()
+            }
+            ";
+        assert_eq!(run_executable("unwrap_none", src).code(), Some(1));
+    }
+
+    #[test]
     fn options_are_equal_when_their_values_are() {
         // Each check is one bit of the result.
         let src = "
