@@ -1,0 +1,83 @@
+/*
+ * Copyright 2026 George Elsham
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// An unsigned integer as wide as a pointer on the computer the program is
+// built for, such as 64 bits on a 64-bit CPU, so it can hold any address. It's
+// a different type from the integer of that width, such as `IntU64`, so code
+// using it works the same on every CPU.
+primitive IntU
+
+impl IntU with Equal {
+    primitive fn isEqual(to rhs: Self) -> Bool
+    primitive fn isNotEqual(to rhs: Self) -> Bool
+}
+
+impl IntU with Compare {
+    fn compare(to rhs: Self) -> Comparison {
+        if self < rhs {
+            return .less.new()
+        }
+        if self > rhs {
+            return .greater.new()
+        }
+        return .equal.new()
+    }
+
+    primitive fn isLess(than rhs: Self) -> Bool
+    primitive fn isLessOrEqual(to rhs: Self) -> Bool
+    primitive fn isGreater(than rhs: Self) -> Bool
+    primitive fn isGreaterOrEqual(to rhs: Self) -> Bool
+}
+
+impl IntU with Add {
+    primitive fn add(_ rhs: Self) -> Self
+}
+
+impl IntU with Subtract {
+    primitive fn subtract(_ rhs: Self) -> Self
+}
+
+impl IntU with Multiply {
+    primitive fn multiply(by rhs: Self) -> Self
+}
+
+impl IntU with Divide {
+    primitive fn divide(by rhs: Self) -> Self
+}
+
+impl IntU with BitAnd {
+    primitive fn bitAnd(_ rhs: Self) -> Self
+}
+
+impl IntU with BitOr {
+    primitive fn bitOr(_ rhs: Self) -> Self
+}
+
+impl IntU with BitXor {
+    primitive fn bitXor(_ rhs: Self) -> Self
+}
+
+impl IntU with ShiftLeft {
+    primitive fn shiftLeft(by amount: Int) -> Self
+}
+
+impl IntU with ShiftRight {
+    primitive fn shiftRight(by amount: Int) -> Self
+}
+
+impl IntU with BitNot {
+    primitive fn bitNot() -> Self
+}

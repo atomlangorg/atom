@@ -196,7 +196,7 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     /// The address of the function at an index into `Program::functions`,
-    /// as an `IntU64`. It's only used for the `RawPointer` in an `Fn`.
+    /// as an `IntU`. It's only used for the `RawPointer` in an `Fn`.
     FunctionAddress(usize),
     /// Creates a group, as an index into `Program::types`, from its fields'
     /// values in the order they're declared.

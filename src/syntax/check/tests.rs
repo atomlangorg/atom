@@ -19,7 +19,7 @@ use crate::syntax::parser::parse;
 
 /// The standard library type called `name`.
 fn ty(name: &str) -> Type {
-    let mut checker = Checker::default();
+    let mut checker = Checker::new(POINTER_BITS);
     checker.add_stdlib();
     checker.check_files();
     checker.std_type(name)
@@ -37,10 +37,14 @@ fn parsed_files(files: &[(&str, &str)]) -> Vec<File> {
         .collect()
 }
 
+/// How wide pointers are on the computer that programs are checked for,
+/// unless a test says otherwise, which is how wide `IntS` and `IntU` are.
+const POINTER_BITS: u32 = 64;
+
 /// Checks each `(path, src)` pair as a file, with paths like
 /// `/dir/other`.
 fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<FileError>> {
-    let result = check(&parsed_files(files)).map(|_| ());
+    let result = check(&parsed_files(files), POINTER_BITS).map(|_| ());
     // Every error must point at something in the file it's reported in.
     for err in result.as_ref().err().into_iter().flatten() {
         let found = pointed_at(files, err);
@@ -523,7 +527,7 @@ fn rejects_ordering_other_types() {
 #[test]
 fn accepts_bitwise_operators_on_integers() {
     let src = "
-        fn f(byte: IntU8, small: IntS8, amount: IntS64) {
+        fn f(byte: IntU8, small: IntS8, amount: Int) {
             let a: IntU8 = byte .& 15 .| 1 .^ byte
             let b: IntS8 = .!small .& -1
             let c: Int = .!1 .^ 2
@@ -2093,12 +2097,12 @@ fn nested_functions_have_their_own_return_type() {
 
 #[test]
 fn checks_the_standard_library_alone() {
-    assert!(check(&[]).is_ok());
+    assert!(check(&[], POINTER_BITS).is_ok());
 }
 
 /// Whether checking `src` as `path` finds the program's `main`.
 fn has_main(path: &str, src: &str) -> bool {
-    check(&parsed_files(&[(path, src)]))
+    check(&parsed_files(&[(path, src)]), POINTER_BITS)
         .expect("source should check")
         .main
         .is_some()
@@ -2303,7 +2307,7 @@ fn messages_in_stdlib(path: &[&str], src: &str) -> Vec<String> {
         program: parse(src).expect("source should parse"),
     };
     let project = parsed_files(&[("/secret", "let hidden = 1")]);
-    let mut checker = Checker::default();
+    let mut checker = Checker::new(POINTER_BITS);
     checker.add_stdlib();
     checker.add_file(Some(STDLIB_PACKAGE), &stdlib);
     checker.add_file(None, &project[0]);
@@ -5683,7 +5687,7 @@ fn programs_import_the_whole_stdlib_without_a_use() {
         "/main",
         "let a: Int = fromExtra\nlet b: Int = extra::fromExtra",
     )]);
-    let mut checker = Checker::default();
+    let mut checker = Checker::new(POINTER_BITS);
     checker.add_stdlib();
     checker.add_file(Some(STDLIB_PACKAGE), &stdlib[0]);
     checker.add_file(None, &project[0]);
@@ -8556,7 +8560,8 @@ fn aliases_left_out_of_constraints_are_their_arguments_once_made() {
         }}
         "
     );
-    let program = check(&parsed_files(&[("/main", &src)])).expect("`src` has no errors");
+    let program =
+        check(&parsed_files(&[("/main", &src)]), POINTER_BITS).expect("`src` has no errors");
     let total = program
         .functions
         .iter()
@@ -9337,11 +9342,51 @@ fn accepts_every_integer_type() {
         let f: IntS16 = 32767
         let g: IntS32 = -2147483648
         let h: IntS64 = -9223372036854775808
-        // `Int` is `IntS64`, so they can be used in place of each other.
-        let i: Int = h
-        let j: IntS64 = i
+        // Pointers are 64 bits wide, so `IntU` and `IntS` are too.
+        let i: IntU = 18446744073709551615
+        let j: IntS = -9223372036854775808
+        // `Int` is `IntS`, so they can be used in place of each other.
+        let k: Int = j
+        let l: IntS = k
         ";
     assert_eq!(check_top(src), Ok(()));
+}
+
+#[test]
+fn pointer_sized_integers_are_their_own_types() {
+    // Even where they're as wide as `IntS64` and `IntU64`, they can't be used
+    // in place of them, so the same code checks on every computer.
+    assert_eq!(
+        messages_top(
+            "
+            let a: IntS64 = 1
+            let b: Int = a
+            let c: IntU = 1
+            let d: IntU64 = c
+            "
+        ),
+        [
+            "cannot assign `IntS64` to `b`, which has type `Int`",
+            "cannot assign `IntU` to `d`, which has type `IntU64`",
+        ]
+    );
+}
+
+#[test]
+fn pointer_sized_integers_are_as_wide_as_pointers() {
+    let src = |int: &str, value: &str| format!("let x: {int} = {value}");
+    let checks =
+        |src: &str, pointer_bits| check(&parsed_files(&[("/main", src)]), pointer_bits).is_ok();
+    for (int, max, too_big) in [
+        ("IntU", "4294967295", "4294967296"),
+        ("IntS", "2147483647", "2147483648"),
+    ] {
+        assert!(checks(&src(int, max), 32), "{int}");
+        assert!(!checks(&src(int, too_big), 32), "{int}");
+    }
+    assert!(checks(&src("Int", "9223372036854775807"), 64));
+    assert!(!checks(&src("Int", "9223372036854775807"), 32));
+    assert!(checks(&src("IntU", "18446744073709551615"), 64));
 }
 
 #[test]

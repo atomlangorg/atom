@@ -700,10 +700,12 @@ impl<'a> Checker<'a> {
         }
         let int = |bits, signed| ir::Primitive::Int { bits, signed };
         let primitive = match name {
+            "IntU" => int(self.pointer_bits, false),
             "IntU8" => int(8, false),
             "IntU16" => int(16, false),
             "IntU32" => int(32, false),
             "IntU64" => int(64, false),
+            "IntS" => int(self.pointer_bits, true),
             "IntS8" => int(8, true),
             "IntS16" => int(16, true),
             "IntS32" => int(32, true),

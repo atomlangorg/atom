@@ -59,7 +59,16 @@ fn main() {
         return;
     }
 
-    let program = match syntax::check(&parsed_files) {
+    // The program is checked for the computer it's built for, since that
+    // decides how wide some integers are.
+    let machine = match codegen::host_machine() {
+        Ok(machine) => machine,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return;
+        }
+    };
+    let program = match syntax::check(&parsed_files, codegen::pointer_bits(&machine)) {
         Ok(program) => program,
         Err(errs) => {
             for err in errs {
@@ -78,13 +87,6 @@ fn main() {
         return;
     }
 
-    let machine = match codegen::host_machine() {
-        Ok(machine) => machine,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return;
-        }
-    };
     let context = Context::create();
     let file = codegen::compile(&context, &program, &machine);
     let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/atom/example");
@@ -221,7 +223,7 @@ mod tests {
             path: path.clone(),
             program: program.expect("source should parse"),
         }];
-        let errs = syntax::check(&parsed_files).expect_err("`true` isn't an `Int`");
+        let errs = syntax::check(&parsed_files, 64).expect_err("`true` isn't an `Int`");
 
         let files = [(path, src.to_string())];
         let source = file_source(&files, &errs[0].file);

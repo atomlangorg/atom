@@ -14,19 +14,21 @@
  * limitations under the License.
  */
 
-// Whole numbers, such as `42`. Unsigned integers (`IntU`) hold 0 to 2^N - 1,
-// and signed integers (`IntS`) hold -2^(N-1) to 2^(N-1) - 1, where N is the
-// number of bits. Arithmetic that goes outside a type's range stops the
-// program, and so does dividing by zero. Only signed integers can be negated,
-// and only unsigned integers can be shifted, with `.<` and `.>`, by an `Int`,
-// which stops the program if the amount isn't from 0 to N - 1, or if `.<`
-// shifts off a `1`.
+// Whole numbers, such as `42`. Unsigned integers (`IntU...`) hold 0 to
+// 2^N - 1, and signed integers (`IntS...`) hold -2^(N-1) to 2^(N-1) - 1, where
+// N is the number of bits, as in `IntU8`. `IntU` and `IntS` are as wide as a
+// pointer on the computer the program is built for. Arithmetic that goes
+// outside a type's range stops the program, and so does dividing by zero.
+// Only signed integers can be negated, and only unsigned integers can be
+// shifted, with `.<` and `.>`, by an `Int`, which stops the program if the
+// amount isn't from 0 to N - 1, or if `.<` shifts off a `1`.
 //
 // Integers are equal if they hold the same value, and are ordered by their
 // values. Their operators work on two of the same type, except that shifts
 // are by an `Int`. Each integer type is in its own file, such as `IntU8` in
-// `intu8`.
+// `intu8` and `IntS` in `ints`.
 
 // The integer to use unless another is needed. Integer literals are `Int`s
-// unless they're used as another integer type.
-alias Int = IntS64
+// unless they're used as another integer type. It's `IntS`, so its width
+// depends on the CPU.
+alias Int = IntS

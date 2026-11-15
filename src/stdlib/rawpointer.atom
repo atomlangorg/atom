@@ -18,5 +18,5 @@
 // is how an `Fn` finds the function it calls. Nothing can be read or written
 // through it yet.
 group RawPointer {
-    address: IntU64
+    address: IntU
 }

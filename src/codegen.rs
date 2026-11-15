@@ -78,6 +78,12 @@ pub fn host_machine() -> Result<TargetMachine, EmitError> {
         .ok_or_else(|| EmitError::Target(format!("no target machine for {triple}")))
 }
 
+/// How wide pointers are on `machine`, which is how wide `IntS` and `IntU`
+/// are.
+pub fn pointer_bits(machine: &TargetMachine) -> u32 {
+    machine.get_target_data().get_pointer_byte_size(None) * 8
+}
+
 /// Compiles `program` into an LLVM module for `machine`. The module only has
 /// a C `main`, so it can only be linked into an executable, if
 /// `program.main` is set.
@@ -498,7 +504,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
 
         let result = self.expr(main)?.into_int_value();
-        let code = self.builder.build_int_truncate(result, exit_code, "")?;
+        let code = self
+            .builder
+            .build_int_truncate_or_bit_cast(result, exit_code, "")?;
         self.builder.build_return(Some(&code))?;
         Ok(())
     }
@@ -626,7 +634,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .builder
                 .build_ptr_to_int(
                     self.functions[*index].as_global_value().as_pointer_value(),
-                    self.context.i64_type(),
+                    self.context.ptr_sized_int_type(&self.target_data, None),
                     "",
                 )?
                 .into(),
@@ -946,7 +954,7 @@ mod tests {
                 program: parse(src).expect("source should parse"),
             })
             .collect();
-        let program = syntax::check(&parsed).expect("source should check");
+        let program = syntax::check(&parsed, pointer_bits(machine)).expect("source should check");
         assert!(program.main.is_some(), "`/main` should declare `main`");
         compile(context, &program, machine)
     }
@@ -3499,15 +3507,16 @@ mod tests {
             }
             ";
         let context = Context::create();
-        let module = compile_files(&context, &machine(), &[("/main", src)]);
+        let machine = machine();
+        let module = compile_files(&context, &machine, &[("/main", src)]);
 
-        // Nothing in Atom can turn an `IntU64` into an `Int` yet, so this adds
-        // a function that reads `incAddress`.
+        // Nothing in Atom can turn an `IntU` into an `Int` yet, so this adds a
+        // function that reads `incAddress`.
         let global = module
             .get_global("/main::incAddress")
             .expect("should declare the value")
             .as_pointer_value();
-        let int = context.i64_type();
+        let int = context.ptr_sized_int_type(&machine.get_target_data(), None);
         let reader = module.add_function("read_address", int.fn_type(&[], false), None);
         let build = || -> Result<(), BuilderError> {
             let builder = context.create_builder();
@@ -3526,7 +3535,7 @@ mod tests {
             let inc = engine
                 .get_function_address("/main::inc")
                 .expect("should compile `inc`");
-            assert_eq!(call::<u64>(&engine, "read_address"), inc as u64);
+            assert_eq!(call::<usize>(&engine, "read_address"), inc);
         }
     }
 
@@ -3858,6 +3867,40 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 12);
+    }
+
+    #[test]
+    fn pointer_sized_integers_are_as_wide_as_pointers() {
+        let bits = pointer_bits(&machine());
+        let src = "
+            fn f(_ a: IntU, _ b: IntS) -> Int {
+                return b
+            }
+
+            fn main() -> Int {
+                return 0
+            }
+            ";
+        let context = Context::create();
+        let module = compile_files(&context, &machine(), &[("/main", src)]);
+        let f = module
+            .get_function("/main::f")
+            .expect("the function should be compiled")
+            .print_to_string()
+            .to_string();
+        let int = format!("i{bits}");
+        assert!(
+            f.contains(&format!("{int} @\"/main::f\"({int} %0, {int} %1)")),
+            "{f}"
+        );
+
+        // So they overflow at that width.
+        let max = u64::MAX >> (64 - bits);
+        let adding = |value: u64| {
+            format!("fn main() -> Int {{\nlet x: IntU = {value}\nlet y = x + 1\nreturn 0\n}}")
+        };
+        assert!(traps("intu_max", &adding(max)));
+        assert!(!traps("intu_below_max", &adding(max - 1)));
     }
 
     #[test]

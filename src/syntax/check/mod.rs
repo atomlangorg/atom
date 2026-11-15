@@ -94,14 +94,16 @@ const NO_ERRORS: &str = "the program has no errors";
 const STDLIB_PACKAGE: &str = "stdlib";
 
 /// The source of each file of the standard library, by its path within it.
-const STDLIB_FILES: [(&str, &str); 19] = [
+const STDLIB_FILES: [(&str, &str); 21] = [
     ("operators", include_str!("../../stdlib/operators.atom")),
     ("bool", include_str!("../../stdlib/bool.atom")),
     ("int", include_str!("../../stdlib/int.atom")),
+    ("intu", include_str!("../../stdlib/intu.atom")),
     ("intu8", include_str!("../../stdlib/intu8.atom")),
     ("intu16", include_str!("../../stdlib/intu16.atom")),
     ("intu32", include_str!("../../stdlib/intu32.atom")),
     ("intu64", include_str!("../../stdlib/intu64.atom")),
+    ("ints", include_str!("../../stdlib/ints.atom")),
     ("ints8", include_str!("../../stdlib/ints8.atom")),
     ("ints16", include_str!("../../stdlib/ints16.atom")),
     ("ints32", include_str!("../../stdlib/ints32.atom")),
@@ -210,9 +212,10 @@ impl fmt::Display for FileError {
 }
 
 /// Checks every file in a project, along with the standard library,
-/// returning the program they make up.
-pub fn check(files: &[File]) -> Result<ir::Program, Vec<FileError>> {
-    let mut checker = Checker::default();
+/// returning the program they make up for a computer whose pointers are
+/// `pointer_bits` wide, which is how wide `IntS` and `IntU` are.
+pub fn check(files: &[File], pointer_bits: u32) -> Result<ir::Program, Vec<FileError>> {
+    let mut checker = Checker::new(pointer_bits);
     checker.add_stdlib();
     for file in files {
         checker.add_file(None, file);
@@ -711,6 +714,9 @@ struct Context<'a> {
 
 #[derive(Default)]
 struct Checker<'a> {
+    /// How wide pointers are on the computer the program is for, and so
+    /// `IntS` and `IntU`.
+    pointer_bits: u32,
     /// The standard library first, then the project's files.
     files: Vec<FileInfo<'a>>,
     /// Every type, indexed by `id`.
@@ -772,6 +778,14 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
+    /// A checker for a computer whose pointers are `pointer_bits` wide.
+    fn new(pointer_bits: u32) -> Self {
+        Self {
+            pointer_bits,
+            ..Self::default()
+        }
+    }
+
     /// Adds a file from `package`, or from the project if that's `None`.
     /// Returns its index in `files`.
     fn add_file(&mut self, package: Option<&'a str>, file: &'a File) -> usize {
