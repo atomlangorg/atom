@@ -290,7 +290,7 @@ impl<'a> Checker<'a> {
                     self.instantiate_expr(arg, params, state)?;
                 }
             }
-            ir::Expr::Function(function) => {
+            ir::Expr::FunctionAddress(function) => {
                 *function = self.instantiate_callee(*function, params, state)?;
             }
             ir::Expr::Construct { group, fields } => {

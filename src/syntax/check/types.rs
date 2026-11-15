@@ -709,7 +709,6 @@ impl<'a> Checker<'a> {
             "IntS32" => int(32, true),
             "IntS64" => int(64, true),
             "Bool" => ir::Primitive::Bool,
-            "Fn" => ir::Primitive::Fn,
             "ChoiceTag" | "ChoiceOption" => ir::Primitive::Tag,
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
         };

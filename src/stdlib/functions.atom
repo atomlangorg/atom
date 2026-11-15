@@ -21,8 +21,12 @@
 // `fn negate(_ value: Int) -> Int`. A function called by name is called
 // directly, and as a value it uses `Call`, so `adder(a: 3, b: 5)`, where
 // `adder` is `add`, is `adder.call(input: (a: 3, b: 5))`.
-primitive Fn<Input, Output>
+group Fn<Input, Output> {
+    // Where the function's code is.
+    pointer: RawPointer
+}
 
 impl Fn with Call {
+    // Calls the function at `pointer`, with `input` as its arguments.
     primitive fn call(input: Self.Input) -> Self.Output
 }

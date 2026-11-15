@@ -1295,7 +1295,7 @@ mod tests {
             "use ../users/other",
             "use ../../",
             "primitive Int",
-            "primitive Fn<T, U>",
+            "primitive ChoiceOption<T, U>",
         ] {
             let program = parse_spanned(stmt);
             assert_eq!(text(stmt, program[0].span), stmt);
@@ -3538,10 +3538,10 @@ mod tests {
             ])
         );
         assert_eq!(
-            parse("primitive Fn<Input, Output>"),
+            parse("primitive ChoiceOption<Base, Value>"),
             Ok(vec![stmt_node(StmtKind::Primitive {
-                name: "Fn".to_string(),
-                params: vec!["Input".to_string(), "Output".to_string()],
+                name: "ChoiceOption".to_string(),
+                params: vec!["Base".to_string(), "Value".to_string()],
             })])
         );
         for src in [

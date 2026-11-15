@@ -57,9 +57,6 @@ pub enum Primitive {
         signed: bool,
     },
     Bool,
-    /// `Fn`, which is a pointer to a function whose parameters are the
-    /// elements of its `Input`.
-    Fn,
     /// `ChoiceOption` and `ChoiceTag`, which are the index of an option of a
     /// choice, in the order they're declared.
     Tag,
@@ -106,8 +103,8 @@ pub enum PrimitiveFn {
     /// The function that an operator before a value calls on an integer or a
     /// `Bool`, such as `negate` for `-`, which is only on signed integers.
     Unary(UnOp),
-    /// `Fn.call`, which calls the function that the `Fn` points to with the
-    /// input.
+    /// `Fn.call`, which calls the function at the address in the `Fn`'s
+    /// `RawPointer`, with the elements of the input as its arguments.
     CallFn,
     /// `ChoiceTag.new`, which is the option that a choice is.
     ChoiceTag,
@@ -198,9 +195,9 @@ pub enum Expr {
         function: usize,
         args: Vec<Expr>,
     },
-    /// A pointer to the function at an index into `Program::functions`, which
-    /// is a value of the primitive type `Fn`.
-    Function(usize),
+    /// The address of the function at an index into `Program::functions`,
+    /// as an `IntU64`. It's only used for the `RawPointer` in an `Fn`.
+    FunctionAddress(usize),
     /// Creates a group, as an index into `Program::types`, from its fields'
     /// values in the order they're declared.
     Construct {

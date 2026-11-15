@@ -508,7 +508,7 @@ pub enum StmtKind {
     /// place of it anywhere.
     Alias(Alias),
     /// `primitive Name`: a type that the compiler represents itself, such as
-    /// `Int`, which can be generic, as in `primitive Fn<Input, Output>`. Only
+    /// `Int`, which can be generic, as in `primitive ChoiceOption<Base, Value>`. Only
     /// allowed at the top level of the standard library.
     Primitive {
         name: String,

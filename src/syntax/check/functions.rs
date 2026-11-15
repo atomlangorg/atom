@@ -363,16 +363,23 @@ impl<'a> Checker<'a> {
         let template = self.std_template("Fn");
         self.instance(template, vec![input, returns?], span)
     }
-    /// `function` as a value, which compiles to a pointer to it. Calling it
-    /// unpacks its `Input` into its parameters. It's used by the code at
-    /// `span`.
+    /// `function` as a value, which is an `Fn` whose `RawPointer` holds its
+    /// address. Calling it unpacks its `Input` into its parameters. It's used
+    /// by the code at `span`.
     pub(super) fn function_value(&mut self, function: FnRef, span: Span) -> Typed {
         let Some(ty) = self.function_type(&function, span) else {
             return Typed::UNKNOWN;
         };
+        let pointer = ir::Expr::Construct {
+            group: self.std_type("RawPointer").id,
+            fields: vec![ir::Expr::FunctionAddress(self.callee(function, span))],
+        };
         Typed {
+            expr: ir::Expr::Construct {
+                group: ty.id,
+                fields: vec![pointer],
+            },
             ty: Some(ty),
-            expr: ir::Expr::Function(self.callee(function, span)),
         }
     }
 }

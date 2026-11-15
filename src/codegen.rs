@@ -19,7 +19,7 @@
 //!
 //! The primitive integer types are LLVM integers of their width, such as `i8`
 //! for `IntU8` and `IntS8`, since LLVM leaves signedness to the operations
-//! used on them. `Bool` is `i1`. An `Fn` is a pointer. Every group is an
+//! used on them. `Bool` is `i1`. Every group is an
 //! LLVM struct of its fields, so `Unit` is `{}`. A choice is a struct of an
 //! `i32` tag, the index of its option, then space for the largest of its
 //! options' values, which they share. Every Atom function becomes an
@@ -246,9 +246,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .expect("integer types have valid widths")
                     .into(),
                 TypeDef::Primitive(Primitive::Bool) => self.context.bool_type().into(),
-                TypeDef::Primitive(Primitive::Fn) => {
-                    self.context.ptr_type(AddressSpace::default()).into()
-                }
                 TypeDef::Primitive(Primitive::Tag) => self.tag_type().into(),
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
                     self.context.opaque_struct_type(name).into()
@@ -397,15 +394,27 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }))
     }
 
-    /// Calls the function that `pointer` points to, whose parameters are the
-    /// elements of the tuple `input`, returning a value of the type at
-    /// `returns` in `program.types`.
+    /// Calls the function that `function`, an `Fn`, holds the address of in
+    /// its `RawPointer`. Its parameters are the elements of the tuple
+    /// `input`, and it returns a value of the type at `returns` in
+    /// `program.types`.
     fn call_function_value(
         &mut self,
-        pointer: BasicValueEnum<'ctx>,
+        function: BasicValueEnum<'ctx>,
         input: BasicValueEnum<'ctx>,
         returns: usize,
     ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+        let pointer = self
+            .builder
+            .build_extract_value(function.into_struct_value(), 0, "")?;
+        let address = self
+            .builder
+            .build_extract_value(pointer.into_struct_value(), 0, "")?;
+        let pointer = self.builder.build_int_to_ptr(
+            address.into_int_value(),
+            self.context.ptr_type(AddressSpace::default()),
+            "",
+        )?;
         // A function's `Input` is always a tuple, but an `Fn` with any other
         // `Input` can still be called, though it never has a value.
         let args = match input {
@@ -419,7 +428,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let args: Vec<_> = args.into_iter().map(Into::into).collect();
         Ok(self
             .builder
-            .build_indirect_call(fn_type, pointer.into_pointer_value(), &args, "")?
+            .build_indirect_call(fn_type, pointer, &args, "")?
             .try_as_basic_value()
             .basic()
             .expect("every function returns a value, even if it's `Unit`"))
@@ -613,9 +622,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .basic()
                     .expect("every function returns a value, even if it's `Unit`")
             }
-            Expr::Function(index) => self.functions[*index]
-                .as_global_value()
-                .as_pointer_value()
+            Expr::FunctionAddress(index) => self
+                .builder
+                .build_ptr_to_int(
+                    self.functions[*index].as_global_value().as_pointer_value(),
+                    self.context.i64_type(),
+                    "",
+                )?
                 .into(),
             Expr::Construct { group, fields } => {
                 let mut value = self.types[*group].into_struct_type().get_poison();
@@ -3461,6 +3474,60 @@ mod tests {
             ";
         // 101 + 202 + 42 - 1 - 2
         assert_eq!(run(src), 342);
+    }
+
+    #[test]
+    fn fn_values_hold_the_address_of_their_function() {
+        let src = "
+            fn inc(_ value: Int) -> Int {
+                return value + 1
+            }
+
+            fn dec(_ value: Int) -> Int {
+                return value - 1
+            }
+
+            let incAddress = inc.pointer.address
+
+            fn main() -> Int {
+                let same = inc.pointer.address == inc.pointer.address
+                let different = inc.pointer.address != dec.pointer.address
+                if same & different {
+                    return 1
+                }
+                return 0
+            }
+            ";
+        let context = Context::create();
+        let module = compile_files(&context, &machine(), &[("/main", src)]);
+
+        // Nothing in Atom can turn an `IntU64` into an `Int` yet, so this adds
+        // a function that reads `incAddress`.
+        let global = module
+            .get_global("/main::incAddress")
+            .expect("should declare the value")
+            .as_pointer_value();
+        let int = context.i64_type();
+        let reader = module.add_function("read_address", int.fn_type(&[], false), None);
+        let build = || -> Result<(), BuilderError> {
+            let builder = context.create_builder();
+            builder.position_at_end(context.append_basic_block(reader, "entry"));
+            let address = builder.build_load(int, global, "")?;
+            builder.build_return(Some(&address))?;
+            Ok(())
+        };
+        build().expect("should build the reader");
+
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("the JIT should start");
+        unsafe {
+            assert_eq!(call::<i32>(&engine, "main"), 1);
+            let inc = engine
+                .get_function_address("/main::inc")
+                .expect("should compile `inc`");
+            assert_eq!(call::<u64>(&engine, "read_address"), inc as u64);
+        }
     }
 
     #[test]
