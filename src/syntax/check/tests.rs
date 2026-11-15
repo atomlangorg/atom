@@ -8223,6 +8223,72 @@ fn rejects_members_without_a_type_that_cannot_be_inferred() {
 }
 
 #[test]
+fn option_patterns_without_a_type_are_options_of_the_matched_value() {
+    // As in `a == .none.new(())`, the type that `.none` is an option of is
+    // the matched value's, including within tuples and other options.
+    let src = "
+        choice Only<T> {
+            value: T
+        }
+
+        fn f(a: Option<Int>, b: Option<Option<Bool>>, only: Only<Int>) -> Int {
+            match (a, b) {
+                (.none.new(_), _) => {}
+                (.some.new(let x), .some.new(.some.new(true))) => {
+                    return x
+                }
+                (Option.some.new(_), .some.new(.none.new(()))) => {}
+                (_, Option<Option<Bool>>.some.new(.some.new(false))) => {}
+                (.some.new(_), .none.new(_)) => {}
+            }
+            (.value.new(let y), _) = (only, 1)
+            return 0
+        }
+        ";
+    assert_eq!(check_top(src), Ok(()));
+}
+
+#[test]
+fn rejects_option_patterns_without_a_type_that_do_not_match() {
+    assert_eq!(
+        messages_top(
+            "
+            fn f(a: Option<Int>) {
+                match a {
+                    .none.new(_) => {}
+                    .none.new(()) => {}
+                }
+                match 1 {
+                    .none.new(_) => {}
+                    _ => {}
+                }
+                match a {
+                    .missing.new(_) => {}
+                    .some.new(true) => {}
+                    _ => {}
+                }
+                // The matched value's type is unknown, which is the only
+                // error.
+                match missing {
+                    .none.new(let x) => {
+                        let y: Int = x
+                    }
+                }
+            }
+            "
+        ),
+        [
+            "`match` is missing the pattern `Option<Int>.some.new(_)`",
+            "pattern `.none.new(())` can't be reached, since the patterns before it match everything it does",
+            "`Int` has no option `none`",
+            "`Option<Int>` has no option `missing`",
+            "pattern `true` can't match `Int`",
+            "`missing` is not declared",
+        ]
+    );
+}
+
+#[test]
 fn generic_types_need_the_right_arguments() {
     let src = format!(
         "

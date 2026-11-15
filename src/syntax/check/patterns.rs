@@ -128,7 +128,7 @@ impl<'a> Checker<'a> {
                 option,
                 value,
             } => {
-                let found = self.option_pattern(ty, type_name, option, pattern.span);
+                let found = self.option_pattern(ty, type_name.as_ref(), option, pattern.span);
                 let Some((index, value_ty)) = found else {
                     self.declare_bindings(pattern);
                     return (None, Space::Any);
@@ -185,17 +185,21 @@ impl<'a> Checker<'a> {
     }
     /// Finds the option called `option` of `type_name`, which must be `ty`,
     /// returning its index and the type of its value, as `Checker::option`
-    /// does, or `None` if it has an error.
+    /// does, or `None` if it has an error. Without `type_name`, as in
+    /// `.none.new(_)`, it's an option of `ty`.
     pub(super) fn option_pattern(
         &mut self,
         ty: &Type,
-        type_name: &TypeName,
+        type_name: Option<&TypeName>,
         option: &str,
         span: Span,
     ) -> Option<(usize, Option<Type>)> {
         // A generic type's arguments can be left out, since they're the
         // matched value's.
-        let found = self.type_in_context(type_name, &[Some(ty)])?;
+        let found = match type_name {
+            Some(type_name) => self.type_in_context(type_name, &[Some(ty)])?,
+            None => ty.clone(),
+        };
         if found != *ty {
             self.error(
                 span,

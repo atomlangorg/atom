@@ -547,8 +547,10 @@ where
             .then(pattern.clone())
             .map(|(label, pattern)| TuplePattern { label, pattern });
         let new = select! { Token::Ident("new") => () };
+        // The type can be left out, as in `.circle.new(let radius)`.
         let option = named_type
             .clone()
+            .or_not()
             .then_ignore(just(Token::Dot))
             .then(ident)
             .then_ignore(just(Token::Dot))
@@ -1784,12 +1786,24 @@ mod tests {
         assert_eq!(
             pattern("Optional<Int>.none.new(())"),
             pattern_node(PatternKind::Option {
-                ty: TypeName::Generic {
+                ty: Some(TypeName::Generic {
                     name: Name::new("Optional"),
                     args: vec![TypeName::new("Int")],
-                },
+                }),
                 option: "none".to_string(),
                 value: Box::new(pattern_node(PatternKind::Tuple(vec![]))),
+            })
+        );
+        assert_eq!(
+            pattern(".some.new(.none.new(_))"),
+            pattern_node(PatternKind::Option {
+                ty: None,
+                option: "some".to_string(),
+                value: Box::new(pattern_node(PatternKind::Option {
+                    ty: None,
+                    option: "none".to_string(),
+                    value: Box::new(pattern_node(PatternKind::Any)),
+                })),
             })
         );
         assert_eq!(
@@ -1812,13 +1826,13 @@ mod tests {
         assert_eq!(
             pattern("Shape.pair.new((left: Shape.empty.new(_), right: _))"),
             pattern_node(PatternKind::Option {
-                ty: TypeName::new("Shape"),
+                ty: Some(TypeName::new("Shape")),
                 option: "pair".to_string(),
                 value: Box::new(pattern_node(PatternKind::Tuple(vec![
                     element(
                         Some("left"),
                         pattern_node(PatternKind::Option {
-                            ty: TypeName::new("Shape"),
+                            ty: Some(TypeName::new("Shape")),
                             option: "empty".to_string(),
                             value: Box::new(pattern_node(PatternKind::Any)),
                         })
@@ -1845,6 +1859,10 @@ mod tests {
             // Options are matched like they're created, with `new`.
             "match v { Shape.circle(_) => {} }",
             "match v { Shape.circle.make(_) => {} }",
+            "match v { .empty => {} }",
+            "match v { .empty.new => {} }",
+            "match v { .circle(_) => {} }",
+            "match v { ..circle.new(_) => {} }",
         ] {
             assert!(parse_body(src).is_err(), "{src:?} should not parse");
         }
@@ -3228,7 +3246,7 @@ mod tests {
         };
         MatchArm {
             pattern: pattern_node(PatternKind::Option {
-                ty: TypeName::new(ty),
+                ty: Some(TypeName::new(ty)),
                 option: name.to_string(),
                 value: Box::new(pattern_node(value)),
             }),
@@ -3301,7 +3319,7 @@ mod tests {
                 arms: vec![
                     MatchArm {
                         pattern: pattern_node(PatternKind::Option {
-                            ty: TypeName::Named(qualified("other", "Shape",)),
+                            ty: Some(TypeName::Named(qualified("other", "Shape",))),
                             option: "circle".to_string(),
                             value: Box::new(pattern_node(PatternKind::Binding("r".to_string()))),
                         }),

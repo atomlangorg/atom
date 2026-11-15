@@ -26,10 +26,10 @@ choice Option<Value> {
 impl Option with Equal where Self.Value == some Equal<Rhs = Self.Value> {
     fn isEqual(to rhs: Self) -> Bool {
         match (self, rhs) {
-            (Self.none.new(_), Self.none.new(_)) => {
+            (.none.new(_), .none.new(_)) => {
                 return true
             }
-            (Self.some.new(let l), Self.some.new(let r)) => {
+            (.some.new(let l), .some.new(let r)) => {
                 return l == r
             }
             _ => {

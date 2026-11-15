@@ -653,7 +653,10 @@ pub enum PatternKind {
     /// like it's created. The type is a name, which can be given generic
     /// arguments.
     Option {
-        ty: TypeName,
+        /// `None` when it's left out, as in `.circle.new(_)`, where it's the
+        /// type of the matched value, like the type of a member written
+        /// without one is in `shape == .circle.new(1)`.
+        ty: Option<TypeName>,
         option: String,
         value: Box<Pattern>,
     },
@@ -670,7 +673,10 @@ impl fmt::Display for Pattern {
             PatternKind::Bool(value) => write!(f, "{value}"),
             PatternKind::Tuple(elements) => write!(f, "{}", show_tuple(elements)),
             PatternKind::Option { ty, option, value } => {
-                write!(f, "{ty}.{option}.new({value})")
+                if let Some(ty) = ty {
+                    write!(f, "{ty}")?;
+                }
+                write!(f, ".{option}.new({value})")
             }
         }
     }
