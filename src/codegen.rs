@@ -27,6 +27,11 @@
 //! visible to the linker. It sets every top-level value, then calls Atom's
 //! `main`, whose result is the exit code.
 //!
+//! The executable is optimised with LLVM's standard `-O2` pipeline, which
+//! inlines functions and splits groups into their fields. So a copy of a
+//! group with one field changed, such as `user = user.revokeAdmin()`, only
+//! writes the field that changed.
+//!
 //! Arithmetic that overflows, division by zero, and shifts that lose bits or
 //! go too far trap by calling C's `abort`. `llvm.trap` would avoid needing C, but on macOS it can leave the
 //! process hanging instead of stopping it, depending on what launched it.
@@ -42,6 +47,7 @@ use inkwell::{
     context::Context,
     intrinsics::Intrinsic,
     module::{Linkage, Module},
+    passes::PassBuilderOptions,
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
     },
@@ -96,6 +102,14 @@ pub fn compile<'ctx>(
     codegen.module
 }
 
+/// Optimises `module`, which was compiled for `machine`, with LLVM's
+/// standard `-O2` pipeline.
+pub fn optimize(module: &Module, machine: &TargetMachine) -> Result<(), EmitError> {
+    module
+        .run_passes("default<O2>", machine, PassBuilderOptions::create())
+        .map_err(|err| EmitError::Optimize(err.to_string()))
+}
+
 /// Compiles `module`, which was compiled for `machine`, into an object file,
 /// then links it into an executable at `path` with the system's C compiler,
 /// `cc`.
@@ -124,6 +138,8 @@ pub fn write_executable(
 pub enum EmitError {
     /// LLVM couldn't compile for this computer.
     Target(String),
+    /// LLVM couldn't optimise the module.
+    Optimize(String),
     /// LLVM couldn't write the object file.
     Object(String),
     /// `cc` couldn't be run.
@@ -136,6 +152,7 @@ impl fmt::Display for EmitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Target(err) => write!(f, "couldn't compile for this computer: {err}"),
+            Self::Optimize(err) => write!(f, "couldn't optimise: {err}"),
             Self::Object(err) => write!(f, "couldn't write the object file: {err}"),
             Self::Link(err) => write!(f, "couldn't run `cc` to link: {err}"),
             Self::LinkFailed(status) => write!(f, "`cc` failed to link, with {status}"),
@@ -3040,6 +3057,89 @@ mod tests {
         for body in [equal, not_equal, bools] {
             assert!(!body.contains("call"), "{body}");
         }
+    }
+
+    #[test]
+    fn changed_copies_of_groups_only_write_what_changed() {
+        let src = "
+            group User {
+                age: Int
+                isAdmin: Bool
+            }
+
+            impl User {
+                fn revokeAdmin() -> User {
+                    return Self { age: self.age, isAdmin: false }
+                }
+            }
+
+            fn main() -> Int {
+                return 0
+            }
+            ";
+        let context = Context::create();
+        let machine = machine();
+        let module = compile_files(&context, &machine, &[("/main", src)]);
+
+        // Optimising would fold away any `User` that Atom keeps, so this adds
+        // a function that does `user = user.revokeAdmin()` to a `User` that it
+        // only has a pointer to.
+        let user = module
+            .get_struct_type("/main::User")
+            .expect("should declare the group");
+        let revoke_admin = module
+            .get_function("/main::User.revokeAdmin")
+            .expect("should compile the method");
+        let pointer = context.ptr_type(AddressSpace::default());
+        let fn_type = context.void_type().fn_type(&[pointer.into()], false);
+        let revoke = module.add_function("revoke", fn_type, None);
+        let build = || -> Result<(), BuilderError> {
+            let builder = context.create_builder();
+            builder.position_at_end(context.append_basic_block(revoke, "entry"));
+            let slot = revoke
+                .get_nth_param(0)
+                .expect("should take a pointer")
+                .into_pointer_value();
+            let value = builder.build_load(user, slot, "")?;
+            let value = builder
+                .build_call(revoke_admin, &[value.into()], "")?
+                .try_as_basic_value()
+                .basic()
+                .expect("should return a `User`");
+            builder.build_store(slot, value)?;
+            builder.build_return(None)?;
+            Ok(())
+        };
+        build().expect("should build the function");
+        optimize(&module, &machine).expect("should optimise");
+
+        // The method is inlined, and the `User` that's stored is the one that
+        // was loaded with only `isAdmin` changed, so `age` is never read.
+        let body = revoke.print_to_string().to_string();
+        assert!(!body.contains("call"), "{body}");
+        assert!(!body.contains("extractvalue"), "{body}");
+        assert_eq!(body.matches("insertvalue").count(), 1, "{body}");
+        assert!(body.contains(", i1 false, 1"), "{body}");
+
+        // So the machine code only stores `false` into `isAdmin`'s byte.
+        let assembly = machine
+            .write_to_memory_buffer(&module, FileType::Assembly)
+            .expect("should write assembly");
+        let assembly = String::from_utf8_lossy(assembly.as_slice());
+        let instructions: Vec<_> = assembly
+            .lines()
+            .skip_while(|line| !matches!(*line, "revoke:" | "_revoke:"))
+            .skip(1)
+            .take_while(|line| !line.contains(".cfi_endproc") && !line.contains("End function"))
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with(['.', ';', '#']))
+            .collect();
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(instructions, ["strb\twzr, [x0, #8]", "ret"], "{assembly}");
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(instructions, ["movb\t$0, 8(%rdi)", "retq"], "{assembly}");
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        assert!(!instructions.is_empty(), "{assembly}");
     }
 
     #[test]

@@ -92,6 +92,10 @@ fn main() {
         eprintln!("error creating {}: {err}", output.display());
         return;
     }
+    if let Err(err) = codegen::optimize(&file, &machine) {
+        eprintln!("error: {err}");
+        return;
+    }
     match codegen::write_executable(&file, &machine, &output) {
         Ok(()) => println!("built {}", output.display()),
         Err(err) => eprintln!("error: {err}"),

@@ -2965,10 +2965,7 @@ mod tests {
             ),
             Ok(vec![group_(
                 "User",
-                vec![
-                    field("age", "Int"),
-                    field("isAdmin", "Bool"),
-                ],
+                vec![field("age", "Int"), field("isAdmin", "Bool")],
             )])
         );
     }
@@ -2981,10 +2978,7 @@ mod tests {
         );
         assert_eq!(
             parse_body("group Point { x: Int }"),
-            Ok(vec![group_(
-                "Point",
-                vec![field("x", "Int")]
-            )])
+            Ok(vec![group_("Point", vec![field("x", "Int")])])
         );
         assert_eq!(
             parse_body(
@@ -3000,10 +2994,7 @@ mod tests {
             ),
             Ok(vec![group_(
                 "Post",
-                vec![
-                    field("author", "User"),
-                    field("likes", "Int"),
-                ],
+                vec![field("author", "User"), field("likes", "Int")],
             )])
         );
     }
