@@ -434,7 +434,9 @@ impl<'a> Checker<'a> {
                 .collect(),
         }
     }
-    /// How values of `ty` matching `space` are written as a pattern.
+    /// How values of `ty` matching `space` are written as a pattern. An
+    /// option is written without its type, as in `.some.new(_)`, since that's
+    /// always the type of the value it's matched against.
     pub(super) fn show_space(&self, space: &Space, ty: &Type) -> String {
         let Space::Ctor(ctor, parts) = space else {
             return "_".to_string();
@@ -464,7 +466,7 @@ impl<'a> Checker<'a> {
                 let option = &self.options(ty.id).unwrap_or_default()[*index].decl.name;
                 // An option whose value's type is unknown matches anything.
                 let value = shown.into_iter().next().unwrap_or_else(|| "_".to_string());
-                format!("{ty}.{option}.new({value})")
+                format!(".{option}.new({value})")
             }
         }
     }

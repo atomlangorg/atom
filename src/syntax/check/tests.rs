@@ -7239,10 +7239,10 @@ fn matches_report_the_values_they_miss() {
         messages_top(&src),
         [
             "`match` is missing the patterns `(a: true, b: false)` and `(a: false, b: _)`",
-            "`match` is missing the patterns `(Shape.circle.new(_), _)`, `(Shape.empty.new(_), _)` and `(Shape.nothing.new(_), _)`",
+            "`match` is missing the patterns `(.circle.new(_), _)`, `(.empty.new(_), _)` and `(.nothing.new(_), _)`",
             "`match` is missing the pattern `_`",
             "`match` is missing the pattern `(a: false, b: _)`",
-            "`match` is missing the patterns `Switch.set.new((isOn: false, count: _))` and `Switch.unset.new(_)`",
+            "`match` is missing the patterns `.set.new((isOn: false, count: _))` and `.unset.new(_)`",
         ]
     );
 }
@@ -7373,7 +7373,7 @@ fn destructuring_must_match_every_value() {
         [
             "pattern `(x: 0, y: let y)` doesn't match every value, such as `(x: _, y: _)`, so it can only be used in a `match`",
             "pattern `(x: let x, y: true)` doesn't match every value, such as `(x: _, y: false)`, so it can only be used in a `match`",
-            "pattern `(Shape.circle.new(let r))` doesn't match every value, such as `(Shape.empty.new(_))`, so it can only be used in a `match`",
+            "pattern `(Shape.circle.new(let r))` doesn't match every value, such as `(.empty.new(_))`, so it can only be used in a `match`",
             "pattern `(let a, let b)` can't match `(x: Int, y: Bool)`",
             "pattern `(x: let c)` can't match `(x: Int, y: Bool)`",
             "`missing` is not declared",
@@ -8278,7 +8278,7 @@ fn rejects_option_patterns_without_a_type_that_do_not_match() {
             "
         ),
         [
-            "`match` is missing the pattern `Option<Int>.some.new(_)`",
+            "`match` is missing the pattern `.some.new(_)`",
             "pattern `.none.new(())` can't be reached, since the patterns before it match everything it does",
             "`Int` has no option `none`",
             "`Option<Int>` has no option `missing`",
@@ -8658,8 +8658,8 @@ fn match_needs_every_option() {
             "
         )),
         [
-            "`match` is missing the patterns `Shape.circle.new(_)` and `Shape.nothing.new(_)`",
-            "`match` is missing the pattern `Shape.nothing.new(_)`",
+            "`match` is missing the patterns `.circle.new(_)` and `.nothing.new(_)`",
+            "`match` is missing the pattern `.nothing.new(_)`",
         ]
     );
 }
