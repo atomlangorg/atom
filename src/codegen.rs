@@ -2749,6 +2749,34 @@ mod tests {
     }
 
     #[test]
+    fn require_runs_its_else_only_when_its_condition_is_false() {
+        let src = "
+            fn halve(_ n: Int) -> Int {
+                require n > 0 else {
+                    return 0
+                }
+                return n / 2
+            }
+
+            fn main() -> Int {
+                return halve(8) * 10 + halve(-3)
+            }
+            ";
+        assert_eq!(run(src), 40);
+
+        let src = "
+            fn main() -> Int {
+                let flag = false
+                require flag else {
+                    exit()
+                }
+                return 7
+            }
+            ";
+        assert_eq!(run_executable("require_exits", src).code(), Some(1));
+    }
+
+    #[test]
     fn exit_stops_the_program_from_inside_a_statement() {
         let src = "
             fn describe(_ never: Never) -> Int {

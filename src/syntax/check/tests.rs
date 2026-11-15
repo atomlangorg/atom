@@ -847,16 +847,152 @@ fn accepts_if_else() {
 fn rejects_non_boolean_condition() {
     assert_eq!(
         check_body("if 1 + 2 {}"),
-        Err(vec![CheckError::ConditionNotBool(ty("Int"))])
+        Err(vec![CheckError::ConditionNotBool {
+            keyword: "if",
+            found: ty("Int")
+        }])
     );
     assert_eq!(
         check_body("if true {} else if 0 {}"),
-        Err(vec![CheckError::ConditionNotBool(ty("Int"))])
+        Err(vec![CheckError::ConditionNotBool {
+            keyword: "if",
+            found: ty("Int")
+        }])
     );
     // An undeclared condition is only reported once.
     assert_eq!(
         check_body("if c {}"),
         Err(vec![CheckError::Undeclared("c".to_string())])
+    );
+}
+
+#[test]
+fn accepts_require_whose_else_never_finishes() {
+    assert_eq!(
+        check_top(
+            "
+            fn fail() -> Never {
+                exit()
+            }
+            fn f(a: Bool, b: Bool) -> Int {
+                let ready = a & b
+                require ready else {
+                    return 0
+                }
+                require a else {
+                    exit()
+                }
+                require b else {
+                    if a {
+                        return 1
+                    } else {
+                        fail()
+                    }
+                }
+                require !b else {
+                    match a {
+                        true => {
+                            return 2
+                        }
+                        false => {
+                            return 3
+                        }
+                    }
+                }
+                return 4
+            }
+            fn g(a: Bool) {
+                require a else {
+                    return
+                }
+            }
+            "
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn rejects_require_whose_else_can_finish() {
+    assert_eq!(
+        check_body("require true else {}"),
+        Err(vec![CheckError::RequireElseFinishes])
+    );
+    assert_eq!(
+        check_body(
+            "
+            let a = true
+            var x = 0
+            require a else {
+                x = 1
+            }
+            "
+        ),
+        Err(vec![CheckError::RequireElseFinishes])
+    );
+    assert_eq!(
+        check_body(
+            "
+            let a = true
+            require a else {
+                if !a {
+                    return
+                }
+            }
+            "
+        ),
+        Err(vec![CheckError::RequireElseFinishes])
+    );
+    let message = "the `else` of `require` must not finish, so it needs to `return` or call \
+                   a function that returns `Never`, such as `exit()`, on every path";
+    assert_eq!(messages("require true else {}"), [message]);
+}
+
+#[test]
+fn require_checks_its_condition_and_block() {
+    assert_eq!(
+        check_body("require 1 else {\nreturn\n}"),
+        Err(vec![CheckError::ConditionNotBool {
+            keyword: "require",
+            found: ty("Int"),
+        }])
+    );
+    assert_eq!(
+        messages("require 1 else {\nreturn\n}"),
+        ["`require` condition must be `Bool`, found `Int`"]
+    );
+    // What the `else` block declares isn't visible after it.
+    assert_eq!(
+        check_body(
+            "
+            require true else {
+                let x = 1
+                return
+            }
+            let y = x
+            "
+        ),
+        Err(vec![CheckError::Undeclared("x".to_string())])
+    );
+}
+
+#[test]
+fn require_alone_doesnt_return_on_every_path() {
+    // Its condition can be true, so the code after it still has to return.
+    assert_eq!(
+        check_body(
+            "
+            fn f(c: Bool) -> Int {
+                require c else {
+                    return 0
+                }
+            }
+            "
+        ),
+        Err(vec![CheckError::MissingReturn {
+            function: "f".to_string(),
+            expected: ty("Int"),
+        }])
     );
 }
 

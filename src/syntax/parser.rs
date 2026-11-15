@@ -787,6 +787,18 @@ where
                 })
         });
 
+        // Like an `if`, with `else` on the same line as the condition, but
+        // with only an `else` block.
+        let require = just(Token::Require)
+            .ignore_then(expr.clone())
+            .map_with(|cond, e| (cond, Span::from(e.span())))
+            .then_ignore(just(Token::Else))
+            .then(block.clone())
+            .map(|((cond, span), else_block)| Stmt {
+                kind: StmtKind::Require { cond, else_block },
+                span,
+            });
+
         // A pattern, then its block, with the `{` on the same line.
         let match_arm = pattern
             .clone()
@@ -881,6 +893,7 @@ where
                 .or(assign)
                 .or(destructure)
                 .or(if_)
+                .or(require)
                 .or(match_)
                 .or(function_in(Place::Stmt).map(|function| Stmt {
                     span: function.span,
@@ -1307,6 +1320,7 @@ mod tests {
         for (stmt, head) in [
             ("if a + b {}", "if a + b"),
             ("if a {} else {}", "if a"),
+            ("require a else {}", "require a"),
             ("match a {}", "match a"),
             ("fn f() {}", "fn f()"),
             (
@@ -2684,6 +2698,52 @@ mod tests {
         assert!(parse_body("if c // {\n}").is_err());
         // `else` must still be on the same line as `}`.
         assert!(parse_body("if c {} // comment\nelse {}").is_err());
+    }
+
+    #[test]
+    fn parses_require() {
+        assert_eq!(
+            parse_body(
+                "
+                require !a & b else {
+                    return
+                }
+                "
+            ),
+            Ok(vec![stmt_node(StmtKind::Require {
+                cond: *bin(not(var("a")), BinOp::And, var("b")),
+                else_block: vec![stmt_node(StmtKind::Return(None))],
+            })])
+        );
+        assert_eq!(
+            parse_body("require c else {}"),
+            Ok(vec![stmt_node(StmtKind::Require {
+                cond: *var("c"),
+                else_block: vec![],
+            })])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_require() {
+        for src in [
+            // Missing `else`, block or condition.
+            "require c {}",
+            "require c",
+            "require c else",
+            "require else {}",
+            // `else` must be on the same line as the condition, and `{` on
+            // the same line as `else`.
+            "require c\nelse {}",
+            "require c else\n{}",
+            // It has only an `else` block, so no `else if`.
+            "require c else if d {}",
+            "require c {} else {}",
+            // `require` is a keyword.
+            "require = 1",
+        ] {
+            assert!(parse_body(src).is_err(), "{src:?} should not parse");
+        }
     }
 
     #[test]

@@ -465,6 +465,10 @@ pub enum StmtKind {
         then_block: Block,
         else_block: Option<Block>,
     },
+    /// `require cond else { ... }`: runs the `else` block if `cond` is
+    /// false, like an `if !cond`. The `else` block must not finish, such as
+    /// by returning, so the code after it only runs if `cond` is true.
+    Require { cond: Expr, else_block: Block },
     /// A function, which can be a `primitive fn` at the top level of the
     /// standard library, such as `exit`.
     Fn(Function),

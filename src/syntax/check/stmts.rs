@@ -102,7 +102,8 @@ impl<'a> Checker<'a> {
     /// every path, which it does if it evaluates a `Never`, since that never
     /// finishes. An `if` does if both of its blocks do, so one without an
     /// `else` never does, and a `match` does if every arm does, which is
-    /// enough since every value is matched.
+    /// enough since every value is matched. A `require` doesn't, since its
+    /// condition can be true, so the code after it is what returns.
     pub(super) fn stmt(&mut self, stmt: &'a Stmt) -> (Option<ir::Stmt>, bool) {
         match &stmt.kind {
             StmtKind::Use(_)
@@ -174,14 +175,7 @@ impl<'a> Checker<'a> {
                 then_block,
                 else_block,
             } => {
-                let cond_span = cond.span;
-                let (cond, never) = self.evaluating(|checker| checker.expr(cond));
-                if let Some(found) = &cond.ty
-                    && *found != self.std_type("Bool")
-                {
-                    self.error(cond_span, CheckError::ConditionNotBool(found.clone()));
-                }
-
+                let (cond, never) = self.condition(cond, "if");
                 let (then_block, then_returns) = self.block(then_block);
                 let (else_block, else_returns) = match else_block {
                     Some(else_block) => self.block(else_block),
@@ -193,6 +187,22 @@ impl<'a> Checker<'a> {
                     else_block,
                 };
                 (Some(lowered), never || then_returns && else_returns)
+            }
+            // Compiles to an `if` that does nothing when `cond` is true.
+            StmtKind::Require { cond, else_block } => {
+                let (cond, never) = self.condition(cond, "require");
+                let (else_block, else_returns) = self.block(else_block);
+                // Once the condition is known to be `Never`, the `else` block
+                // can never run, so it doesn't matter whether it finishes.
+                if !never && !else_returns {
+                    self.error(stmt.span, CheckError::RequireElseFinishes);
+                }
+                let lowered = ir::Stmt::If {
+                    cond: cond.expr,
+                    then_block: vec![],
+                    else_block,
+                };
+                (Some(lowered), never)
             }
             // Inside functions, functions and groups are only visible after
             // they're declared.
@@ -285,6 +295,18 @@ impl<'a> Checker<'a> {
                 (Some(ir::Stmt::Expr(found.expr)), never)
             }
         }
+    }
+    /// Checks the condition of the statement starting with `keyword`, which
+    /// must be a `Bool`, also returning whether it evaluates a `Never`.
+    pub(super) fn condition(&mut self, cond: &Expr, keyword: &'static str) -> (Typed, bool) {
+        let checked = self.evaluating(|checker| checker.expr(cond));
+        if let Some(found) = &checked.0.ty
+            && *found != self.std_type("Bool")
+        {
+            let found = found.clone();
+            self.error(cond.span, CheckError::ConditionNotBool { keyword, found });
+        }
+        checked
     }
     /// Checks expressions with `check`, also returning whether they evaluate
     /// a `Never`.

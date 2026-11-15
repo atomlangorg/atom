@@ -94,8 +94,12 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// An `if` condition was not a `Bool`.
-    ConditionNotBool(Type),
+    /// An `if` or `require` condition, whose keyword it holds, was not a
+    /// `Bool`.
+    ConditionNotBool { keyword: &'static str, found: Type },
+    /// A `require`'s `else` block can finish, so the code after the
+    /// `require` would run even though its condition is false.
+    RequireElseFinishes,
     /// An explicit type named a type that doesn't exist.
     UnknownType(String),
     /// A value or function was used as a type.
@@ -473,9 +477,14 @@ impl fmt::Display for CheckError {
                 f,
                 "cannot assign `{found}` to `{name}`, which has type `{expected}`"
             ),
-            Self::ConditionNotBool(found) => {
-                write!(f, "`if` condition must be `Bool`, found `{found}`")
+            Self::ConditionNotBool { keyword, found } => {
+                write!(f, "`{keyword}` condition must be `Bool`, found `{found}`")
             }
+            Self::RequireElseFinishes => write!(
+                f,
+                "the `else` of `require` must not finish, so it needs to `return` \
+                 or call a function that returns `Never`, such as `exit()`, on every path"
+            ),
             Self::UnknownType(name) => write!(f, "unknown type `{name}`"),
             Self::NotAFunction(name) => write!(f, "`{name}` is not a function"),
             Self::NotAType(name) => write!(f, "`{name}` is not a type"),

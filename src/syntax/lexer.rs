@@ -93,6 +93,8 @@ pub enum Token<'src> {
     If,
     #[token("else")]
     Else,
+    #[token("require")]
+    Require,
     #[token("fn")]
     Fn,
     #[token("return")]
@@ -256,6 +258,7 @@ impl fmt::Display for Token<'_> {
             Self::Var => write!(f, "var"),
             Self::If => write!(f, "if"),
             Self::Else => write!(f, "else"),
+            Self::Require => write!(f, "require"),
             Self::Fn => write!(f, "fn"),
             Self::Return => write!(f, "return"),
             Self::Group => write!(f, "group"),
@@ -499,6 +502,10 @@ mod tests {
                 Token::Else,
                 Token::Ident("elsewhere"),
             ]
+        );
+        assert_eq!(
+            lex("require required"),
+            vec![Token::Require, Token::Ident("required")]
         );
     }
 
