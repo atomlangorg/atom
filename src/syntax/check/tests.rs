@@ -468,11 +468,11 @@ fn rejects_comparing_different_types() {
 
 #[test]
 fn rejects_comparing_other_types() {
-    // `Void` doesn't implement `Equal`.
+    // `Unit` doesn't implement `Equal`.
     let incomparable = |op| CheckError::NotImplemented {
         op,
         trait_name: "Equal",
-        found: ty("Void"),
+        found: ty("Unit"),
     };
     assert_eq!(
         check_body("let x = () == ()"),
@@ -511,7 +511,7 @@ fn rejects_ordering_other_types() {
         Err(vec![CheckError::NotImplemented {
             op: ">",
             trait_name: "Compare",
-            found: ty("Void"),
+            found: ty("Unit"),
         }])
     );
     assert_eq!(
@@ -608,7 +608,7 @@ fn comparisons_with_unknown_operands_do_not_cascade() {
             CheckError::NotImplemented {
                 op: "==",
                 trait_name: "Equal",
-                found: ty("Void"),
+                found: ty("Unit"),
             },
             CheckError::Undeclared("y".to_string()),
         ])
@@ -804,7 +804,7 @@ fn std_types_are_groups() {
             group Wrapper {
                 let int: Int
                 let bool: Bool
-                let void: Void
+                let unit: Unit
             }
             fn unwrap(wrapper: Wrapper) -> Wrapper {
                 return wrapper
@@ -1353,22 +1353,22 @@ fn rejects_calling_undeclared_or_non_functions() {
 }
 
 #[test]
-fn functions_without_return_type_return_void() {
+fn functions_without_return_type_return_unit() {
     assert_eq!(
         messages(
             "
             fn f() {}
             let x = f()
-            let y: Void = x
+            let y: Unit = x
             let z = 1 + f()
             let w: Int = f()
             if f() {}
             "
         ),
         [
-            "operator `+` expects `Int`, found `Void`",
-            "cannot assign `Void` to `w`, which has type `Int`",
-            "`if` condition must be `Bool`, found `Void`",
+            "operator `+` expects `Int`, found `Unit`",
+            "cannot assign `Unit` to `w`, which has type `Int`",
+            "`if` condition must be `Bool`, found `Unit`",
         ]
     );
 }
@@ -1411,25 +1411,25 @@ fn rejects_wrong_return_values() {
         [
             "`a` must return `Int`, found `Bool`",
             "`b` must return a value of type `Int`",
-            "`c` must return `Void`, found `Int`",
+            "`c` must return `Unit`, found `Int`",
         ]
     );
 }
 
 #[test]
-fn explicit_void_is_the_same_as_no_return_type() {
+fn explicit_unit_is_the_same_as_no_return_type() {
     assert_eq!(
         check_body(
             "
-            fn a() -> Void {}
+            fn a() -> Unit {}
             fn b() {}
-            fn c(flag: Bool) -> Void {
+            fn c(flag: Bool) -> Unit {
                 if flag {
                     return
                 }
             }
-            let x: Void = a()
-            let y: Void = b()
+            let x: Unit = a()
+            let y: Unit = b()
             "
         ),
         Ok(())
@@ -1437,12 +1437,12 @@ fn explicit_void_is_the_same_as_no_return_type() {
 }
 
 #[test]
-fn void_functions_can_return_void_values() {
+fn unit_functions_can_return_unit_values() {
     assert_eq!(
         check_body(
             "
             fn log() {}
-            fn wrapper() -> Void {
+            fn wrapper() -> Unit {
                 return log()
             }
             fn other() {
@@ -1455,11 +1455,11 @@ fn void_functions_can_return_void_values() {
 }
 
 #[test]
-fn void_can_be_used_like_other_types() {
+fn unit_can_be_used_like_other_types() {
     assert_eq!(
         check_body(
             "
-            fn take(value: Void) -> Void {
+            fn take(value: Unit) -> Unit {
                 return value
             }
             fn nothing() {}
@@ -1469,13 +1469,13 @@ fn void_can_be_used_like_other_types() {
         Ok(())
     );
     assert_eq!(
-        messages("fn take(value: Void) {}\ntake(value: 1)"),
-        ["argument `value` of `take` expects `Void`, found `Int`"]
+        messages("fn take(value: Unit) {}\ntake(value: 1)"),
+        ["argument `value` of `take` expects `Unit`, found `Int`"]
     );
 }
 
 #[test]
-fn non_void_function_cannot_return_void() {
+fn non_unit_function_cannot_return_unit() {
     assert_eq!(
         messages(
             "
@@ -1485,7 +1485,7 @@ fn non_void_function_cannot_return_void() {
             }
             "
         ),
-        ["`f` must return `Int`, found `Void`"]
+        ["`f` must return `Int`, found `Unit`"]
     );
 }
 
@@ -1557,8 +1557,8 @@ fn evaluating_never_anywhere_in_a_statement_ends_its_path() {
     // finish being evaluated, and they're never called.
     let src = "
         choice Answer {
-            yes: Void
-            no: Void
+            yes: Unit
+            no: Unit
         }
         fn describe(_ never: Never) -> Int {
             match never {}
@@ -1690,13 +1690,13 @@ fn groups_can_be_used_as_types() {
 }
 
 #[test]
-fn accepts_empty_and_void_groups() {
+fn accepts_empty_and_unit_groups() {
     assert_eq!(
         check_body(
             "
             group Empty {}
             group Nothing {
-                let value: Void
+                let value: Unit
                 let empty: Empty
             }
             "
@@ -3057,8 +3057,8 @@ fn errors_point_at_the_first_line_of_statements_with_blocks() {
         pointed_at_top(
             "
             choice Answer {
-                yes: Void
-                no: Void
+                yes: Unit
+                no: Unit
             }
             fn f(answer: Answer) {
                 match answer {
@@ -3223,7 +3223,7 @@ fn missing_types_that_were_not_written_point_at_their_declaration() {
     assert_eq!(
         pointed_at_top(
             "
-            let Void = 1
+            let Unit = 1
             fn f() {}
             "
         ),
@@ -3430,7 +3430,7 @@ fn groups_are_only_constructed_in_their_own_file() {
 #[test]
 fn only_literals_create_ints_and_bools() {
     assert_eq!(
-        check_body("let v: Void = ()\nlet w: void::Void = ()"),
+        check_body("let v: Unit = ()\nlet w: unit::Unit = ()"),
         Ok(())
     );
     assert_eq!(
@@ -4521,7 +4521,7 @@ fn self_type_is_the_type_of_its_impl() {
         }
         choice Shape {
             circle: Int
-            dot: Void
+            dot: Unit
         }
 
         impl Point {
@@ -4900,7 +4900,7 @@ fn inferred_aliases_cannot_be_used_in_signatures() {
             }}
         }}
 
-        impl Void with Combine {{}}
+        impl Unit with Combine {{}}
         "
     );
     // A trait's alias that none of its functions use can't be inferred,
@@ -4917,7 +4917,7 @@ fn inferred_aliases_cannot_be_used_in_signatures() {
             inferred("Rhs"),
             inferred("Rhs"),
             "`impl Bool with Make` must give `alias Unused`, since it can't be inferred from the `impl`'s functions".to_string(),
-            "`impl Void with Combine` is missing `fn combine(with rhs: Rhs) -> Output`".to_string(),
+            "`impl Unit with Combine` is missing `fn combine(with rhs: Rhs) -> Output`".to_string(),
         ]
     );
 }
@@ -5065,12 +5065,12 @@ fn impls_use_default_trait_functions() {
     // defaults, and use `Self` and the `impl`'s aliases.
     let src = "
         trait Size {
-            alias Unit
+            alias Amount
 
-            fn size() -> Unit
-            static fn zero() -> Unit
+            fn size() -> Amount
+            static fn zero() -> Amount
 
-            fn doubled() -> Unit {
+            fn doubled() -> Amount {
                 return self.size() + self.size()
             }
 
@@ -5079,7 +5079,7 @@ fn impls_use_default_trait_functions() {
             }
 
             fn same() -> Self {
-                let unit: Unit = self.doubled()
+                let amount: Amount = self.doubled()
                 return self
             }
         }
@@ -5137,14 +5137,14 @@ fn impls_can_implement_default_trait_functions_themselves() {
             }
         }
 
-        impl Void with Describe {}
+        impl Unit with Describe {}
         ";
     // Only functions without a default must be implemented.
     assert_eq!(
         messages_top(src),
         [
             "trait `Describe` declares this function as `fn doubled() -> Int`",
-            "`impl Void with Describe` is missing `fn size() -> Int`",
+            "`impl Unit with Describe` is missing `fn size() -> Int`",
         ]
     );
 }
@@ -5670,7 +5670,7 @@ fn project_files_can_share_names_with_stdlib_files() {
 #[test]
 fn programs_import_the_stdlib_without_a_use() {
     assert_eq!(
-        check_top("let x: Void = ()\nlet y: Bool = true\nlet z: int::Int = 1"),
+        check_top("let x: Unit = ()\nlet y: Bool = true\nlet z: int::Int = 1"),
         Ok(())
     );
 }
@@ -6042,15 +6042,15 @@ fn importing_a_module_and_its_files_is_harmless() {
 }
 
 #[test]
-fn creates_void_values() {
+fn creates_unit_values() {
     assert_eq!(
         check_top(
             "
-            let a: Void = ()
+            let a: Unit = ()
             fn nothing() {}
-            let b: Void = nothing()
+            let b: Unit = nothing()
             let c: () = nothing()
-            fn f() -> void::Void {
+            fn f() -> unit::Unit {
                 return ()
             }
             "
@@ -6058,10 +6058,10 @@ fn creates_void_values() {
         Ok(())
     );
     assert_eq!(
-        messages_top("let a: Int = ()\nlet b: Int = Void.new()"),
+        messages_top("let a: Int = ()\nlet b: Int = Unit.new()"),
         [
             "cannot assign `()` to `a`, which has type `Int`",
-            "`Void` has no static function `new`",
+            "`Unit` has no static function `new`",
         ]
     );
 }
@@ -6141,8 +6141,8 @@ fn unknown_impl_types_do_not_report_constructors() {
 const SHAPE: &str = "
     choice Shape {
         circle: Int
-        empty: Void
-        nothing: Void
+        empty: Unit
+        nothing: Unit
     }
     ";
 
@@ -6156,7 +6156,7 @@ fn accepts_choices() {
         let c: Shape = Shape.nothing.new(())
         fn f() -> Shape {{
             choice Inner {{
-                only: Void
+                only: Unit
             }}
             let inner: Inner = Inner.only.new(())
             return Shape.circle.new(1 + 2)
@@ -6221,17 +6221,17 @@ fn rejects_wrong_option_values() {
             let c = Shape.circle.new()
             let d = Shape.circle.new(1, 2)
             let e = Shape.empty.new(1)
-            // An option holding `Void` can leave it out.
+            // An option holding `Unit` can leave it out.
             let f = Shape.empty.new()
             "
         )),
         [
             "argument `value` of `ChoiceOption<Shape, Int>.new` expects `Int`, found `Bool`",
             "argument to `ChoiceOption<Shape, Int>.new` should not have a label, found `radius`",
-            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Unit`, but its \
              `Value` is `Int`",
             "`ChoiceOption<Shape, Int>.new` takes 1 argument, found 2",
-            "argument `value` of `ChoiceOption<Shape, Void>.new` expects `Void`, found `Int`",
+            "argument `value` of `ChoiceOption<Shape, Unit>.new` expects `Unit`, found `Int`",
         ]
     );
 }
@@ -6249,7 +6249,7 @@ fn naming_an_option_does_not_create_the_choice() {
         )),
         [
             "cannot assign `ChoiceOption<Shape, Int>` to `a`, which has type `Shape`",
-            "cannot assign `ChoiceOption<Shape, Void>` to `b`, which has type `Shape`",
+            "cannot assign `ChoiceOption<Shape, Unit>` to `b`, which has type `Shape`",
             "cannot assign `ChoiceOption<Shape, Int>` to `c`, which has type `ChoiceOption<Shape, Bool>`",
         ]
     );
@@ -6261,7 +6261,7 @@ fn options_are_values_with_tags() {
         choice Shape {
             square: Int
             circle: Bool
-            other: Void
+            other: Unit
         }
 
         let a: ChoiceOption<Shape, Int> = Shape.square
@@ -6269,7 +6269,7 @@ fn options_are_values_with_tags() {
         let c: Shape = Shape.square.new(5)
         let d: ChoiceTag<Shape> = ChoiceTag.new(Shape.square.new(5))
 
-        let n: ChoiceOption<Shape, Void> = Shape.other
+        let n: ChoiceOption<Shape, Unit> = Shape.other
         let o: ChoiceTag<Shape> = Shape.other.tag()
         let p: Shape = Shape.other.new(())
         let q: ChoiceTag<Shape> = ChoiceTag.new(Shape.other.new(()))
@@ -6325,7 +6325,7 @@ fn options_are_not_called() {
         )),
         [
             "`Shape.circle` is `ChoiceOption<Shape, Int>`, which doesn't implement `Call`, so it can't be called",
-            "`Shape.empty` is `ChoiceOption<Shape, Void>`, which doesn't implement `Call`, so it can't be called",
+            "`Shape.empty` is `ChoiceOption<Shape, Unit>`, which doesn't implement `Call`, so it can't be called",
             "`circle` is `ChoiceOption<Shape, Int>`, which doesn't implement `Call`, so it can't be called",
             "`make` is `ChoiceOption<Shape, Int>`, which doesn't implement `Call`, so it can't be called",
             "`ChoiceOption<Shape, Int>` has no field or method `call`",
@@ -6347,7 +6347,7 @@ fn rejects_wrong_values_for_stored_options() {
                 let d = circle.new(1, 2)
                 let empty = Shape.empty
                 let e = empty.new(1)
-                // An option holding `Void` can leave it out.
+                // An option holding `Unit` can leave it out.
                 let f = empty.new()
             }}
             "
@@ -6355,10 +6355,10 @@ fn rejects_wrong_values_for_stored_options() {
         [
             "argument `value` of `ChoiceOption<Shape, Int>.new` expects `Int`, found `Bool`",
             "argument to `ChoiceOption<Shape, Int>.new` should not have a label, found `radius`",
-            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Unit`, but its \
              `Value` is `Int`",
             "`ChoiceOption<Shape, Int>.new` takes 1 argument, found 2",
-            "argument `value` of `ChoiceOption<Shape, Void>.new` expects `Void`, found `Int`",
+            "argument `value` of `ChoiceOption<Shape, Unit>.new` expects `Unit`, found `Int`",
         ]
     );
 }
@@ -6402,13 +6402,13 @@ fn options_take_their_value_as_one_argument() {
 }
 
 #[test]
-fn values_taking_void_are_called_without_arguments() {
-    // The arguments are built into `()`, which is `Void`.
+fn values_taking_unit_are_called_without_arguments() {
+    // The arguments are built into `()`, which is `Unit`.
     let runner = "
         group Runner {}
 
         impl Runner with Call {
-            fn call(input: Void) -> Int {
+            fn call(input: Unit) -> Int {
                 return 1
             }
         }
@@ -6442,7 +6442,7 @@ fn options_of_generic_choices_infer_their_arguments() {
     let src = format!(
         "
         {GENERICS}
-        let a: ChoiceOption<Optional<Int>, Void> = Optional.none
+        let a: ChoiceOption<Optional<Int>, Unit> = Optional.none
         let b: ChoiceOption<Optional<Int>, Int> = Optional.some
         let c: Optional<Int> = Optional.none.new(())
         let d: Optional<Int> = Optional<Int>.some.new(1)
@@ -6460,7 +6460,7 @@ fn options_of_generic_choices_infer_their_arguments() {
             "
         )),
         [
-            "cannot assign `ChoiceOption<Optional<Int>, Void>` to `a`, which has type `Optional<Int>`",
+            "cannot assign `ChoiceOption<Optional<Int>, Unit>` to `a`, which has type `Optional<Int>`",
             "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
         ]
     );
@@ -6486,7 +6486,7 @@ fn tags_can_be_compared() {
             "
             {SHAPE}
             choice Other {{
-                only: Void
+                only: Unit
             }}
             let a = Shape.empty.tag() == Other.only.tag()
             let b = Shape.empty.tag() == Shape.empty
@@ -6496,7 +6496,7 @@ fn tags_can_be_compared() {
         )),
         [
             "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceTag<Other>`",
-            "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceOption<Shape, Void>`",
+            "operator `==` expects `ChoiceTag<Shape>`, found `ChoiceOption<Shape, Unit>`",
             "cannot assign `Int` to `c`, which has type `ChoiceTag<Shape>`",
             "cannot assign `ChoiceTag<Other>` to `d`, which has type `ChoiceTag<Shape>`",
         ]
@@ -6523,7 +6523,7 @@ fn options_and_tags_cannot_be_matched() {
         )),
         [
             "`match` is on `ChoiceTag<Shape>`, so it can't match an option of `Shape`",
-            "`match` is on `ChoiceOption<Shape, Void>`, so it can't match an option of `Shape`",
+            "`match` is on `ChoiceOption<Shape, Unit>`, so it can't match an option of `Shape`",
         ]
     );
 }
@@ -6596,7 +6596,7 @@ fn tag_types_can_be_used_anywhere() {
 
         fn f() {
             choice Local {
-                only: Void
+                only: Unit
                 tag: ChoiceTag<Local>
             }
             let tag: ChoiceTag<Local> = Local.only.tag()
@@ -6604,11 +6604,11 @@ fn tag_types_can_be_used_anywhere() {
         }
 
         choice Shape {
-            empty: Void
+            empty: Unit
         }
 
         choice Later {
-            empty: Void
+            empty: Unit
         }
         ";
     assert_eq!(check_top(src), Ok(()));
@@ -6621,7 +6621,7 @@ fn rejects_wrong_values_for_tags() {
             "
             {SHAPE}
             choice Other {{
-                only: Void
+                only: Unit
             }}
             let a = ChoiceTag<Shape>.new(Other.only.new(()))
             let b = ChoiceTag<Shape>.new(of: Shape.empty.new(()))
@@ -6690,7 +6690,7 @@ fn choices_have_no_reserved_names() {
     let src = "
         choice Shape {
             tag: Int
-            Tag: Void
+            Tag: Unit
         }
 
         impl Shape {
@@ -6797,14 +6797,14 @@ fn rejects_recursive_choices() {
         check_top(
             "
             choice List {
-                empty: Void
+                empty: Unit
                 node: List
             }
             group Node {
                 let next: Link
             }
             choice Link {
-                none: Void
+                none: Unit
                 some: Node
             }
             "
@@ -7144,7 +7144,7 @@ fn tuples_can_be_in_any_type() {
             }
             choice Path {
                 line: (from: Line, to: Line)
-                none: Void
+                none: Unit
             }
             "
         ),
@@ -7213,7 +7213,7 @@ fn matches_report_the_values_they_miss() {
         {SHAPE}
         choice Switch {{
             set: (isOn: Bool, count: Int)
-            unset: Void
+            unset: Unit
         }}
         fn f(pair: (a: Bool, b: Bool), shape: (_: Shape, _: Int), n: IntU8) {{
             match pair {{
@@ -7316,7 +7316,7 @@ fn patterns_must_match_their_types() {
             "`match` is on `(a: Bool, b: IntU8)`, so it can't match an option of `Shape`",
             "pattern `true` can't match `Int`",
             "pattern `(x: _)` can't match `Int`",
-            "pattern `1` can't match `Void`",
+            "pattern `1` can't match `Unit`",
             "`missing` is not declared",
         ]
     );
@@ -7500,9 +7500,9 @@ fn functions_are_values_of_type_fn() {
             let c: Fn<(_: Int, by: Int), Int> = scale
             let d: Fn<(to: Int), Int> = same
             let e: Fn<(_: (a: Int, b: Int)), Int> = sum
-            let g: Fn<(), Void> = nothing
+            let g: Fn<(), Unit> = nothing
             let i: Int = a(a: 1, b: 2) + b(3) + c(4, by: 5) + d(to: 6) + e((a: 7, b: 8))
-            let j: Void = g()
+            let j: Unit = g()
             let k: Int = add.call(input: (a: 1, b: 2))
             let pair = (a: 1, b: 2)
             let l: Int = add.call(input: pair) + sum(pair) + sum.call(input: (pair))
@@ -7803,7 +7803,7 @@ fn rejects_generic_primitives_outside_the_stdlib() {
 /// Generic types for generics tests.
 const GENERICS: &str = "
     choice Optional<T> {
-        none: Void
+        none: Unit
         some: T
     }
 
@@ -7828,7 +7828,7 @@ fn generic_arguments_are_inferred_from_calls() {
         "
         {GENERICS}
         choice Shape {{
-            empty: Void
+            empty: Unit
         }}
 
         group Pair<A, B> {{
@@ -7891,7 +7891,7 @@ fn generic_arguments_are_inferred_from_calls() {
 fn inferred_arguments_take_types_from_those_already_known() {
     let src = "
         choice Optional<T> {
-            none: Void
+            none: Unit
             some: T
         }
 
@@ -7943,7 +7943,7 @@ fn rejects_calls_whose_generic_arguments_cannot_be_inferred() {
             }}
 
             choice Shape {{
-                empty: Void
+                empty: Unit
             }}
 
             fn f() {{
@@ -8126,7 +8126,7 @@ fn generic_arguments_are_inferred_for_static_members_used_as_values() {
         "
         {GENERICS}
         fn f() {{
-            let none: ChoiceOption<Optional<Int>, Void> = Optional.none
+            let none: ChoiceOption<Optional<Int>, Unit> = Optional.none
             let of: Fn<(_: Int), Box<Int>> = Box.of
             let a = Optional.some.new(1)
             let b: Optional<Bool> = Optional.none.new(())
@@ -8213,7 +8213,7 @@ fn rejects_members_without_a_type_that_cannot_be_inferred() {
         )),
         [
             "the type of `.none` can't be inferred here, so it must be given, as in `Type.none`",
-            "cannot assign `ChoiceOption<Option<Int>, Void>` to `b`, which has type `Option<Int>`",
+            "cannot assign `ChoiceOption<Option<Int>, Unit>` to `b`, which has type `Option<Int>`",
             "`ChoiceTag<Option<Int>>` has no static function `none`",
             "`Option<Int>` has no option or static function `missing`",
             "argument `value` of `ChoiceOption<Option<Int>, Int>.new` expects `Int`, found `Bool`",
@@ -8383,7 +8383,7 @@ fn generic_types_cannot_contain_themselves() {
         }
 
         choice Optional<T> {
-            none: Void
+            none: Unit
             some: T
         }
 
@@ -8687,7 +8687,7 @@ fn type_constraints_must_be_on_generic_parameters_and_types() {
 }
 
 #[test]
-fn options_holding_void_can_create_their_choice_without_a_value() {
+fn options_holding_unit_can_create_their_choice_without_a_value() {
     assert_eq!(
         check_top(&format!(
             "
@@ -8714,9 +8714,9 @@ fn options_holding_void_can_create_their_choice_without_a_value() {
             "
         )),
         [
-            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Unit`, but its \
              `Value` is `Int`",
-            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Void`, but its \
+            "`ChoiceOption<Shape, Int>` only has `new` where `Self.Value == Unit`, but its \
              `Value` is `Int`",
         ]
     );
@@ -9363,7 +9363,7 @@ fn literals_take_their_type_from_where_theyre_used() {
 
         choice Level {
             exact: IntU8
-            none: Void
+            none: Unit
         }
 
         fn half(of byte: IntU8) -> IntU8 {

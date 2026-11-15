@@ -252,10 +252,10 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|value| self.expr_as(value, returns.as_ref()));
 
-                // A bare `return` returns `Void`.
+                // A bare `return` returns `Unit`.
                 let function = name.to_string();
                 match (returns, found.as_ref().map(|found| &found.ty)) {
-                    (Some(expected), None) if expected != self.std_type("Void") => {
+                    (Some(expected), None) if expected != self.std_type("Unit") => {
                         self.error(
                             stmt.span,
                             CheckError::MissingReturnValue { function, expected },
@@ -275,7 +275,7 @@ impl<'a> Checker<'a> {
                 }
                 let lowered = match found {
                     Some(found) => found.expr,
-                    None => self.void(),
+                    None => self.unit(),
                 };
                 (Some(ir::Stmt::Return(lowered)), true)
             }

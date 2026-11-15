@@ -194,10 +194,10 @@ impl<'a> Checker<'a> {
         self.cx.impl_aliases = outer_impl_aliases;
         self.cx.constraints = outer_constraints;
 
-        // A `Void` function can finish without an explicit `return`.
+        // A `Unit` function can finish without an explicit `return`.
         if !returns_always {
             match &returns {
-                Some(expected) if *expected != self.std_type("Void") => {
+                Some(expected) if *expected != self.std_type("Unit") => {
                     self.error(
                         span,
                         CheckError::MissingReturn {
@@ -206,7 +206,7 @@ impl<'a> Checker<'a> {
                         },
                     );
                 }
-                _ => lowered.push(ir::Stmt::Return(self.void())),
+                _ => lowered.push(ir::Stmt::Return(self.unit())),
             }
         }
 
@@ -336,8 +336,8 @@ impl<'a> Checker<'a> {
     /// functions.
     ///
     /// The type of an `impl` whose constraints say what some of its generic
-    /// type's parameters are, such as `ChoiceOption<Base, Void>` for `impl
-    /// ChoiceOption where Self.Value == Void`, is made from its generic type
+    /// type's parameters are, such as `ChoiceOption<Base, Unit>` for `impl
+    /// ChoiceOption where Self.Value == Unit`, is made from its generic type
     /// with those types, and its other parameters stand for themselves.
     pub(super) fn generic_context(&self) -> Option<usize> {
         let Some(Some(ty)) = &self.cx.impl_type else {

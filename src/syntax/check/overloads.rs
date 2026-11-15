@@ -211,10 +211,10 @@ impl<'a> Checker<'a> {
                 return Some(function.clone());
             }
         }
-        let void = self.std_type("Void");
+        let unit = self.std_type("Unit");
         let candidates = matching
             .iter()
-            .map(|(_, signature)| signature_text(name, signature, &void))
+            .map(|(_, signature)| signature_text(name, signature, &unit))
             .collect();
         let error = CheckError::AmbiguousOverload {
             function: shown,
@@ -226,12 +226,12 @@ impl<'a> Checker<'a> {
     /// Reports that no function called `name` that what's shown as `shown`
     /// at `span` could mean, which are `candidates`, takes its arguments.
     fn no_matching_overload(&mut self, shown: &str, name: &str, candidates: &[FnRef], span: Span) {
-        let void = self.std_type("Void");
+        let unit = self.std_type("Unit");
         let candidates = candidates
             .iter()
             .map(|function| {
                 let signature = self.signature_of(function, span);
-                signature_text(name, &signature, &void)
+                signature_text(name, &signature, &unit)
             })
             .collect();
         let error = CheckError::NoMatchingOverload {
@@ -300,8 +300,8 @@ pub(super) fn same_signature(a: &Signature, b: &Signature) -> bool {
 }
 
 /// How a function called `name` with `signature` is shown in messages, as in
-/// `fn new(_ value: Void) -> Shape`.
-fn signature_text(name: &str, signature: &Signature, void: &Type) -> String {
+/// `fn new(_ value: Unit) -> Shape`.
+fn signature_text(name: &str, signature: &Signature, unit: &Type) -> String {
     let params: Vec<_> = signature
         .params
         .iter()
@@ -320,7 +320,7 @@ fn signature_text(name: &str, signature: &Signature, void: &Type) -> String {
         })
         .collect();
     let returns = match &signature.returns {
-        Some(returns) if returns != void => format!(" -> {returns}"),
+        Some(returns) if returns != unit => format!(" -> {returns}"),
         _ => String::new(),
     };
     format!("fn {name}({}){returns}", params.join(", "))

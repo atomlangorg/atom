@@ -106,7 +106,7 @@ const STDLIB_FILES: [(&str, &str); 18] = [
     ("ints16", include_str!("../../stdlib/ints16.atom")),
     ("ints32", include_str!("../../stdlib/ints32.atom")),
     ("ints64", include_str!("../../stdlib/ints64.atom")),
-    ("void", include_str!("../../stdlib/void.atom")),
+    ("unit", include_str!("../../stdlib/unit.atom")),
     ("never", include_str!("../../stdlib/never.atom")),
     ("exit", include_str!("../../stdlib/exit.atom")),
     ("call", include_str!("../../stdlib/call.atom")),
@@ -1265,10 +1265,10 @@ impl<'a> Checker<'a> {
         locals.push(ty);
         locals.len() - 1
     }
-    /// Creates a `Void`, which has no fields.
-    fn void(&self) -> ir::Expr {
+    /// Creates a `Unit`, which has no fields.
+    fn unit(&self) -> ir::Expr {
         ir::Expr::Construct {
-            group: self.std_type("Void").id,
+            group: self.std_type("Unit").id,
             fields: vec![],
         }
     }

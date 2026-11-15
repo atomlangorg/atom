@@ -161,10 +161,10 @@ impl TypeName {
         Self::Named(Name::new(name))
     }
 
-    /// Whether this is written `Void`, which is what's meant where no type is
+    /// Whether this is written `Unit`, which is what's meant where no type is
     /// written.
-    pub fn is_void(&self) -> bool {
-        matches!(self, Self::Named(name) if name.file.is_none() && name.name == "Void")
+    pub fn is_unit(&self) -> bool {
+        matches!(self, Self::Named(name) if name.file.is_none() && name.name == "Unit")
     }
 }
 
@@ -476,7 +476,7 @@ pub enum StmtKind {
     ///
     /// Either can have a `where`, as in `impl Optional with Equal where
     /// Self.T == some Equal<Rhs = Self.T> { ... }` or `impl ChoiceOption
-    /// where Self.Value == Void { ... }`, so that it's only for the types
+    /// where Self.Value == Unit { ... }`, so that it's only for the types
     /// made from a generic type whose arguments meet its constraints.
     Impl {
         ty: Name,
@@ -549,8 +549,8 @@ pub struct Function {
     pub is_static: bool,
     pub name: String,
     pub params: Vec<TupleElement>,
-    /// The return type. `fn f()` is the same as `fn f() -> Void`,
-    /// so this is `Void` when no type is written.
+    /// The return type. `fn f()` is the same as `fn f() -> Unit`,
+    /// so this is `Unit` when no type is written.
     pub ret: TypeName,
     /// `None` for a `primitive fn`, which the compiler implements itself.
     /// In a `trait`, it's the default implementation, which an `impl` uses
@@ -572,7 +572,7 @@ pub struct Alias {
 }
 
 /// A constraint in an `impl`'s `where`, such as `Self.T == some Equal<Rhs =
-/// Self.T>` or `Self.T == Void`, which the generic parameter `ty` must meet.
+/// Self.T>` or `Self.T == Unit`, which the generic parameter `ty` must meet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constraint {
     pub ty: TypeName,
@@ -591,7 +591,7 @@ pub enum Bound {
         /// Each is written `Rhs = Self.T`, and always has a type.
         aliases: Vec<Alias>,
     },
-    /// `Void`: exactly this type, which it is in the `impl`.
+    /// `Unit`: exactly this type, which it is in the `impl`.
     Type(TypeName),
 }
 
@@ -626,7 +626,7 @@ pub struct Field {
     pub span: Span,
 }
 
-/// An option of a choice, such as `circle: Int` or `empty: Void`.
+/// An option of a choice, such as `circle: Int` or `empty: Unit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
     pub name: String,

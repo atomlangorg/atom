@@ -532,7 +532,7 @@ impl<'a> Checker<'a> {
                 })
                 .collect::<Option<_>>()?;
             // A tuple that's unchanged keeps the name it's used by, such as
-            // `Void` for `()`, and it's always read by the same names.
+            // `Unit` for `()`, and it's always read by the same names.
             let substituted = self.tuple_type(elements, Some(self.element_names(ty)));
             return Some(if substituted == *ty {
                 ty.clone()

@@ -15,6 +15,6 @@
  */
 
 // The return type of a function that doesn't return anything useful.
-// Functions without an explicit return type return `Void`, and it's created
+// Functions without an explicit return type return `Unit`, and it's created
 // with `()`.
-alias Void = ()
+alias Unit = ()

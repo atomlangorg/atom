@@ -92,12 +92,12 @@ fn is_comparison(expr: &Expr) -> bool {
     matches!(expr.kind, ExprKind::Binary(_, op, _) if op.is_comparison())
 }
 
-/// The type written `Void`, which is what's meant where no type is written, at
+/// The type written `Unit`, which is what's meant where no type is written, at
 /// `span`.
-fn void_type(span: Span) -> TypeName {
+fn unit_type(span: Span) -> TypeName {
     TypeName::Named(Name {
         span,
-        ..Name::new("Void")
+        ..Name::new("Unit")
     })
 }
 
@@ -711,14 +711,14 @@ where
     };
 
     // `name: Type`, which holds a value of that type, or `name`, which is
-    // the same as `name: Void`, so it holds nothing useful.
+    // the same as `name: Unit`, so it holds nothing useful.
     let option = ident
         .then(just(Token::Colon).ignore_then(type_name.clone()).or_not())
         .map_with(|(name, ty), e| {
             let span = Span::from(e.span());
             ChoiceOption {
                 name,
-                ty: ty.unwrap_or_else(|| void_type(span)),
+                ty: ty.unwrap_or_else(|| unit_type(span)),
                 span,
             }
         });
@@ -741,14 +741,14 @@ where
     // Written like a tuple type, as in `(to value: Int)`.
     let params = comma_list(element, Token::LParen, Token::RParen);
 
-    // `fn name(params) -> Type`, or `fn name(params)`, which returns `Void`.
+    // `fn name(params) -> Type`, or `fn name(params)`, which returns `Unit`.
     let signature = just(Token::Fn)
         .ignore_then(ident)
         .then(params)
         .then(just(Token::Arrow).ignore_then(type_name.clone()).or_not())
         .map_with(|((name, params), ret), e| {
             let span = Span::from(e.span());
-            let ret = ret.unwrap_or_else(|| void_type(span));
+            let ret = ret.unwrap_or_else(|| unit_type(span));
             (name, params, ret, span)
         })
         .boxed();
@@ -959,7 +959,7 @@ where
         .map(Member::Alias)
         .or(function_in(Place::Impl).map(Member::Function));
     // `Self.T == some Equal`, optionally giving the trait's aliases types, as
-    // in `some Equal<Rhs = Self.T>`, or `Self.T == Void`, for exactly that
+    // in `some Equal<Rhs = Self.T>`, or `Self.T == Unit`, for exactly that
     // type. `some` is a keyword anywhere in a constraint, as it is in types,
     // so it always starts a trait, but it can still be a name outside them,
     // such as an option's.
@@ -1388,7 +1388,7 @@ mod tests {
             panic!("expected a choice");
         };
         assert_eq!(text(src, options[0].span), "yes");
-        // Its `Void` is where it would be written.
+        // Its `Unit` is where it would be written.
         let TypeName::Named(name) = &options[0].ty else {
             panic!("expected a named type");
         };
@@ -1621,13 +1621,13 @@ mod tests {
     #[test]
     fn parses_generic_declarations() {
         assert_eq!(
-            parse("choice Optional<T> {\nnone: Void\nsome: T\n}\ngroup Pair<A, B> {}"),
+            parse("choice Optional<T> {\nnone: Unit\nsome: T\n}\ngroup Pair<A, B> {}"),
             Ok(vec![
                 stmt_node(StmtKind::Choice {
                     name: "Optional".to_string(),
                     params: vec!["T".to_string()],
                     options: vec![
-                        option("none", TypeName::new("Void")),
+                        option("none", TypeName::new("Unit")),
                         option("some", TypeName::new("T")),
                     ],
                 }),
@@ -2793,7 +2793,7 @@ mod tests {
                     param(None, None, "Int"),
                     param(Some("at"), None, "Int"),
                 ],
-                ret: TypeName::new("Void"),
+                ret: TypeName::new("Unit"),
                 body: Some(vec![]),
                 span: Span::default(),
             }))])
@@ -2820,7 +2820,7 @@ mod tests {
                 is_static: false,
                 name: "reset".to_string(),
                 params: vec![],
-                ret: TypeName::new("Void"),
+                ret: TypeName::new("Unit"),
                 body: Some(vec![
                     assign("count", expr_node(ExprKind::Int(0))),
                     stmt_node(StmtKind::Return(None))
@@ -2831,8 +2831,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_return_type_is_void() {
-        assert_eq!(parse("fn f() {}"), parse("fn f() -> Void {}"));
+    fn missing_return_type_is_unit() {
+        assert_eq!(parse("fn f() {}"), parse("fn f() -> Unit {}"));
     }
 
     #[test]
@@ -3024,7 +3024,7 @@ mod tests {
                 is_static: false,
                 name: "f".to_string(),
                 params: vec![],
-                ret: TypeName::new("Void"),
+                ret: TypeName::new("Unit"),
                 body: Some(vec![group_("Inner", vec![])]),
                 span: Span::default(),
             }))])
@@ -3107,7 +3107,7 @@ mod tests {
                 "
                 choice Shape {
                     circle: Int
-                    empty: Void
+                    empty: Unit
                     rectangle: (width: Int, height: Int)
                     nested: Optional<Int>
                 }
@@ -3117,7 +3117,7 @@ mod tests {
                 "Shape",
                 vec![
                     option("circle", TypeName::new("Int")),
-                    option("empty", TypeName::new("Void")),
+                    option("empty", TypeName::new("Unit")),
                     option(
                         "rectangle",
                         TypeName::Tuple(vec![
@@ -3154,21 +3154,21 @@ mod tests {
             Ok(vec![choice_("Never", vec![])])
         );
         assert_eq!(
-            parse_body("choice Unit { only: Void }"),
+            parse_body("choice Single { only: Unit }"),
             Ok(vec![choice_(
-                "Unit",
-                vec![option("only", TypeName::new("Void"))]
+                "Single",
+                vec![option("only", TypeName::new("Unit"))]
             )])
         );
-        // Without a type, it holds `Void`, like a function without a return
+        // Without a type, it holds `Unit`, like a function without a return
         // type returns it.
         assert_eq!(
-            parse_body("choice Unit { only }"),
-            parse_body("choice Unit { only: Void }")
+            parse_body("choice Single { only }"),
+            parse_body("choice Single { only: Unit }")
         );
         assert_eq!(
             parse_body("choice Optional<T> {\nnone\nsome: T\n}"),
-            parse_body("choice Optional<T> {\nnone: Void\nsome: T\n}")
+            parse_body("choice Optional<T> {\nnone: Unit\nsome: T\n}")
         );
         assert_eq!(
             parse_body(
@@ -3227,7 +3227,7 @@ mod tests {
                 is_static: false,
                 name: "f".to_string(),
                 params: vec![],
-                ret: TypeName::new("Void"),
+                ret: TypeName::new("Unit"),
                 body: Some(vec![choice_("Inner", vec![])]),
                 span: Span::default(),
             }))])
@@ -3479,7 +3479,7 @@ mod tests {
                     is_static: false,
                     name: "f".to_string(),
                     params: vec![],
-                    ret: TypeName::new("Void"),
+                    ret: TypeName::new("Unit"),
                     body: Some(vec![]),
                     span: Span::default(),
                 })),
@@ -3584,7 +3584,7 @@ mod tests {
                     is_static: false,
                     name: "wait".to_string(),
                     params: vec![param(Some("for"), Some("seconds"), "Int")],
-                    ret: TypeName::new("Void"),
+                    ret: TypeName::new("Unit"),
                     body: None,
                     span: Span::default(),
                 })),
@@ -4243,7 +4243,7 @@ mod tests {
                             is_static: false,
                             name: "rename".to_string(),
                             params: vec![param(Some("to"), Some("name"), "Int")],
-                            ret: TypeName::new("Void"),
+                            ret: TypeName::new("Unit"),
                             body: Some(vec![]),
                             span: Span::default(),
                         },
@@ -4436,7 +4436,7 @@ mod tests {
                             is_static: false,
                             name: "reset".to_string(),
                             params: vec![param(Some("to"), Some("value"), "Int")],
-                            ret: TypeName::new("Void"),
+                            ret: TypeName::new("Unit"),
                             body: None,
                             span: Span::default()
                         },
@@ -4522,7 +4522,7 @@ mod tests {
         };
         assert_eq!(
             parse(
-                "impl Pair where Self.A == Void, Self.B == Optional<Self.A> {}\n\
+                "impl Pair where Self.A == Unit, Self.B == Optional<Self.A> {}\n\
                  impl Pair where Self.A == Int, Self.B == some Equal {}"
             ),
             Ok(vec![
@@ -4530,7 +4530,7 @@ mod tests {
                     ty: Name::new("Pair"),
                     with: None,
                     constraints: vec![
-                        equal(param("A"), TypeName::new("Void")),
+                        equal(param("A"), TypeName::new("Unit")),
                         equal(
                             param("B"),
                             TypeName::Generic {

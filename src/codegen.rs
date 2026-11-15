@@ -20,7 +20,7 @@
 //! The primitive integer types are LLVM integers of their width, such as `i8`
 //! for `IntU8` and `IntS8`, since LLVM leaves signedness to the operations
 //! used on them. `Bool` is `i1`. An `Fn` is a pointer. Every group is an
-//! LLVM struct of its fields, so `Void` is `{}`. A choice is a struct of an
+//! LLVM struct of its fields, so `Unit` is `{}`. A choice is a struct of an
 //! `i32` tag, the index of its option, then space for the largest of its
 //! options' values, which they share. Every Atom function becomes an
 //! internal LLVM function, so only the C `main` is
@@ -405,7 +405,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .build_indirect_call(fn_type, pointer.into_pointer_value(), &args, "")?
             .try_as_basic_value()
             .basic()
-            .expect("every function returns a value, even if it's `Void`"))
+            .expect("every function returns a value, even if it's `Unit`"))
     }
 
     /// Builds `op` on `lhs` and `rhs`, which are signed integers if `signed`
@@ -594,7 +594,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .build_call(self.functions[*function], &args, "")?
                     .try_as_basic_value()
                     .basic()
-                    .expect("every function returns a value, even if it's `Void`")
+                    .expect("every function returns a value, even if it's `Unit`")
             }
             Expr::Function(index) => self.functions[*index]
                 .as_global_value()
@@ -1417,7 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn void_functions_can_finish_without_return() {
+    fn unit_functions_can_finish_without_return() {
         let src = "
             fn nothing() {}
 
@@ -1432,7 +1432,7 @@ mod tests {
                 nothing()
                 early(stop: true)
                 early(stop: false)
-                let void: Void = nothing()
+                let unit: Unit = nothing()
                 return 5
             }
             ";
@@ -1847,7 +1847,7 @@ mod tests {
     const SHAPE: &str = "
         choice Shape {
             circle: Int
-            empty: Void
+            empty: Unit
             flag: Bool
         }
         ";
@@ -1930,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn options_holding_void_create_their_choice_without_a_value() {
+    fn options_holding_unit_create_their_choice_without_a_value() {
         let src = format!(
             "
             {SHAPE}
@@ -2074,7 +2074,7 @@ mod tests {
     fn options_can_hold_tuples_when_stored() {
         let src = "
             choice Shape {
-                empty: Void
+                empty: Unit
                 pair: (a: Int, b: Int)
             }
 
@@ -2107,7 +2107,7 @@ mod tests {
             choice Thing {
                 first: Int
                 second: (a: Int, b: Int)
-                third: Void
+                third: Unit
             }
 
             fn value(of thing: Thing) -> Int {
@@ -2196,7 +2196,7 @@ mod tests {
     fn generic_arguments_inferred_from_calls_compile() {
         let src = "
             choice Optional<T> {
-                none: Void
+                none: Unit
                 some: T
             }
 
@@ -2251,7 +2251,7 @@ mod tests {
     fn generic_choices_have_options_and_tags() {
         let src = "
             choice Optional<T> {
-                none: Void
+                none: Unit
                 some: T
             }
 
@@ -2268,7 +2268,7 @@ mod tests {
 
             fn main() -> Int {
                 let some: ChoiceOption<Optional<Int>, Int> = Optional.some
-                let none: ChoiceOption<Optional<Int>, Void> = Optional.none
+                let none: ChoiceOption<Optional<Int>, Unit> = Optional.none
                 let a = unwrap(some.new(5), or: 0)
                 let b = unwrap(none.new(()), or: 7)
                 if ChoiceTag<Optional<Int>>.new(some.new(1)) == Optional<Int>.some.tag() {
@@ -2286,7 +2286,7 @@ mod tests {
             choice Shape {
                 square: Int
                 circle: Bool
-                other: Void
+                other: Unit
             }
 
             let a: ChoiceOption<Shape, Int> = Shape.square
@@ -2294,7 +2294,7 @@ mod tests {
             let c: Shape = Shape.square.new(5)
             let d: ChoiceTag<Shape> = ChoiceTag.new(Shape.square.new(5))
 
-            let n: ChoiceOption<Shape, Void> = Shape.other
+            let n: ChoiceOption<Shape, Unit> = Shape.other
             let o: ChoiceTag<Shape> = Shape.other.tag()
             let p: Shape = Shape.other.new(())
             let q: ChoiceTag<Shape> = ChoiceTag.new(Shape.other.new(()))
@@ -2375,7 +2375,7 @@ mod tests {
 
             fn main() -> Int {{
                 choice Local {{
-                    only: Void
+                    only: Unit
                 }}
                 let local = Local.only.new(())
                 let canvas = Canvas.of(keep(Shape.unit()))
@@ -2668,7 +2668,7 @@ mod tests {
                 return 7
             }
             ";
-        assert_eq!(run_executable("exit_in_void", src).code(), Some(1));
+        assert_eq!(run_executable("exit_in_unit", src).code(), Some(1));
 
         let src = "
             fn check(_ n: Int) -> Int {
@@ -3077,13 +3077,13 @@ mod tests {
         let src = "
             choice Inner {
                 circle: Int
-                empty: Void
+                empty: Unit
             }
 
             choice Shape {
                 circle: Int
                 pair: (left: Inner, right: Int)
-                empty: Void
+                empty: Unit
             }
 
             fn describe(_ point: (x: Int, y: Bool)) -> Int {
@@ -3181,7 +3181,7 @@ mod tests {
     fn generic_types_are_compiled_for_each_use() {
         let src = "
             choice Optional<T> {
-                none: Void
+                none: Unit
                 some: T
             }
 
@@ -3368,7 +3368,7 @@ mod tests {
         let src = "
             choice Maybe {
                 one: Fn<(_: Int), Int>
-                none: Void
+                none: Unit
             }
 
             group Tools {

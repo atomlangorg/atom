@@ -150,7 +150,7 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// `return` had no value in a function that doesn't return `Void`.
+    /// `return` had no value in a function that doesn't return `Unit`.
     MissingReturnValue { function: String, expected: Type },
     /// A returned value had the wrong type.
     ReturnTypeMismatch {
@@ -158,7 +158,7 @@ pub enum CheckError {
         expected: Type,
         found: Type,
     },
-    /// A function that doesn't return `Void` can finish without returning.
+    /// A function that doesn't return `Unit` can finish without returning.
     MissingReturn { function: String, expected: Type },
     /// A field or method was used that the receiver's type doesn't have.
     NoMember { ty: Type, member: String },

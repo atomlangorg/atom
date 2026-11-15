@@ -765,7 +765,7 @@ impl<'a> Checker<'a> {
     /// `member` of the generic type that `receiver` names without its
     /// arguments, used as a value, if they can be worked out from its type
     /// being `expected`, as in `Optional.none` where a
-    /// `ChoiceOption<Optional<Int>, Void>` is expected. It's for the code at
+    /// `ChoiceOption<Optional<Int>, Unit>` is expected. It's for the code at
     /// `span`.
     pub(super) fn inferred_member(
         &mut self,

@@ -23,7 +23,7 @@ use super::*;
 pub(super) fn signature_text(function: &Function) -> String {
     let params: Vec<_> = function.params.iter().map(ToString::to_string).collect();
     let static_ = if function.is_static { "static " } else { "" };
-    let returns = if function.ret.is_void() {
+    let returns = if function.ret.is_unit() {
         String::new()
     } else {
         format!(" -> {}", function.ret)
@@ -68,8 +68,8 @@ impl<'a> Checker<'a> {
             checker.define_constraints(constraints)
         });
         // The functions are the generic type's, but in the `impl`, `Self` is
-        // the type its constraints say it is, as in `ChoiceOption<Base, Void>`
-        // for `where Self.Value == Void`.
+        // the type its constraints say it is, as in `ChoiceOption<Base, Unit>`
+        // for `where Self.Value == Unit`.
         let owner = self_ty;
         let self_ty = owner
             .clone()

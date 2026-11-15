@@ -41,9 +41,9 @@ impl ChoiceOption {
     primitive fn tag() -> ChoiceTag<Self.Base>
 }
 
-// An option that holds `Void` can create its choice without being given
+// An option that holds `Unit` can create its choice without being given
 // `()`, as in `Shape.empty.new()`.
-impl ChoiceOption where Self.Value == Void {
+impl ChoiceOption where Self.Value == Unit {
     // Creates the choice as this option.
     fn new() -> Self.Base {
         return self.new(())
