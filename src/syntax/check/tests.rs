@@ -1800,6 +1800,12 @@ fn requires_return_on_every_path() {
 }
 
 #[test]
+#[should_panic(expected = "pointers must be at least 16 bits, not 8")]
+fn checking_needs_pointers_of_at_least_16_bits() {
+    Checker::new(8);
+}
+
+#[test]
 fn integers_convert_from_every_other_integer_type() {
     // Each type's name, whether it's signed, and the fewest and most bits
     // it can have. `IntS` and `IntU` are assumed to be at least 16 bits, with

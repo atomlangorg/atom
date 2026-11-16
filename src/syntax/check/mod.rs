@@ -211,9 +211,16 @@ impl fmt::Display for FileError {
     }
 }
 
+/// The fewest bits that pointers, and so `IntS` and `IntU`, can be. The
+/// standard library relies on it, since converting an integer of up to this
+/// many bits to `IntS` or `IntU` keeps its value, so computers with narrower
+/// pointers aren't supported.
+pub const MIN_POINTER_BITS: u32 = 16;
+
 /// Checks every file in a project, along with the standard library,
 /// returning the program they make up for a computer whose pointers are
-/// `pointer_bits` wide, which is how wide `IntS` and `IntU` are.
+/// `pointer_bits` wide, which is how wide `IntS` and `IntU` are. That must be
+/// at least `MIN_POINTER_BITS`.
 pub fn check(files: &[File], pointer_bits: u32) -> Result<ir::Program, Vec<FileError>> {
     let mut checker = Checker::new(pointer_bits);
     checker.add_stdlib();
@@ -779,7 +786,14 @@ struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     /// A checker for a computer whose pointers are `pointer_bits` wide.
+    ///
+    /// Panics if that's fewer than `MIN_POINTER_BITS`, since the standard
+    /// library would then be wrong about which conversions keep values.
     fn new(pointer_bits: u32) -> Self {
+        assert!(
+            pointer_bits >= MIN_POINTER_BITS,
+            "pointers must be at least {MIN_POINTER_BITS} bits, not {pointer_bits}"
+        );
         Self {
             pointer_bits,
             ..Self::default()

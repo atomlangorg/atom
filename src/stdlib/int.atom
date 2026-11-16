@@ -34,7 +34,8 @@
 // hold, as in `IntS8.new(big)`. `IntS` and `IntU` are treated as being at
 // least 16 bits, with no limit on how wide they can be, so which conversions
 // give an `Option` is the same on every CPU, including ones with pointers
-// wider than 64 bits.
+// wider than 64 bits. Programs can't be built for CPUs with narrower
+// pointers.
 
 // The integer to use unless another is needed. Integer literals are `Int`s
 // unless they're used as another integer type. It's `IntS`, so its width

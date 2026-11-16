@@ -57,16 +57,20 @@ use inkwell::{
 
 use crate::{
     ir::{Body, Expr, MatchArm, Pattern, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
-    syntax::ast::{BinOp, UnOp},
+    syntax::{
+        MIN_POINTER_BITS,
+        ast::{BinOp, UnOp},
+    },
 };
 
 /// The target machine for the computer the compiler is running on, which
 /// decides how values are laid out in memory, and which instructions are used.
+/// Its pointers must be at least `MIN_POINTER_BITS` wide.
 pub fn host_machine() -> Result<TargetMachine, EmitError> {
     Target::initialize_native(&InitializationConfig::default()).map_err(EmitError::Target)?;
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).map_err(|err| EmitError::Target(err.to_string()))?;
-    target
+    let machine = target
         .create_target_machine(
             &triple,
             &TargetMachine::get_host_cpu_name().to_string(),
@@ -75,7 +79,18 @@ pub fn host_machine() -> Result<TargetMachine, EmitError> {
             RelocMode::PIC,
             CodeModel::Default,
         )
-        .ok_or_else(|| EmitError::Target(format!("no target machine for {triple}")))
+        .ok_or_else(|| EmitError::Target(format!("no target machine for {triple}")))?;
+    check_pointer_bits(pointer_bits(&machine))?;
+    Ok(machine)
+}
+
+/// Fails if pointers that are `bits` wide are narrower than the standard
+/// library allows.
+fn check_pointer_bits(bits: u32) -> Result<(), EmitError> {
+    if bits < MIN_POINTER_BITS {
+        return Err(EmitError::PointersTooNarrow(bits));
+    }
+    Ok(())
 }
 
 /// How wide pointers are on `machine`, which is how wide `IntS` and `IntU`
@@ -144,6 +159,9 @@ pub fn write_executable(
 pub enum EmitError {
     /// LLVM couldn't compile for this computer.
     Target(String),
+    /// This computer's pointers are this many bits, which is fewer than
+    /// `MIN_POINTER_BITS`.
+    PointersTooNarrow(u32),
     /// LLVM couldn't optimise the module.
     Optimize(String),
     /// LLVM couldn't write the object file.
@@ -158,6 +176,11 @@ impl fmt::Display for EmitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Target(err) => write!(f, "couldn't compile for this computer: {err}"),
+            Self::PointersTooNarrow(bits) => write!(
+                f,
+                "this computer's pointers are {bits} bits, but `IntS` and `IntU` need \
+                 at least {MIN_POINTER_BITS}"
+            ),
             Self::Optimize(err) => write!(f, "couldn't optimise: {err}"),
             Self::Object(err) => write!(f, "couldn't write the object file: {err}"),
             Self::Link(err) => write!(f, "couldn't run `cc` to link: {err}"),
@@ -1073,6 +1096,18 @@ mod tests {
     fn traps(name: &str, src: &str) -> bool {
         const SIGABRT: i32 = 6;
         run_executable(name, src).signal() == Some(SIGABRT)
+    }
+
+    #[test]
+    fn pointers_must_be_at_least_16_bits() {
+        assert!(check_pointer_bits(16).is_ok());
+        assert!(check_pointer_bits(128).is_ok());
+        let error = check_pointer_bits(8).expect_err("8 bits is too few");
+        assert_eq!(
+            error.to_string(),
+            "this computer's pointers are 8 bits, but `IntS` and `IntU` need at least 16"
+        );
+        assert!(pointer_bits(&machine()) >= MIN_POINTER_BITS);
     }
 
     #[test]
