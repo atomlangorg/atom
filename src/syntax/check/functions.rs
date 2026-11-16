@@ -298,7 +298,8 @@ impl<'a> Checker<'a> {
                 let measure = match name {
                     "size" => ir::Measure::Size,
                     "stride" => ir::Measure::Stride,
-                    _ => ir::Measure::Alignment,
+                    "alignment" => ir::Measure::Alignment,
+                    _ => unreachable!("the arm only matches what `MemoryLayout` measures"),
                 };
                 ir::PrimitiveFn::Layout {
                     measure,
