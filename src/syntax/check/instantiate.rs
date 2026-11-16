@@ -207,7 +207,19 @@ impl<'a> Checker<'a> {
                 ir::Body::Primitive(ir::PrimitiveFn::Layout { ty, .. }) => {
                     *ty = self.concrete(*ty, &params, &state)?;
                 }
-                ir::Body::Primitive(_) => {}
+                // The rest only use the types of their locals and return
+                // value, which are already concrete.
+                ir::Body::Primitive(
+                    ir::PrimitiveFn::Exit
+                    | ir::PrimitiveFn::Binary { .. }
+                    | ir::PrimitiveFn::Unary(_)
+                    | ir::PrimitiveFn::CallFn
+                    | ir::PrimitiveFn::ChoiceTag
+                    | ir::PrimitiveFn::NewChoice
+                    | ir::PrimitiveFn::OptionTag
+                    | ir::PrimitiveFn::ConvertInt { .. }
+                    | ir::PrimitiveFn::TryConvertInt { .. },
+                ) => {}
             }
             if functions.len() <= index {
                 functions.resize_with(index + 1, || None);
