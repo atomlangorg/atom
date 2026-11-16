@@ -198,10 +198,16 @@ impl<'a> Checker<'a> {
                 *local = self.concrete(*local, &params, &state)?;
             }
             lowered.returns = self.concrete(lowered.returns, &params, &state)?;
-            if let ir::Body::Stmts(stmts) = &mut lowered.body {
-                for stmt in stmts {
-                    self.instantiate_stmt(stmt, &params, &mut state)?;
+            match &mut lowered.body {
+                ir::Body::Stmts(stmts) => {
+                    for stmt in stmts {
+                        self.instantiate_stmt(stmt, &params, &mut state)?;
+                    }
                 }
+                ir::Body::Primitive(ir::PrimitiveFn::Layout { ty, .. }) => {
+                    *ty = self.concrete(*ty, &params, &state)?;
+                }
+                ir::Body::Primitive(_) => {}
             }
             if functions.len() <= index {
                 functions.resize_with(index + 1, || None);

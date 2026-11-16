@@ -122,6 +122,21 @@ pub enum PrimitiveFn {
     /// the integer, for a value it can hold, and an option holding `Unit`,
     /// for one it can't.
     TryConvertInt { from_signed: bool, to_signed: bool },
+    /// `size`, `stride` or `alignment` on `MemoryLayout`, which measures the
+    /// type at `ty` in `Program::types`, in bytes, as an `Int`.
+    Layout { measure: Measure, ty: usize },
+}
+
+/// What `PrimitiveFn::Layout` measures about a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measure {
+    /// The bytes a value takes up, without padding after it.
+    Size,
+    /// The bytes between the starts of values next to each other in memory,
+    /// which is the size rounded up to the alignment.
+    Stride,
+    /// What a value's address is always a multiple of.
+    Alignment,
 }
 
 #[derive(Debug)]

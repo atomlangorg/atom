@@ -1,0 +1,37 @@
+/*
+ * Copyright 2026 George Elsham
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// How values of `Value` are laid out in memory, as in
+// `MemoryLayout<Int>.size()`. It has no values of its own, since it's only
+// for its static functions. The compiler decides each type's layout, so it
+// can differ between computers, such as `Int` being 8 bytes on a 64-bit
+// computer and 4 on a 32-bit one.
+choice MemoryLayout<Value> {}
+
+impl MemoryLayout {
+    // How many bytes a `Value` takes up, not counting any padding after it
+    // to keep the next one aligned.
+    static primitive fn size() -> Int
+
+    // How many bytes apart the starts of `Value`s are when they're next to
+    // each other in memory, which is `size` rounded up to a multiple of
+    // `alignment`.
+    static primitive fn stride() -> Int
+
+    // The number of bytes that the address of a `Value` is always a multiple
+    // of, which is a power of 2.
+    static primitive fn alignment() -> Int
+}

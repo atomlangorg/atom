@@ -56,7 +56,7 @@ use inkwell::{
 };
 
 use crate::{
-    ir::{Body, Expr, MatchArm, Pattern, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
+    ir::{Body, Expr, MatchArm, Measure, Pattern, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
     syntax::{
         MIN_POINTER_BITS,
         ast::{BinOp, UnOp},
@@ -430,7 +430,49 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 from_signed,
                 to_signed,
             } => self.try_convert_int(int(0), from_signed, to_signed, returns)?,
+            PrimitiveFn::Layout { measure, ty } => {
+                let llvm = &self.types[ty];
+                let bytes = match measure {
+                    Measure::Size => self.size(ty),
+                    Measure::Stride => self.target_data.get_abi_size(llvm),
+                    Measure::Alignment => self.target_data.get_abi_alignment(llvm).into(),
+                };
+                self.types[returns]
+                    .into_int_type()
+                    .const_int(bytes, false)
+                    .into()
+            }
         }))
+    }
+
+    /// How many bytes a value of the type at `ty` in `program.types` takes
+    /// up, without the padding LLVM puts after it to keep the next one
+    /// aligned, which its ABI size includes. That's up to the end of its last
+    /// field, or of the largest of a choice's options' values.
+    fn size(&self, ty: usize) -> u64 {
+        let llvm = self.types[ty];
+        let end_of = |index: u32, held: usize| {
+            let offset = self
+                .target_data
+                .offset_of_element(&llvm.into_struct_type(), index)
+                .expect("the field is in the struct");
+            offset + self.size(held)
+        };
+        match &self.program.types[ty] {
+            TypeDef::Primitive(_) => self.target_data.get_store_size(&llvm),
+            TypeDef::Group { fields, .. } => match fields.last() {
+                Some(&last) => end_of(fields.len() as u32 - 1, last),
+                None => 0,
+            },
+            // The tag comes first, then the payload the options share.
+            TypeDef::Choice { options, .. } => {
+                let tag = self.target_data.get_store_size(&self.tag_type());
+                options
+                    .iter()
+                    .map(|&option| end_of(1, option))
+                    .fold(tag, u64::max)
+            }
+        }
     }
 
     /// Converts `value` to the integer type held by the `Option` at
@@ -1372,6 +1414,131 @@ mod tests {
             }
             ";
         assert_eq!(run_executable("unwrap_none", src).code(), Some(1));
+    }
+
+    #[test]
+    fn memory_layouts_of_primitives_are_their_widths() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn main() -> Int {
+                let a = bit(MemoryLayout<IntU8>.size() == 1, at: 1)
+                let b = bit(MemoryLayout<IntS16>.stride() == 2, at: 2)
+                let c = bit(MemoryLayout<IntU32>.alignment() == 4, at: 4)
+                let d = bit(MemoryLayout<IntS64>.size() == 8, at: 8)
+                let e = bit(MemoryLayout<Bool>.size() == 1, at: 16)
+                let f = bit(MemoryLayout<Bool>.alignment() == 1, at: 32)
+                // `Int` and `IntU` are as wide as a pointer.
+                let pointer = MemoryLayout<RawPointer>.size()
+                let g = bit(MemoryLayout<Int>.size() == pointer, at: 64)
+                let h = bit(MemoryLayout<IntU>.stride() == pointer, at: 128)
+                // `Unit` takes up no space.
+                let i = bit(MemoryLayout<Unit>.size() == 0, at: 256)
+                let j = bit(MemoryLayout<Unit>.alignment() == 1, at: 512)
+                return a + b + c + d + e + f + g + h + i + j
+            }
+            ";
+        assert_eq!(run(src), 1023);
+    }
+
+    #[test]
+    fn memory_layout_sizes_leave_out_padding_after_the_value() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            group Padded {
+                wide: IntS64
+                narrow: IntU8
+            }
+
+            group Spaced {
+                narrow: IntU8
+                wide: IntU16
+            }
+
+            alias Pair = (wide: IntS64, narrow: IntU8)
+
+            fn main() -> Int {
+                let a = bit(MemoryLayout<Padded>.size() == 9, at: 1)
+                let b = bit(MemoryLayout<Padded>.stride() == 16, at: 2)
+                let c = bit(MemoryLayout<Padded>.alignment() == 8, at: 4)
+                // Padding between fields is still counted.
+                let d = bit(MemoryLayout<Spaced>.size() == 4, at: 8)
+                let e = bit(MemoryLayout<Spaced>.stride() == 4, at: 16)
+                let f = bit(MemoryLayout<Spaced>.alignment() == 2, at: 32)
+                // Tuples are laid out like groups.
+                let g = bit(MemoryLayout<Pair>.size() == 9, at: 64)
+                let h = bit(MemoryLayout<Pair>.stride() == 16, at: 128)
+                return a + b + c + d + e + f + g + h
+            }
+            ";
+        assert_eq!(run(src), 255);
+    }
+
+    #[test]
+    fn memory_layouts_of_choices_include_their_tag() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            group Padded {
+                wide: IntS64
+                narrow: IntU8
+            }
+
+            fn main() -> Int {
+                // The tag is 4 bytes, then the payload is after it.
+                let a = bit(MemoryLayout<Option<IntU8>>.size() == 5, at: 1)
+                let b = bit(MemoryLayout<Option<IntU8>>.stride() == 8, at: 2)
+                let c = bit(MemoryLayout<Option<IntU8>>.alignment() == 4, at: 4)
+                // The payload is aligned for its largest value.
+                let d = bit(MemoryLayout<Option<IntS64>>.size() == 16, at: 8)
+                let e = bit(MemoryLayout<Option<IntS64>>.alignment() == 8, at: 16)
+                let f = bit(MemoryLayout<Option<Padded>>.size() == 17, at: 32)
+                let g = bit(MemoryLayout<Option<Padded>>.stride() == 24, at: 64)
+                // A choice without options is only its tag.
+                let h = bit(MemoryLayout<Never>.size() == 4, at: 128)
+                return a + b + c + d + e + f + g + h
+            }
+            ";
+        assert_eq!(run(src), 255);
+    }
+
+    #[test]
+    fn memory_layouts_measure_what_generic_types_are_given() {
+        let src = "
+            group Box<Value> {
+                value: Value
+            }
+
+            impl Box {
+                static fn valueSize() -> Int {
+                    return MemoryLayout<Self.Value>.size()
+                }
+            }
+
+            fn main() -> Int {
+                return Box<IntU8>.valueSize() + 10 * Box<IntS32>.valueSize()
+            }
+            ";
+        assert_eq!(run(src), 41);
     }
 
     #[test]

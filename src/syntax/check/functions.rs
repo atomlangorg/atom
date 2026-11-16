@@ -288,6 +288,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // The type it measures is `MemoryLayout`'s argument, which is a
+            // stand-in until the function is made for each argument it's used
+            // with.
+            (Some("MemoryLayout"), "size" | "stride" | "alignment")
+                if let FnKind::Static(Some(layout)) = &kind
+                    && let Some((_, args)) = self.found_args(layout) =>
+            {
+                let measure = match name {
+                    "size" => ir::Measure::Size,
+                    "stride" => ir::Measure::Stride,
+                    _ => ir::Measure::Alignment,
+                };
+                ir::PrimitiveFn::Layout {
+                    measure,
+                    ty: args[0].id,
+                }
+            }
             _ => panic!("the compiler doesn't know how to implement `{shown}`"),
         };
         // Like any method, `self` is its first local.
