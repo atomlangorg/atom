@@ -56,16 +56,20 @@ use inkwell::{
 };
 
 use crate::{
-    ir::{Body, Expr, MatchArm, Measure, Pattern, Primitive, PrimitiveFn, Program, Stmt, TypeDef},
+    ir::{
+        Body, Expr, IntWidth, MatchArm, Measure, Pattern, Primitive, PrimitiveFn, Program, Stmt,
+        TypeDef,
+    },
     syntax::{
-        MIN_POINTER_BITS,
+        MIN_POINTER_WIDTH,
         ast::{BinOp, UnOp},
     },
 };
 
 /// The target machine for the computer the compiler is running on, which
 /// decides how values are laid out in memory, and which instructions are used.
-/// Its pointers must be at least `MIN_POINTER_BITS` wide.
+/// Its pointers must be one of the widths integers can be, and at least
+/// `MIN_POINTER_WIDTH`.
 pub fn host_machine() -> Result<TargetMachine, EmitError> {
     Target::initialize_native(&InitializationConfig::default()).map_err(EmitError::Target)?;
     let triple = TargetMachine::get_default_triple();
@@ -84,19 +88,25 @@ pub fn host_machine() -> Result<TargetMachine, EmitError> {
     Ok(machine)
 }
 
-/// Fails if pointers that are `bits` wide are narrower than the standard
-/// library allows.
-fn check_pointer_bits(bits: u32) -> Result<(), EmitError> {
-    if bits < MIN_POINTER_BITS {
+/// The width of pointers that are `bits` wide. Fails if that's narrower than
+/// the standard library allows, or isn't one of the widths integers can be.
+fn check_pointer_bits(bits: u32) -> Result<IntWidth, EmitError> {
+    if bits < MIN_POINTER_WIDTH.bits() {
         return Err(EmitError::PointersTooNarrow(bits));
     }
-    Ok(())
+    IntWidth::from_bits(bits).ok_or(EmitError::PointersUnsupported(bits))
+}
+
+/// How many bits wide pointers are on `machine`.
+fn pointer_bits(machine: &TargetMachine) -> u32 {
+    machine.get_target_data().get_pointer_byte_size(None) * 8
 }
 
 /// How wide pointers are on `machine`, which is how wide `IntS` and `IntU`
-/// are.
-pub fn pointer_bits(machine: &TargetMachine) -> u32 {
-    machine.get_target_data().get_pointer_byte_size(None) * 8
+/// are. `machine` must come from `host_machine`, which checks that they're
+/// a width integers can be.
+pub fn pointer_width(machine: &TargetMachine) -> IntWidth {
+    check_pointer_bits(pointer_bits(machine)).expect("`host_machine` checks pointers' width")
 }
 
 /// Compiles `program` into an LLVM module for `machine`. The module only has
@@ -160,8 +170,11 @@ pub enum EmitError {
     /// LLVM couldn't compile for this computer.
     Target(String),
     /// This computer's pointers are this many bits, which is fewer than
-    /// `MIN_POINTER_BITS`.
+    /// `MIN_POINTER_WIDTH`.
     PointersTooNarrow(u32),
+    /// This computer's pointers are this many bits, which is wide enough,
+    /// but isn't one of the widths integers can be.
+    PointersUnsupported(u32),
     /// LLVM couldn't optimise the module.
     Optimize(String),
     /// LLVM couldn't write the object file.
@@ -179,8 +192,23 @@ impl fmt::Display for EmitError {
             Self::PointersTooNarrow(bits) => write!(
                 f,
                 "this computer's pointers are {bits} bits, but `IntS` and `IntU` need \
-                 at least {MIN_POINTER_BITS}"
+                 at least {}",
+                MIN_POINTER_WIDTH.bits()
             ),
+            Self::PointersUnsupported(bits) => {
+                let widths: Vec<_> = IntWidth::ALL
+                    .into_iter()
+                    .filter(|&width| width >= MIN_POINTER_WIDTH)
+                    .map(|width| width.bits().to_string())
+                    .collect();
+                let (last, rest) = widths.split_last().expect("some widths are supported");
+                write!(
+                    f,
+                    "this computer's pointers are {bits} bits, but `IntS` and `IntU` can \
+                     only be {} or {last}",
+                    rest.join(", ")
+                )
+            }
             Self::Optimize(err) => write!(f, "couldn't optimise: {err}"),
             Self::Object(err) => write!(f, "couldn't write the object file: {err}"),
             Self::Link(err) => write!(f, "couldn't run `cc` to link: {err}"),
@@ -270,10 +298,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn declare_types(&mut self) {
         for ty in &self.program.types {
             let ty = match ty {
-                &TypeDef::Primitive(Primitive::Int { bits, .. }) => NonZeroU32::new(bits)
-                    .and_then(|bits| self.context.custom_width_int_type(bits).ok())
-                    .expect("integer types have valid widths")
-                    .into(),
+                TypeDef::Primitive(Primitive::Int { width, .. }) => match width {
+                    IntWidth::Bits8 => self.context.i8_type(),
+                    IntWidth::Bits16 => self.context.i16_type(),
+                    IntWidth::Bits32 => self.context.i32_type(),
+                    IntWidth::Bits64 => self.context.i64_type(),
+                }
+                .into(),
                 TypeDef::Primitive(Primitive::Bool) => self.context.bool_type().into(),
                 TypeDef::Primitive(Primitive::Tag) => self.tag_type().into(),
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
@@ -459,7 +490,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             offset + self.size(held)
         };
         match &self.program.types[ty] {
-            TypeDef::Primitive(_) => self.target_data.get_store_size(&llvm),
+            TypeDef::Primitive(Primitive::Int { .. } | Primitive::Bool | Primitive::Tag) => {
+                self.target_data.get_store_size(&llvm)
+            }
             TypeDef::Group { fields, .. } => match fields.last() {
                 Some(&last) => end_of(fields.len() as u32 - 1, last),
                 None => 0,
@@ -1085,7 +1118,7 @@ mod tests {
                 program: parse(src).expect("source should parse"),
             })
             .collect();
-        let program = syntax::check(&parsed, pointer_bits(machine)).expect("source should check");
+        let program = syntax::check(&parsed, pointer_width(machine)).expect("source should check");
         assert!(program.main.is_some(), "`/main` should declare `main`");
         compile(context, &program, machine)
     }
@@ -1141,15 +1174,26 @@ mod tests {
     }
 
     #[test]
-    fn pointers_must_be_at_least_16_bits() {
-        assert!(check_pointer_bits(16).is_ok());
-        assert!(check_pointer_bits(128).is_ok());
+    fn pointers_must_be_a_width_integers_can_be_of_at_least_16_bits() {
+        assert_eq!(check_pointer_bits(16).ok(), Some(IntWidth::Bits16));
+        assert_eq!(check_pointer_bits(32).ok(), Some(IntWidth::Bits32));
+        assert_eq!(check_pointer_bits(64).ok(), Some(IntWidth::Bits64));
         let error = check_pointer_bits(8).expect_err("8 bits is too few");
         assert_eq!(
             error.to_string(),
             "this computer's pointers are 8 bits, but `IntS` and `IntU` need at least 16"
         );
-        assert!(pointer_bits(&machine()) >= MIN_POINTER_BITS);
+        for bits in [24, 128] {
+            let error = check_pointer_bits(bits).expect_err("integers can't be that wide");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "this computer's pointers are {bits} bits, but `IntS` and `IntU` can only \
+                     be 16, 32 or 64"
+                )
+            );
+        }
+        assert!(pointer_width(&machine()) >= MIN_POINTER_WIDTH);
     }
 
     #[test]
@@ -4426,7 +4470,7 @@ mod tests {
 
     #[test]
     fn pointer_sized_integers_are_as_wide_as_pointers() {
-        let bits = pointer_bits(&machine());
+        let bits = pointer_width(&machine()).bits();
         let src = "
             fn f(_ a: IntU, _ b: IntS) -> Int {
                 return b

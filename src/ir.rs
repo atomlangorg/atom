@@ -51,15 +51,45 @@ pub enum TypeDef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Primitive {
-    /// An integer type, such as `IntU8`, which is `bits` wide.
+    /// An integer type, such as `IntU8`, which is `width` wide.
     Int {
-        bits: u32,
+        width: IntWidth,
         signed: bool,
     },
     Bool,
     /// `ChoiceOption` and `ChoiceTag`, which are the index of an option of a
     /// choice, in the order they're declared.
     Tag,
+}
+
+/// How wide an integer type is, which can only be one of these. Pointers must
+/// be one of them too, since `IntS` and `IntU` are as wide as a pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IntWidth {
+    Bits8,
+    Bits16,
+    Bits32,
+    Bits64,
+}
+
+impl IntWidth {
+    /// Every width, from narrowest to widest.
+    pub const ALL: [Self; 4] = [Self::Bits8, Self::Bits16, Self::Bits32, Self::Bits64];
+
+    /// How many bits wide it is.
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::Bits8 => 8,
+            Self::Bits16 => 16,
+            Self::Bits32 => 32,
+            Self::Bits64 => 64,
+        }
+    }
+
+    /// The width that's `bits` wide, if there is one.
+    pub fn from_bits(bits: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|width| width.bits() == bits)
+    }
 }
 
 #[derive(Debug, Clone)]

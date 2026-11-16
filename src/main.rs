@@ -68,7 +68,7 @@ fn main() {
             return;
         }
     };
-    let program = match syntax::check(&parsed_files, codegen::pointer_bits(&machine)) {
+    let program = match syntax::check(&parsed_files, codegen::pointer_width(&machine)) {
         Ok(program) => program,
         Err(errs) => {
             for err in errs {
@@ -223,7 +223,8 @@ mod tests {
             path: path.clone(),
             program: program.expect("source should parse"),
         }];
-        let errs = syntax::check(&parsed_files, 64).expect_err("`true` isn't an `Int`");
+        let errs =
+            syntax::check(&parsed_files, ir::IntWidth::Bits64).expect_err("`true` isn't an `Int`");
 
         let files = [(path, src.to_string())];
         let source = file_source(&files, &errs[0].file);

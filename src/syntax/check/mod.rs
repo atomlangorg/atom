@@ -215,18 +215,18 @@ impl fmt::Display for FileError {
     }
 }
 
-/// The fewest bits that pointers, and so `IntS` and `IntU`, can be. The
-/// standard library relies on it, since converting an integer of up to this
-/// many bits to `IntS` or `IntU` keeps its value, so computers with narrower
+/// The narrowest that pointers, and so `IntS` and `IntU`, can be. The
+/// standard library relies on it, since converting an integer up to this
+/// wide to `IntS` or `IntU` keeps its value, so computers with narrower
 /// pointers aren't supported.
-pub const MIN_POINTER_BITS: u32 = 16;
+pub const MIN_POINTER_WIDTH: ir::IntWidth = ir::IntWidth::Bits16;
 
 /// Checks every file in a project, along with the standard library,
 /// returning the program they make up for a computer whose pointers are
-/// `pointer_bits` wide, which is how wide `IntS` and `IntU` are. That must be
-/// at least `MIN_POINTER_BITS`.
-pub fn check(files: &[File], pointer_bits: u32) -> Result<ir::Program, Vec<FileError>> {
-    let mut checker = Checker::new(pointer_bits);
+/// `pointer_width` wide, which is how wide `IntS` and `IntU` are. That must be
+/// at least `MIN_POINTER_WIDTH`.
+pub fn check(files: &[File], pointer_width: ir::IntWidth) -> Result<ir::Program, Vec<FileError>> {
+    let mut checker = Checker::new(pointer_width);
     checker.add_stdlib();
     for file in files {
         checker.add_file(None, file);
@@ -726,8 +726,9 @@ struct Context<'a> {
 #[derive(Default)]
 struct Checker<'a> {
     /// How wide pointers are on the computer the program is for, and so
-    /// `IntS` and `IntU`.
-    pointer_bits: u32,
+    /// `IntS` and `IntU`. It's only `None` so that `Checker` has a default,
+    /// and `Checker::new` always sets it.
+    pointer_width: Option<ir::IntWidth>,
     /// The standard library first, then the project's files.
     files: Vec<FileInfo<'a>>,
     /// Every type, indexed by `id`.
@@ -789,17 +790,19 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    /// A checker for a computer whose pointers are `pointer_bits` wide.
+    /// A checker for a computer whose pointers are `pointer_width` wide.
     ///
-    /// Panics if that's fewer than `MIN_POINTER_BITS`, since the standard
+    /// Panics if that's narrower than `MIN_POINTER_WIDTH`, since the standard
     /// library would then be wrong about which conversions keep values.
-    fn new(pointer_bits: u32) -> Self {
+    fn new(pointer_width: ir::IntWidth) -> Self {
         assert!(
-            pointer_bits >= MIN_POINTER_BITS,
-            "pointers must be at least {MIN_POINTER_BITS} bits, not {pointer_bits}"
+            pointer_width >= MIN_POINTER_WIDTH,
+            "pointers must be at least {} bits, not {}",
+            MIN_POINTER_WIDTH.bits(),
+            pointer_width.bits(),
         );
         Self {
-            pointer_bits,
+            pointer_width: Some(pointer_width),
             ..Self::default()
         }
     }

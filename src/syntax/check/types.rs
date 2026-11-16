@@ -698,18 +698,19 @@ impl<'a> Checker<'a> {
             self.error(span, CheckError::PrimitiveOutsideStdlib(name.to_string()));
             return;
         }
-        let int = |bits, signed| ir::Primitive::Int { bits, signed };
+        let int = |width, signed| ir::Primitive::Int { width, signed };
+        let pointer = self.pointer_width.expect("`Checker::new` sets it");
         let primitive = match name {
-            "IntU" => int(self.pointer_bits, false),
-            "IntU8" => int(8, false),
-            "IntU16" => int(16, false),
-            "IntU32" => int(32, false),
-            "IntU64" => int(64, false),
-            "IntS" => int(self.pointer_bits, true),
-            "IntS8" => int(8, true),
-            "IntS16" => int(16, true),
-            "IntS32" => int(32, true),
-            "IntS64" => int(64, true),
+            "IntU" => int(pointer, false),
+            "IntU8" => int(ir::IntWidth::Bits8, false),
+            "IntU16" => int(ir::IntWidth::Bits16, false),
+            "IntU32" => int(ir::IntWidth::Bits32, false),
+            "IntU64" => int(ir::IntWidth::Bits64, false),
+            "IntS" => int(pointer, true),
+            "IntS8" => int(ir::IntWidth::Bits8, true),
+            "IntS16" => int(ir::IntWidth::Bits16, true),
+            "IntS32" => int(ir::IntWidth::Bits32, true),
+            "IntS64" => int(ir::IntWidth::Bits64, true),
             "Bool" => ir::Primitive::Bool,
             "ChoiceTag" | "ChoiceOption" => ir::Primitive::Tag,
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
@@ -811,7 +812,7 @@ impl<'a> Checker<'a> {
     /// The width and signedness of `ty`, if it's an integer type.
     pub(super) fn int_type(&self, ty: &Type) -> Option<(u32, bool)> {
         match self.primitive(ty.id) {
-            Some(ir::Primitive::Int { bits, signed }) => Some((bits, signed)),
+            Some(ir::Primitive::Int { width, signed }) => Some((width.bits(), signed)),
             _ => None,
         }
     }

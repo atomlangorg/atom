@@ -19,7 +19,7 @@ use crate::syntax::parser::parse;
 
 /// The standard library type called `name`.
 fn ty(name: &str) -> Type {
-    let mut checker = Checker::new(POINTER_BITS);
+    let mut checker = Checker::new(POINTER_WIDTH);
     checker.add_stdlib();
     checker.check_files();
     checker.std_type(name)
@@ -39,12 +39,12 @@ fn parsed_files(files: &[(&str, &str)]) -> Vec<File> {
 
 /// How wide pointers are on the computer that programs are checked for,
 /// unless a test says otherwise, which is how wide `IntS` and `IntU` are.
-const POINTER_BITS: u32 = 64;
+const POINTER_WIDTH: ir::IntWidth = ir::IntWidth::Bits64;
 
 /// Checks each `(path, src)` pair as a file, with paths like
 /// `/dir/other`.
 fn check_files(files: &[(&str, &str)]) -> Result<(), Vec<FileError>> {
-    let result = check(&parsed_files(files), POINTER_BITS).map(|_| ());
+    let result = check(&parsed_files(files), POINTER_WIDTH).map(|_| ());
     // Every error must point at something in the file it's reported in.
     for err in result.as_ref().err().into_iter().flatten() {
         let found = pointed_at(files, err);
@@ -1802,7 +1802,7 @@ fn requires_return_on_every_path() {
 #[test]
 #[should_panic(expected = "pointers must be at least 16 bits, not 8")]
 fn checking_needs_pointers_of_at_least_16_bits() {
-    Checker::new(8);
+    Checker::new(ir::IntWidth::Bits8);
 }
 
 #[test]
@@ -2428,12 +2428,12 @@ fn nested_functions_have_their_own_return_type() {
 
 #[test]
 fn checks_the_standard_library_alone() {
-    assert!(check(&[], POINTER_BITS).is_ok());
+    assert!(check(&[], POINTER_WIDTH).is_ok());
 }
 
 /// Whether checking `src` as `path` finds the program's `main`.
 fn has_main(path: &str, src: &str) -> bool {
-    check(&parsed_files(&[(path, src)]), POINTER_BITS)
+    check(&parsed_files(&[(path, src)]), POINTER_WIDTH)
         .expect("source should check")
         .main
         .is_some()
@@ -2638,7 +2638,7 @@ fn messages_in_stdlib(path: &[&str], src: &str) -> Vec<String> {
         program: parse(src).expect("source should parse"),
     };
     let project = parsed_files(&[("/secret", "let hidden = 1")]);
-    let mut checker = Checker::new(POINTER_BITS);
+    let mut checker = Checker::new(POINTER_WIDTH);
     checker.add_stdlib();
     checker.add_file(Some(STDLIB_PACKAGE), &stdlib);
     checker.add_file(None, &project[0]);
@@ -6018,7 +6018,7 @@ fn programs_import_the_whole_stdlib_without_a_use() {
         "/main",
         "let a: Int = fromExtra\nlet b: Int = extra::fromExtra",
     )]);
-    let mut checker = Checker::new(POINTER_BITS);
+    let mut checker = Checker::new(POINTER_WIDTH);
     checker.add_stdlib();
     checker.add_file(Some(STDLIB_PACKAGE), &stdlib[0]);
     checker.add_file(None, &project[0]);
@@ -8892,7 +8892,7 @@ fn aliases_left_out_of_constraints_are_their_arguments_once_made() {
         "
     );
     let program =
-        check(&parsed_files(&[("/main", &src)]), POINTER_BITS).expect("`src` has no errors");
+        check(&parsed_files(&[("/main", &src)]), POINTER_WIDTH).expect("`src` has no errors");
     let total = program
         .functions
         .iter()
@@ -8902,7 +8902,7 @@ fn aliases_left_out_of_constraints_are_their_arguments_once_made() {
     assert!(matches!(
         program.types[total.locals[2]],
         ir::TypeDef::Primitive(ir::Primitive::Int {
-            bits: 64,
+            width: ir::IntWidth::Bits64,
             signed: true
         })
     ));
@@ -9707,17 +9707,26 @@ fn pointer_sized_integers_are_their_own_types() {
 fn pointer_sized_integers_are_as_wide_as_pointers() {
     let src = |int: &str, value: &str| format!("let x: {int} = {value}");
     let checks =
-        |src: &str, pointer_bits| check(&parsed_files(&[("/main", src)]), pointer_bits).is_ok();
+        |src: &str, pointer_width| check(&parsed_files(&[("/main", src)]), pointer_width).is_ok();
     for (int, max, too_big) in [
         ("IntU", "4294967295", "4294967296"),
         ("IntS", "2147483647", "2147483648"),
     ] {
-        assert!(checks(&src(int, max), 32), "{int}");
-        assert!(!checks(&src(int, too_big), 32), "{int}");
+        assert!(checks(&src(int, max), ir::IntWidth::Bits32), "{int}");
+        assert!(!checks(&src(int, too_big), ir::IntWidth::Bits32), "{int}");
     }
-    assert!(checks(&src("Int", "9223372036854775807"), 64));
-    assert!(!checks(&src("Int", "9223372036854775807"), 32));
-    assert!(checks(&src("IntU", "18446744073709551615"), 64));
+    assert!(checks(
+        &src("Int", "9223372036854775807"),
+        ir::IntWidth::Bits64
+    ));
+    assert!(!checks(
+        &src("Int", "9223372036854775807"),
+        ir::IntWidth::Bits32
+    ));
+    assert!(checks(
+        &src("IntU", "18446744073709551615"),
+        ir::IntWidth::Bits64
+    ));
 }
 
 #[test]

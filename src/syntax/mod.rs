@@ -21,5 +21,5 @@ pub mod check;
 pub mod lexer;
 pub mod parser;
 
-pub use check::{File, MIN_POINTER_BITS, check, stdlib_source};
+pub use check::{File, MIN_POINTER_WIDTH, check, stdlib_source};
 pub use parser::parse;
