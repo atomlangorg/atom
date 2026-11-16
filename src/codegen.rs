@@ -1529,13 +1529,14 @@ mod tests {
             }
 
             impl Box {
-                static fn valueSize() -> Int {
+                static fn valueSize() -> IntU {
                     return MemoryLayout<Self.Value>.size()
                 }
             }
 
             fn main() -> Int {
-                return Box<IntU8>.valueSize() + 10 * Box<IntS32>.valueSize()
+                let sizes = Box<IntU8>.valueSize() + 10 * Box<IntS32>.valueSize()
+                return Int.new(sizes).unwrap()
             }
             ";
         assert_eq!(run(src), 41);

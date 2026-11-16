@@ -24,14 +24,14 @@ choice MemoryLayout<Value> {}
 impl MemoryLayout {
     // How many bytes a `Value` takes up, not counting any padding after it
     // to keep the next one aligned.
-    static primitive fn size() -> Int
+    static primitive fn size() -> IntU
 
     // How many bytes apart the starts of `Value`s are when they're next to
     // each other in memory, which is `size` rounded up to a multiple of
     // `alignment`.
-    static primitive fn stride() -> Int
+    static primitive fn stride() -> IntU
 
     // The number of bytes that the address of a `Value` is always a multiple
     // of, which is a power of 2.
-    static primitive fn alignment() -> Int
+    static primitive fn alignment() -> IntU
 }

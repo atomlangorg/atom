@@ -123,7 +123,7 @@ pub enum PrimitiveFn {
     /// for one it can't.
     TryConvertInt { from_signed: bool, to_signed: bool },
     /// `size`, `stride` or `alignment` on `MemoryLayout`, which measures the
-    /// type at `ty` in `Program::types`, in bytes, as an `Int`.
+    /// type at `ty` in `Program::types`, in bytes, as an `IntU`.
     Layout { measure: Measure, ty: usize },
 }
 
