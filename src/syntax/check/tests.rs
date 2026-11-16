@@ -1800,6 +1800,61 @@ fn requires_return_on_every_path() {
 }
 
 #[test]
+fn integers_convert_from_every_other_integer_type() {
+    // Each type's name, whether it's signed, and the fewest and most bits
+    // it can have. `IntS` and `IntU` are assumed to be at least 16 bits, with
+    // no most, so a conversion only keeps every value if it would for every
+    // width they could be. Nothing fixed can hold all of theirs.
+    const INTS: [(&str, bool, u32, Option<u32>); 10] = [
+        ("IntS8", true, 8, Some(8)),
+        ("IntS16", true, 16, Some(16)),
+        ("IntS32", true, 32, Some(32)),
+        ("IntS64", true, 64, Some(64)),
+        ("IntS", true, 16, None),
+        ("IntU8", false, 8, Some(8)),
+        ("IntU16", false, 16, Some(16)),
+        ("IntU32", false, 32, Some(32)),
+        ("IntU64", false, 64, Some(64)),
+        ("IntU", false, 16, None),
+    ];
+    let mut lossless = 0;
+    for (from, from_signed, _, from_max) in INTS {
+        for (to, to_signed, to_min, _) in INTS {
+            if from == to {
+                continue;
+            }
+            // An unsigned integer needs a bit more to be held as signed.
+            let keeps_values = from_max.is_some_and(|from_max| match (from_signed, to_signed) {
+                (true, false) => false,
+                (false, true) => from_max < to_min,
+                _ => from_max <= to_min,
+            });
+            let option = format!("Option<{to}>");
+            let (returns, not_returns) = if keeps_values {
+                lossless += 1;
+                (to, option.as_str())
+            } else {
+                (option.as_str(), to)
+            };
+            let src =
+                |returns| format!("fn f(_ int: {from}) -> {returns} {{\nreturn {to}.new(int)\n}}");
+            assert_eq!(
+                check_top(&src(returns)),
+                Ok(()),
+                "`{to}.new` from `{from}` should give `{returns}`"
+            );
+            assert!(
+                check_top(&src(not_returns)).is_err(),
+                "`{to}.new` from `{from}` shouldn't give `{not_returns}`"
+            );
+        }
+    }
+    assert_eq!(lossless, 23);
+    // Converting to its own type isn't needed.
+    assert!(check_body("let x: IntS8 = 1\nlet y = IntS8.new(x)").is_err());
+}
+
+#[test]
 fn calls_that_never_return_end_their_path() {
     // `exit` returns `Never`, and so does `fail`, which calls it.
     let src = "

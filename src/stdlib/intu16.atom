@@ -17,6 +17,22 @@
 // An unsigned integer of 16 bits, which holds 0 to 65535.
 primitive IntU16
 
+impl IntU16 {
+    // Converts from integers whose values `IntU16` can all hold.
+    static primitive fn new(_ int: IntU8) -> Self
+
+    // Converts from integers that can hold values `IntU16` can't, giving
+    // `none` for those.
+    static primitive fn new(_ int: IntS8) -> Option<Self>
+    static primitive fn new(_ int: IntS16) -> Option<Self>
+    static primitive fn new(_ int: IntS32) -> Option<Self>
+    static primitive fn new(_ int: IntS64) -> Option<Self>
+    static primitive fn new(_ int: IntS) -> Option<Self>
+    static primitive fn new(_ int: IntU32) -> Option<Self>
+    static primitive fn new(_ int: IntU64) -> Option<Self>
+    static primitive fn new(_ int: IntU) -> Option<Self>
+}
+
 impl IntU16 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool

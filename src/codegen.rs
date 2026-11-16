@@ -397,7 +397,73 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             }
             PrimitiveFn::OptionTag => int(0).into(),
             PrimitiveFn::CallFn => self.call_function_value(args[0], args[1], returns)?,
+            PrimitiveFn::ConvertInt { from_signed } => {
+                let to = self.types[returns].into_int_type();
+                self.builder
+                    .build_int_cast_sign_flag(int(0), to, from_signed, "")?
+                    .into()
+            }
+            PrimitiveFn::TryConvertInt {
+                from_signed,
+                to_signed,
+            } => self.try_convert_int(int(0), from_signed, to_signed, returns)?,
         }))
+    }
+
+    /// Converts `value` to the integer type held by the `Option` at
+    /// `returns` in `program.types`, giving `none` if it's outside that
+    /// type's range. Whether each type is signed decides how `value` is read
+    /// and how it's widened.
+    fn try_convert_int(
+        &mut self,
+        value: IntValue<'ctx>,
+        from_signed: bool,
+        to_signed: bool,
+        returns: usize,
+    ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+        let TypeDef::Choice { options, .. } = &self.program.types[returns] else {
+            unreachable!("lossy conversions give an `Option`");
+        };
+        // The option holding the integer is `some`, and the other, holding
+        // `Unit`, is `none`.
+        let is_int = |&ty: &usize| matches!(self.program.types[ty], TypeDef::Primitive(_));
+        let some = options
+            .iter()
+            .position(is_int)
+            .expect("`Option` has an option holding the integer");
+        let none = 1 - some;
+        let to = self.types[options[some]].into_int_type();
+
+        // `value` fits if converting it back gives it again, and it keeps its
+        // sign, which only changes between signed and unsigned integers.
+        let converted = self
+            .builder
+            .build_int_cast_sign_flag(value, to, from_signed, "")?;
+        let back =
+            self.builder
+                .build_int_cast_sign_flag(converted, value.get_type(), to_signed, "")?;
+        let mut fits = self.builder.build_int_compare(EQ, back, value, "")?;
+        let negative = match (from_signed, to_signed) {
+            (true, false) => Some(value),
+            (false, true) => Some(converted),
+            _ => None,
+        };
+        if let Some(int) = negative {
+            let zero = int.get_type().const_zero();
+            let positive = self.builder.build_int_compare(SGE, int, zero, "")?;
+            fits = self.builder.build_and(fits, positive, "")?;
+        }
+
+        let ty = self.types[returns].into_struct_type();
+        let tag = ty
+            .get_field_type_at_index(0)
+            .expect("a choice starts with its tag")
+            .into_int_type();
+        let tag = |index: usize| tag.const_int(index as u64, false);
+        let unit = self.types[options[none]].const_zero();
+        let some = self.choose(ty, tag(some), converted.into())?;
+        let none = self.choose(ty, tag(none), unit)?;
+        self.builder.build_select(fits, some, none, "")
     }
 
     /// Calls the function that `function`, an `Fn`, holds the address of in
@@ -1271,6 +1337,109 @@ mod tests {
             }
             ";
         assert_eq!(run_executable("unwrap_none", src).code(), Some(1));
+    }
+
+    #[test]
+    fn lossless_integer_conversions_keep_the_value() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+            fn main() -> Int {
+                let small: IntS8 = -5
+                let byte: IntU8 = 200
+                let big: IntU32 = 4000000000
+                let a = bit(IntS16.new(small) == -5, at: 1)
+                let b = bit(IntS64.new(small) == -5, at: 2)
+                let c = bit(IntU16.new(byte) == 200, at: 4)
+                // Unsigned integers are widened with zeros, even when signed.
+                let d = bit(IntS16.new(byte) == 200, at: 8)
+                let e = bit(IntS64.new(big) == 4000000000, at: 16)
+                let f = bit(Int.new(small) == -5, at: 32)
+                let g = bit(IntU.new(byte) == 200, at: 64)
+                let h = bit(Int.new(IntS16.new(small)) == -5, at: 128)
+                let i = bit(IntU.new(IntU16.new(byte)) == 200, at: 256)
+                return a + b + c + d + e + f + g + h + i
+            }
+            ";
+        assert_eq!(run(src), 511);
+    }
+
+    #[test]
+    fn lossy_integer_conversions_give_none_outside_the_range() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+            fn main() -> Int {
+                let lowest: IntS16 = -128
+                let tooLow: IntS16 = -129
+                let highest: IntS16 = 127
+                let tooHigh: IntS16 = 128
+                let a = bit(IntS8.new(lowest).unwrap() == -128, at: 1)
+                let b = bit(IntS8.new(tooLow) == Option<IntS8>.none.new(()), at: 2)
+                let c = bit(IntS8.new(highest).unwrap() == 127, at: 4)
+                let d = bit(IntS8.new(tooHigh) == Option<IntS8>.none.new(()), at: 8)
+
+                let max: IntU64 = 18446744073709551615
+                let byte: IntU64 = 255
+                let overByte: IntU64 = 256
+                let e = bit(IntU8.new(byte).unwrap() == 255, at: 16)
+                let f = bit(IntU8.new(overByte) == Option<IntU8>.none.new(()), at: 32)
+                let g = bit(IntU32.new(max) == Option<IntU32>.none.new(()), at: 64)
+                let h = bit(IntS64.new(IntU64.new(Int.new(byte).unwrap()).unwrap()).unwrap() == 255, at: 128)
+                // `IntS` and `IntU` could be wider than 64 bits.
+                let i = bit(IntS64.new(Int.new(lowest)).unwrap() == -128, at: 256)
+                let j = bit(IntU64.new(IntU.new(byte).unwrap()).unwrap() == 255, at: 512)
+                return a + b + c + d + e + f + g + h + i + j
+            }
+            ";
+        assert_eq!(run(src), 1023);
+    }
+
+    #[test]
+    fn lossy_integer_conversions_give_none_when_the_sign_changes() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+            fn main() -> Int {
+                let minusOne: IntS8 = -1
+                let five: IntS8 = 5
+                let a = bit(IntU8.new(minusOne) == Option<IntU8>.none.new(()), at: 1)
+                let b = bit(IntU64.new(minusOne) == Option<IntU64>.none.new(()), at: 2)
+                let c = bit(IntU8.new(five).unwrap() == 5, at: 4)
+                let d = bit(IntU64.new(five).unwrap() == 5, at: 8)
+
+                let high: IntU8 = 200
+                let half: IntU8 = 127
+                let e = bit(IntS8.new(high) == Option<IntS8>.none.new(()), at: 16)
+                let f = bit(IntS8.new(half).unwrap() == 127, at: 32)
+
+                // Out of range for `IntS64` and `IntS8`, though it truncates
+                // to a value in range.
+                let max: IntU64 = 18446744073709551615
+                let g = bit(IntS64.new(max) == Option<IntS64>.none.new(()), at: 64)
+                let h = bit(IntS8.new(max) == Option<IntS8>.none.new(()), at: 128)
+                let lowest: IntS64 = -9223372036854775808
+                let i = bit(IntU64.new(lowest) == Option<IntU64>.none.new(()), at: 256)
+                let j = bit(IntU8.new(lowest) == Option<IntU8>.none.new(()), at: 512)
+                return a + b + c + d + e + f + g + h + i + j
+            }
+            ";
+        assert_eq!(run(src), 1023);
     }
 
     #[test]

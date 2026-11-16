@@ -27,6 +27,14 @@
 // values. Their operators work on two of the same type, except that shifts
 // are by an `Int`. Each integer type is in its own file, such as `IntU8` in
 // `intu8` and `IntS` in `ints`.
+//
+// Each integer type's `new` converts from any other integer type, as in
+// `IntS16.new(small)`. It gives the type itself if it can hold every value of
+// the other type, or an `Option` of it that's `none` for values it can't
+// hold, as in `IntS8.new(big)`. `IntS` and `IntU` are treated as being at
+// least 16 bits, with no limit on how wide they can be, so which conversions
+// give an `Option` is the same on every CPU, including ones with pointers
+// wider than 64 bits.
 
 // The integer to use unless another is needed. Integer literals are `Int`s
 // unless they're used as another integer type. It's `IntS`, so its width

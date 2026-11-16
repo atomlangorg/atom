@@ -251,6 +251,12 @@ impl<'a> Checker<'a> {
         };
         let is_binary = |op: &BinOp| op.trait_function().1 == name;
         let is_unary = |op: &UnOp| op.trait_function().1 == name;
+        let Signature {
+            name: full_name,
+            params,
+            returns,
+            ..
+        } = self.functions[index].clone();
         let primitive = match (owner, name) {
             (None, "exit") => ir::PrimitiveFn::Exit,
             (Some(_), _) if let Some(op) = BinOp::ALL.into_iter().find(is_binary) => {
@@ -263,14 +269,27 @@ impl<'a> Checker<'a> {
             (Some("ChoiceTag"), "new") => ir::PrimitiveFn::ChoiceTag,
             (Some("ChoiceOption"), "new") => ir::PrimitiveFn::NewChoice,
             (Some("ChoiceOption"), "tag") => ir::PrimitiveFn::OptionTag,
+            // An integer type's `new` converts from another integer type,
+            // giving an `Option` if it can't hold all of its values.
+            (Some(_), "new")
+                if let FnKind::Static(Some(to)) = &kind
+                    && let Some((_, to_signed)) = self.int_type(to) =>
+            {
+                let from = params.first().and_then(|param| param.ty.as_ref());
+                let Some((_, from_signed)) = from.and_then(|from| self.int_type(from)) else {
+                    panic!("`{shown}` should convert from an integer");
+                };
+                if returns.as_ref() == Some(to) {
+                    ir::PrimitiveFn::ConvertInt { from_signed }
+                } else {
+                    ir::PrimitiveFn::TryConvertInt {
+                        from_signed,
+                        to_signed,
+                    }
+                }
+            }
             _ => panic!("the compiler doesn't know how to implement `{shown}`"),
         };
-        let Signature {
-            name: full_name,
-            params,
-            returns,
-            ..
-        } = self.functions[index].clone();
         // Like any method, `self` is its first local.
         let receiver = match kind {
             FnKind::Method(ty) => Some(ty),

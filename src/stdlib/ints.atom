@@ -20,6 +20,22 @@
 // CPU. `Int` is this type.
 primitive IntS
 
+impl IntS {
+    // Converts from integers whose values `IntS` can all hold.
+    static primitive fn new(_ int: IntS8) -> Self
+    static primitive fn new(_ int: IntS16) -> Self
+    static primitive fn new(_ int: IntU8) -> Self
+
+    // Converts from integers that can hold values `IntS` can't, giving
+    // `none` for those.
+    static primitive fn new(_ int: IntS32) -> Option<Self>
+    static primitive fn new(_ int: IntS64) -> Option<Self>
+    static primitive fn new(_ int: IntU16) -> Option<Self>
+    static primitive fn new(_ int: IntU32) -> Option<Self>
+    static primitive fn new(_ int: IntU64) -> Option<Self>
+    static primitive fn new(_ int: IntU) -> Option<Self>
+}
+
 impl IntS with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool

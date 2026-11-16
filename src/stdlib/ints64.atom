@@ -17,6 +17,22 @@
 // A signed integer of 64 bits, which holds -9223372036854775808 to 9223372036854775807.
 primitive IntS64
 
+impl IntS64 {
+    // Converts from integers whose values `IntS64` can all hold.
+    static primitive fn new(_ int: IntS8) -> Self
+    static primitive fn new(_ int: IntS16) -> Self
+    static primitive fn new(_ int: IntS32) -> Self
+    static primitive fn new(_ int: IntU8) -> Self
+    static primitive fn new(_ int: IntU16) -> Self
+    static primitive fn new(_ int: IntU32) -> Self
+
+    // Converts from integers that can hold values `IntS64` can't, giving
+    // `none` for those.
+    static primitive fn new(_ int: IntS) -> Option<Self>
+    static primitive fn new(_ int: IntU64) -> Option<Self>
+    static primitive fn new(_ int: IntU) -> Option<Self>
+}
+
 impl IntS64 with Equal {
     primitive fn isEqual(to rhs: Self) -> Bool
     primitive fn isNotEqual(to rhs: Self) -> Bool

@@ -113,6 +113,15 @@ pub enum PrimitiveFn {
     NewChoice,
     /// `ChoiceOption.tag`, which is the option it already is.
     OptionTag,
+    /// `new` on an integer type, from an integer of a type whose values it
+    /// can all hold, keeping its value. Whether it's from a signed integer
+    /// decides how it's widened.
+    ConvertInt { from_signed: bool },
+    /// `new` on an integer type, from an integer of a type whose values it
+    /// can't all hold, giving an `Option`: the choice with an option holding
+    /// the integer, for a value it can hold, and an option holding `Unit`,
+    /// for one it can't.
+    TryConvertInt { from_signed: bool, to_signed: bool },
 }
 
 #[derive(Debug)]
