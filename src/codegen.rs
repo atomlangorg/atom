@@ -3791,6 +3791,87 @@ mod tests {
     }
 
     #[test]
+    fn raw_pointers_offset_by_bytes() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            fn inc(_ value: Int) -> Int {
+                return value + 1
+            }
+
+            fn main() -> Int {
+                let start = inc.pointer
+                let ahead = start.offset(by: 8)
+                let behind = start.offset(by: -8)
+                let a = bit(ahead.address - start.address == 8, at: 1)
+                let b = bit(start.address - behind.address == 8, at: 2)
+                let c = bit(start.offset(by: 0).address == start.address, at: 4)
+                let d = bit(ahead.offset(by: -8).address == start.address, at: 8)
+                let e = bit(start.offset(by: -1).address + 1 == start.address, at: 16)
+                return a + b + c + d + e
+            }
+            ";
+        assert_eq!(run(src), 31);
+    }
+
+    #[test]
+    fn raw_pointers_offset_past_either_end_of_memory_trap() {
+        let src = "
+            fn inc(_ value: Int) -> Int {
+                return value + 1
+            }
+
+            fn main() -> Int {
+                let start = inc.pointer
+                let toZero = IntS.new(start.address).unwrap()
+                let zero = start.offset(by: -toZero)
+                let below = zero.offset(by: -1)
+                return 0
+            }
+            ";
+        assert!(traps("offset_below_zero", src));
+
+        // Twice the largest `IntS` on a 64-bit computer is past the end of
+        // memory from any address but 0 and 1.
+        let src = "
+            fn inc(_ value: Int) -> Int {
+                return value + 1
+            }
+
+            fn main() -> Int {
+                let largest: IntS = 9223372036854775807
+                let start = inc.pointer
+                let past = start.offset(by: largest).offset(by: largest)
+                return 0
+            }
+            ";
+        assert!(traps("offset_past_the_end", src));
+
+        // Going to 0 itself is fine.
+        let src = "
+            fn inc(_ value: Int) -> Int {
+                return value + 1
+            }
+
+            fn main() -> Int {
+                let start = inc.pointer
+                let toZero = IntS.new(start.address).unwrap()
+                if start.offset(by: -toZero).address == 0 {
+                    return 3
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 3);
+    }
+
+    #[test]
     fn fn_values_hold_the_address_of_their_function() {
         let src = "
             fn inc(_ value: Int) -> Int {

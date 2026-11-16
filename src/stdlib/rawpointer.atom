@@ -20,3 +20,24 @@
 group RawPointer {
     address: IntU
 }
+
+impl RawPointer {
+    // The address `bytes` after this one, or before it if `bytes` is
+    // negative. Going past either end of memory stops the program, like any
+    // arithmetic that overflows.
+    fn offset(by bytes: IntS) -> Self {
+        if IntU.new(bytes) => .some.new(let forwards) {
+            return Self {
+                address: self.address + forwards,
+            }
+        }
+        // `bytes` is negative, so `-(bytes + 1)` is positive, and can't
+        // overflow like `-bytes` would for the smallest `IntS`.
+        if IntU.new(-(bytes + 1)) => .some.new(let backwards) {
+            return Self {
+                address: self.address - backwards - 1,
+            }
+        }
+        exit()
+    }
+}
