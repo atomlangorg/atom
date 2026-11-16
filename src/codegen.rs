@@ -20,9 +20,12 @@
 //! The primitive integer types are LLVM integers of their width, such as `i8`
 //! for `IntU8` and `IntS8`, since LLVM leaves signedness to the operations
 //! used on them. `Bool` is `i1`. Every group is an
-//! LLVM struct of its fields, so `Unit` is `{}`. A choice is a struct of an
-//! `i32` tag, the index of its option, then space for the largest of its
-//! options' values, which they share. Every Atom function becomes an
+//! LLVM struct of its fields, so `Unit` is `{}`. A choice is a struct of its
+//! tag, the index of its option, then space for the largest of its options'
+//! values, which they share. The tag is the narrowest integer that can number
+//! every option, as `ir::tag_width` says, and a choice with at most one
+//! option has none. `ChoiceTag`s and `ChoiceOption`s are as wide as their
+//! choice's tag, or `{}` when it has none. Every Atom function becomes an
 //! internal LLVM function, so only the C `main` is
 //! visible to the linker. It sets every top-level value, then calls Atom's
 //! `main`, whose result is the exit code.
@@ -51,14 +54,14 @@ use inkwell::{
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
     },
-    types::{BasicType, BasicTypeEnum, IntType, StructType},
+    types::{BasicType, BasicTypeEnum, IntType},
     values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue},
 };
 
 use crate::{
     ir::{
         Body, Expr, IntWidth, MatchArm, Measure, Pattern, Primitive, PrimitiveFn, Program, Stmt,
-        TypeDef,
+        TypeDef, tag_width,
     },
     syntax::{
         MIN_POINTER_WIDTH,
@@ -298,15 +301,14 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn declare_types(&mut self) {
         for ty in &self.program.types {
             let ty = match ty {
-                TypeDef::Primitive(Primitive::Int { width, .. }) => match width {
-                    IntWidth::Bits8 => self.context.i8_type(),
-                    IntWidth::Bits16 => self.context.i16_type(),
-                    IntWidth::Bits32 => self.context.i32_type(),
-                    IntWidth::Bits64 => self.context.i64_type(),
-                }
-                .into(),
+                &TypeDef::Primitive(Primitive::Int { width, .. }) => self.int_type(width).into(),
                 TypeDef::Primitive(Primitive::Bool) => self.context.bool_type().into(),
-                TypeDef::Primitive(Primitive::Tag) => self.tag_type().into(),
+                // A choice without a tag is always the same option, so its
+                // tags hold nothing.
+                &TypeDef::Primitive(Primitive::Tag { choice }) => match self.tag_type(choice) {
+                    Some(tag) => tag.into(),
+                    None => self.context.struct_type(&[], false).into(),
+                },
                 TypeDef::Group { name, .. } | TypeDef::Choice { name, .. } => {
                     self.context.opaque_struct_type(name).into()
                 }
@@ -352,16 +354,62 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .expect("alignments are valid integer widths");
                 let units = size.div_ceil(u64::from(align));
                 let payload = unit.array_type(units as u32);
-                vec![self.tag_type().into(), payload.into()]
+                let tag = self.tag_type(id).map(BasicTypeEnum::from);
+                tag.into_iter().chain([payload.into()]).collect::<Vec<_>>()
             }
             _ => held.iter().map(|&ty| self.types[ty]).collect(),
         };
         self.types[id].into_struct_type().set_body(&body, false);
     }
 
-    /// The type of a choice's tag, which is the index of its option.
-    fn tag_type(&self) -> IntType<'ctx> {
-        self.context.i32_type()
+    /// The LLVM integer that's `width` wide.
+    fn int_type(&self, width: IntWidth) -> IntType<'ctx> {
+        match width {
+            IntWidth::Bits8 => self.context.i8_type(),
+            IntWidth::Bits16 => self.context.i16_type(),
+            IntWidth::Bits32 => self.context.i32_type(),
+            IntWidth::Bits64 => self.context.i64_type(),
+        }
+    }
+
+    /// The type of the tag of the choice at `choice` in `program.types`,
+    /// which is the index of its option, or `None` if it has no tag. That's
+    /// when it has at most one option, or isn't a choice, which a
+    /// `ChoiceTag` or `ChoiceOption` can be made from, though it then has no
+    /// values.
+    fn tag_type(&self, choice: usize) -> Option<IntType<'ctx>> {
+        let options = match &self.program.types[choice] {
+            TypeDef::Choice { options, .. } => options.len(),
+            TypeDef::Primitive(_) | TypeDef::Group { .. } => 0,
+        };
+        tag_width(options).map(|width| self.int_type(width))
+    }
+
+    /// The index of the payload of the choice at `choice` in
+    /// `program.types` among its struct's fields, which is after its tag if
+    /// it has one.
+    fn payload_index(&self, choice: usize) -> u32 {
+        u32::from(self.tag_type(choice).is_some())
+    }
+
+    /// The tag of the option at `index` of the choice at `choice` in
+    /// `program.types`, which is `{}` if it has no tag.
+    fn tag(&self, choice: usize, index: usize) -> BasicValueEnum<'ctx> {
+        match self.tag_type(choice) {
+            Some(tag) => tag.const_int(index as u64, false).into(),
+            None => self.context.struct_type(&[], false).const_zero().into(),
+        }
+    }
+
+    /// The choice that the `ChoiceTag` or `ChoiceOption` at `ty` in
+    /// `program.types` is a tag of.
+    fn tagged_choice(&self, ty: usize) -> usize {
+        match self.program.types[ty] {
+            TypeDef::Primitive(Primitive::Tag { choice }) => choice,
+            TypeDef::Primitive(Primitive::Int { .. } | Primitive::Bool)
+            | TypeDef::Group { .. }
+            | TypeDef::Choice { .. } => unreachable!("only tags are of a choice"),
+        }
     }
 
     /// Builds the body of the function at `index` in `program.functions`.
@@ -431,6 +479,19 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let int = |index: usize| args[index].into_int_value();
         Ok(Some(match primitive {
             PrimitiveFn::Exit => return Ok(None),
+            // Tags of a choice without a tag are `{}`, since they're always
+            // the same option.
+            PrimitiveFn::Binary { op, .. } if args[0].is_struct_value() => {
+                let same = match op {
+                    BinOp::Eq => true,
+                    BinOp::Ne => false,
+                    _ => unreachable!("tags are only compared with `==` and `!=`"),
+                };
+                self.context
+                    .bool_type()
+                    .const_int(u64::from(same), false)
+                    .into()
+            }
             PrimitiveFn::Binary { op, signed } => self.binary(op, signed, int(0), int(1))?.into(),
             // Negating the smallest integer overflows.
             PrimitiveFn::Unary(UnOp::Neg) => {
@@ -442,14 +503,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.build_not(int(0), "")?.into()
             }
             PrimitiveFn::ChoiceTag => {
-                self.builder
-                    .build_extract_value(args[0].into_struct_value(), 0, "")?
+                let choice = self.tagged_choice(returns);
+                match self.tag_type(choice) {
+                    Some(_) => {
+                        self.builder
+                            .build_extract_value(args[0].into_struct_value(), 0, "")?
+                    }
+                    None => self.tag(choice, 0),
+                }
             }
-            PrimitiveFn::NewChoice => {
-                let ty = self.types[returns].into_struct_type();
-                self.choose(ty, int(0), args[1])?
-            }
-            PrimitiveFn::OptionTag => int(0).into(),
+            PrimitiveFn::NewChoice => self.choose(returns, args[0], args[1])?,
+            // A `ChoiceOption` is already the tag of its option.
+            PrimitiveFn::OptionTag => args[0],
             PrimitiveFn::CallFn => self.call_function_value(args[0], args[1], returns)?,
             PrimitiveFn::ConvertInt { from_signed } => {
                 let to = self.types[returns].into_int_type();
@@ -490,19 +555,23 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             offset + self.size(held)
         };
         match &self.program.types[ty] {
-            TypeDef::Primitive(Primitive::Int { .. } | Primitive::Bool | Primitive::Tag) => {
+            TypeDef::Primitive(Primitive::Int { .. } | Primitive::Bool | Primitive::Tag { .. }) => {
                 self.target_data.get_store_size(&llvm)
             }
             TypeDef::Group { fields, .. } => match fields.last() {
                 Some(&last) => end_of(fields.len() as u32 - 1, last),
                 None => 0,
             },
-            // The tag comes first, then the payload the options share.
+            // The tag comes first, if it has one, then the payload the
+            // options share.
             TypeDef::Choice { options, .. } => {
-                let tag = self.target_data.get_store_size(&self.tag_type());
+                let tag = self
+                    .tag_type(ty)
+                    .map_or(0, |tag| self.target_data.get_store_size(&tag));
+                let payload = self.payload_index(ty);
                 options
                     .iter()
-                    .map(|&option| end_of(1, option))
+                    .map(|&option| end_of(payload, option))
                     .fold(tag, u64::max)
             }
         }
@@ -552,15 +621,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             fits = self.builder.build_and(fits, positive, "")?;
         }
 
-        let ty = self.types[returns].into_struct_type();
-        let tag = ty
-            .get_field_type_at_index(0)
-            .expect("a choice starts with its tag")
-            .into_int_type();
-        let tag = |index: usize| tag.const_int(index as u64, false);
         let unit = self.types[options[none]].const_zero();
-        let some = self.choose(ty, tag(some), converted.into())?;
-        let none = self.choose(ty, tag(none), unit)?;
+        let some = self.choose(returns, self.tag(returns, some), converted.into())?;
+        let none = self.choose(returns, self.tag(returns, none), unit)?;
         self.builder.build_select(fits, some, none, "")
     }
 
@@ -813,10 +876,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
                 value.as_basic_value_enum()
             }
-            Expr::Tag(option) => self
-                .tag_type()
-                .const_int(*option as u64, false)
-                .as_basic_value_enum(),
+            &Expr::Tag { index, ty } => self.tag(self.tagged_choice(ty), index),
             Expr::Field { receiver, index } => {
                 let receiver = self.expr(receiver)?.into_struct_value();
                 self.builder
@@ -826,19 +886,25 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         })
     }
 
-    /// Creates a choice of type `ty`, as the option at `option`, holding
-    /// `value`. LLVM has no unions, so the value is written over the choice's
-    /// payload in memory.
+    /// Creates the choice at `choice` in `program.types`, as the option whose
+    /// tag is `option`, holding `value`. LLVM has no unions, so the value is
+    /// written over the choice's payload in memory.
     fn choose(
         &self,
-        ty: StructType<'ctx>,
-        option: IntValue<'ctx>,
+        choice: usize,
+        option: BasicValueEnum<'ctx>,
         value: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+        let ty = self.types[choice].into_struct_type();
         let slot = self.entry_alloca(ty)?;
-        let tag = self.builder.build_struct_gep(ty, slot, 0, "")?;
-        self.builder.build_store(tag, option)?;
-        let payload = self.builder.build_struct_gep(ty, slot, 1, "")?;
+        // Without a tag, it's always the same option.
+        if self.tag_type(choice).is_some() {
+            let tag = self.builder.build_struct_gep(ty, slot, 0, "")?;
+            self.builder.build_store(tag, option)?;
+        }
+        let payload = self
+            .builder
+            .build_struct_gep(ty, slot, self.payload_index(choice), "")?;
         self.builder.build_store(payload, value)?;
         self.builder.build_load(ty, slot, "")
     }
@@ -920,11 +986,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     unreachable!("only choices are matched with option patterns");
                 };
                 let choice = self.types[ty].into_struct_type();
-                let tag_ptr = self.builder.build_struct_gep(choice, ptr, 0, "")?;
-                let tag = self.builder.build_load(self.tag_type(), tag_ptr, "")?;
-                let expected = self.tag_type().const_int(*index as u64, false);
-                self.check(tag.into_int_value(), expected, unmatched)?;
-                let payload = self.builder.build_struct_gep(choice, ptr, 1, "")?;
+                // Without a tag, it's always the same option.
+                if let Some(tag_type) = self.tag_type(ty) {
+                    let tag_ptr = self.builder.build_struct_gep(choice, ptr, 0, "")?;
+                    let tag = self.builder.build_load(tag_type, tag_ptr, "")?;
+                    let expected = tag_type.const_int(*index as u64, false);
+                    self.check(tag.into_int_value(), expected, unmatched)?;
+                }
+                let payload =
+                    self.builder
+                        .build_struct_gep(choice, ptr, self.payload_index(ty), "")?;
                 return self.test(value, payload, options[*index], unmatched);
             }
         };
@@ -1532,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_layouts_of_choices_include_their_tag() {
+    fn memory_layouts_of_choices_include_a_tag_if_they_need_one() {
         // Each check is one bit of the result.
         let src = "
             fn bit(_ value: Bool, at place: Int) -> Int {
@@ -1547,22 +1618,32 @@ mod tests {
                 narrow: IntU8
             }
 
+            choice Wrapper {
+                value: IntS64
+            }
+
             fn main() -> Int {
-                // The tag is 4 bytes, then the payload is after it.
-                let a = bit(MemoryLayout<Option<IntU8>>.size() == 5, at: 1)
-                let b = bit(MemoryLayout<Option<IntU8>>.stride() == 8, at: 2)
-                let c = bit(MemoryLayout<Option<IntU8>>.alignment() == 4, at: 4)
+                // The tag of a choice with 2 options is 1 byte, then the
+                // payload is after it.
+                let a = bit(MemoryLayout<Option<IntU8>>.size() == 2, at: 1)
+                let b = bit(MemoryLayout<Option<IntU8>>.stride() == 2, at: 2)
+                let c = bit(MemoryLayout<Option<IntU8>>.alignment() == 1, at: 4)
                 // The payload is aligned for its largest value.
                 let d = bit(MemoryLayout<Option<IntS64>>.size() == 16, at: 8)
                 let e = bit(MemoryLayout<Option<IntS64>>.alignment() == 8, at: 16)
                 let f = bit(MemoryLayout<Option<Padded>>.size() == 17, at: 32)
                 let g = bit(MemoryLayout<Option<Padded>>.stride() == 24, at: 64)
-                // A choice without options is only its tag.
-                let h = bit(MemoryLayout<Never>.size() == 4, at: 128)
-                return a + b + c + d + e + f + g + h
+                // Choices with at most one option have no tag.
+                let h = bit(MemoryLayout<Never>.size() == 0, at: 128)
+                let i = bit(MemoryLayout<Wrapper>.size() == 8, at: 256)
+                let j = bit(MemoryLayout<Wrapper>.alignment() == 8, at: 512)
+                // Tags are as wide as their choice's.
+                let k = bit(MemoryLayout<ChoiceTag<Option<IntU8>>>.size() == 1, at: 1024)
+                let l = bit(MemoryLayout<ChoiceTag<Wrapper>>.size() == 0, at: 2048)
+                return a + b + c + d + e + f + g + h + i + j + k + l
             }
             ";
-        assert_eq!(run(src), 255);
+        assert_eq!(run(src), 4095);
     }
 
     #[test]
@@ -2303,7 +2384,11 @@ mod tests {
             builder.build_return(Some(&value))?;
             Ok(())
         };
-        reader("read_tag", 0, context.i32_type()).expect("should build the reader");
+        let tag = choice
+            .get_field_type_at_index(0)
+            .expect("the choice should have a tag")
+            .into_int_type();
+        reader("read_tag", 0, tag).expect("should build the reader");
         let payload = NonZeroU32::new(bits)
             .and_then(|bits| context.custom_width_int_type(bits).ok())
             .expect("should be a valid width");
@@ -2641,6 +2726,77 @@ mod tests {
         assert_eq!(run(&src), 117);
     }
 
+    /// A choice called `Many` with `count` options, from `o0` up, which hold
+    /// nothing.
+    fn many_options(count: usize) -> String {
+        let options: String = (0..count).map(|index| format!("o{index}\n")).collect();
+        format!("choice Many {{\n{options}}}\n")
+    }
+
+    #[test]
+    fn tags_are_as_wide_as_their_options_need() {
+        for (count, bytes) in [(256, 1), (257, 2), (65536, 2), (65537, 4)] {
+            let last = count - 1;
+            let src = format!(
+                "
+                {}
+                fn main() -> Int {{
+                    if MemoryLayout<Many>.size() != {bytes} {{
+                        return 1
+                    }}
+                    // The last option's tag would be the first's if it
+                    // didn't fit.
+                    let first: ChoiceTag<Many> = ChoiceTag.new(Many.o0.new())
+                    if ChoiceTag.new(Many.o{last}.new()) == first {{
+                        return 2
+                    }}
+                    match Many.o{last}.new() {{
+                        .o{last}.new(_) => {{
+                            return 0
+                        }}
+                        _ => {{
+                            return 3
+                        }}
+                    }}
+                }}
+                ",
+                many_options(count)
+            );
+            assert_eq!(run(&src), 0, "{count} options");
+        }
+    }
+
+    #[test]
+    fn choices_with_one_option_work_without_a_tag() {
+        let src = "
+            choice Wrapper {
+                value: Int
+            }
+
+            fn unwrapped(_ wrapper: Wrapper) -> Int {
+                match wrapper {
+                    .value.new(let value) => {
+                        return value
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let a = Wrapper.value.new(3)
+                let b = Wrapper.value.new(4)
+                let tag: ChoiceTag<Wrapper> = ChoiceTag.new(a)
+                if tag != ChoiceTag.new(b) {
+                    return 100
+                }
+                if tag != Wrapper.value.tag() {
+                    return 200
+                }
+                return unwrapped(a) * 10 + unwrapped(b)
+            }
+            ";
+        assert_eq!(run(src), 34);
+    }
+
     #[test]
     fn options_are_equal_if_they_are_the_same_option() {
         let src = "
@@ -2812,7 +2968,7 @@ mod tests {
             "
         );
         // The shape's payload starts with its own tag.
-        assert_eq!(read_choice(&src, "shape", "Drawing", 32), (0, 2));
+        assert_eq!(read_choice(&src, "shape", "Drawing", 8), (0, 2));
         assert_eq!(read_choice(&src, "point", "Drawing", 64), (1, 7));
     }
 

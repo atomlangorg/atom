@@ -57,9 +57,37 @@ pub enum Primitive {
         signed: bool,
     },
     Bool,
-    /// `ChoiceOption` and `ChoiceTag`, which are the index of an option of a
-    /// choice, in the order they're declared.
-    Tag,
+    /// `ChoiceOption` and `ChoiceTag`, which are the index of an option of
+    /// the choice at `choice` in `Program::types`, in the order they're
+    /// declared. They're as wide as that choice's tag, which `tag_width`
+    /// gives, and have no values if it isn't a choice.
+    Tag {
+        choice: usize,
+    },
+}
+
+/// The most options a choice can have, since its tag is at most 32 bits.
+pub const MAX_OPTIONS: u64 = 1 << 32;
+
+/// How wide the tag of a choice with `options` options is, which is the
+/// narrowest that can number them all. A choice with at most one option is
+/// always the same one, so it needs no tag, and that's `None`.
+///
+/// Panics if there are more than `MAX_OPTIONS`.
+pub fn tag_width(options: usize) -> Option<IntWidth> {
+    let options = u64::try_from(options).expect("`usize` is at most 64 bits");
+    assert!(
+        options <= MAX_OPTIONS,
+        "choices have at most {MAX_OPTIONS} options, not {options}"
+    );
+    // Options are numbered from 0, so the largest tag is one less than
+    // their number.
+    let largest = options.checked_sub(1).filter(|&largest| largest > 0)?;
+    let width = IntWidth::ALL
+        .into_iter()
+        .find(|width| u128::from(largest) < 1 << width.bits())
+        .expect("32 bits can number `MAX_OPTIONS` options");
+    Some(width)
 }
 
 /// How wide an integer type is, which can only be one of these. Pointers must
@@ -258,9 +286,12 @@ pub enum Expr {
         group: usize,
         fields: Vec<Expr>,
     },
-    /// The option of a choice at this index, in the order they're declared,
-    /// which is a value of the primitive type `ChoiceOption`.
-    Tag(usize),
+    /// The option at `index` of a choice, in the order they're declared,
+    /// which is a value of the `ChoiceOption` at `ty` in `Program::types`.
+    Tag {
+        index: usize,
+        ty: usize,
+    },
     /// Reads the field at `index` in the order its group declares them.
     Field {
         receiver: Box<Expr>,
@@ -269,4 +300,27 @@ pub enum Expr {
     /// Where the checker found a mistake. A program with mistakes is never
     /// compiled, so the back end never sees one.
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tags_are_the_narrowest_width_that_numbers_every_option() {
+        assert_eq!(tag_width(0), None);
+        assert_eq!(tag_width(1), None);
+        assert_eq!(tag_width(2), Some(IntWidth::Bits8));
+        assert_eq!(tag_width(256), Some(IntWidth::Bits8));
+        assert_eq!(tag_width(257), Some(IntWidth::Bits16));
+        assert_eq!(tag_width(65536), Some(IntWidth::Bits16));
+        assert_eq!(tag_width(65537), Some(IntWidth::Bits32));
+        assert_eq!(tag_width(1 << 32), Some(IntWidth::Bits32));
+    }
+
+    #[test]
+    #[should_panic(expected = "choices have at most 4294967296 options, not 4294967297")]
+    fn tags_are_at_most_32_bits() {
+        tag_width((1 << 32) + 1);
+    }
 }

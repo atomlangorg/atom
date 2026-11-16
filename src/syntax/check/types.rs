@@ -481,7 +481,14 @@ impl<'a> Checker<'a> {
                             })
                             .collect(),
                     ),
-                    TypeKind::Primitive(primitive) => TypeKind::Primitive(primitive),
+                    // A tag is of the choice its arguments say.
+                    TypeKind::Primitive(ir::Primitive::Tag { choice }) => {
+                        let choice = params.get(&choice).map_or(choice, |choice| choice.id);
+                        TypeKind::Primitive(ir::Primitive::Tag { choice })
+                    }
+                    TypeKind::Primitive(
+                        primitive @ (ir::Primitive::Int { .. } | ir::Primitive::Bool),
+                    ) => TypeKind::Primitive(primitive),
                     TypeKind::Tuple(_) => unreachable!("tuples aren't generic"),
                 }
             });
@@ -712,7 +719,14 @@ impl<'a> Checker<'a> {
             "IntS32" => int(ir::IntWidth::Bits32, true),
             "IntS64" => int(ir::IntWidth::Bits64, true),
             "Bool" => ir::Primitive::Bool,
-            "ChoiceTag" | "ChoiceOption" => ir::Primitive::Tag,
+            // Its first parameter is the choice it's a tag of.
+            "ChoiceTag" | "ChoiceOption" => {
+                let (_, args) = self.types[id]
+                    .instance
+                    .as_ref()
+                    .expect("`ChoiceTag` and `ChoiceOption` are generic");
+                ir::Primitive::Tag { choice: args[0].id }
+            }
             _ => panic!("the compiler doesn't know how to represent `{name}`"),
         };
         self.types[id].kind = TypeKind::Primitive(primitive);
@@ -745,6 +759,11 @@ impl<'a> Checker<'a> {
             });
         }
         self.types[id].kind = TypeKind::Choice(signatures);
+        // Its tag is at most 32 bits, so it can only number so many options.
+        let max = usize::try_from(ir::MAX_OPTIONS).ok();
+        if let Some(extra) = max.and_then(|max| options.get(max)) {
+            self.error(extra.span, CheckError::TooManyOptions(name.to_string()));
+        }
     }
     /// Resolves the fields of the group called `name` with `id`.
     pub(super) fn define_group(&mut self, id: usize, name: &str, fields: &'a [Field]) {

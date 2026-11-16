@@ -69,6 +69,9 @@ pub enum CheckError {
     /// A group or choice contains itself, directly or through other types,
     /// so it would be infinitely large.
     RecursiveType(String),
+    /// A choice has more than `ir::MAX_OPTIONS` options, which its tag can't
+    /// number.
+    TooManyOptions(String),
     /// A name was declared twice.
     Redeclared(String),
     /// A `let` constant was assigned to.
@@ -448,6 +451,11 @@ impl fmt::Display for CheckError {
             Self::CyclicValue(name) => write!(f, "`{name}` depends on its own value"),
             Self::CyclicAlias(name) => write!(f, "`{name}` is an alias of itself"),
             Self::RecursiveType(name) => write!(f, "`{name}` contains itself"),
+            Self::TooManyOptions(name) => write!(
+                f,
+                "`{name}` has more than {} options, which is the most a choice can have",
+                ir::MAX_OPTIONS
+            ),
             Self::Redeclared(name) => write!(f, "`{name}` is already declared"),
             Self::AssignToConstant(name) => {
                 write!(

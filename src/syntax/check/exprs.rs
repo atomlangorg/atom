@@ -799,10 +799,16 @@ impl<'a> Checker<'a> {
     pub(super) fn option_value(&mut self, ty: Type, index: usize, span: Span) -> Typed {
         let template = self.std_template("ChoiceOption");
         let value_ty = self.option_type(&ty, index, span);
-        Typed {
-            ty: value_ty.and_then(|value| self.instance(template, vec![ty, value], span)),
-            expr: ir::Expr::Tag(index),
-        }
+        let ty = value_ty.and_then(|value| self.instance(template, vec![ty, value], span));
+        let expr = match &ty {
+            Some(option) => ir::Expr::Tag {
+                index,
+                ty: option.id,
+            },
+            // Its type is unknown, which has been reported.
+            None => ir::Expr::Error,
+        };
+        Typed { expr, ty }
     }
     /// Checks `Self { ... }`, which constructs the type of the `impl` it's
     /// in, returning that type, or `None` if it can't be determined, along

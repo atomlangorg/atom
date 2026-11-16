@@ -1799,6 +1799,16 @@ fn requires_return_on_every_path() {
     );
 }
 
+// A choice with too many options would take billions of lines, so only the
+// message is checked.
+#[test]
+fn choices_have_at_most_as_many_options_as_their_tag_can_number() {
+    assert_eq!(
+        CheckError::TooManyOptions("Many".to_string()).to_string(),
+        "`Many` has more than 4294967296 options, which is the most a choice can have"
+    );
+}
+
 #[test]
 #[should_panic(expected = "pointers must be at least 16 bits, not 8")]
 fn checking_needs_pointers_of_at_least_16_bits() {

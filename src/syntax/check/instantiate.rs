@@ -296,12 +296,10 @@ impl<'a> Checker<'a> {
         state: &mut Instantiating,
     ) -> Option<()> {
         match expr {
-            ir::Expr::Bool(_)
-            | ir::Expr::Local(_)
-            | ir::Expr::Global(_)
-            | ir::Expr::Tag(_)
-            | ir::Expr::Error => {}
-            ir::Expr::Int { ty, .. } => *ty = self.concrete(*ty, params, state)?,
+            ir::Expr::Bool(_) | ir::Expr::Local(_) | ir::Expr::Global(_) | ir::Expr::Error => {}
+            ir::Expr::Int { ty, .. } | ir::Expr::Tag { ty, .. } => {
+                *ty = self.concrete(*ty, params, state)?;
+            }
             ir::Expr::Call { function, args } => {
                 *function = self.instantiate_callee(*function, params, state)?;
                 for arg in args {
