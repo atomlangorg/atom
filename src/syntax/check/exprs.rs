@@ -741,6 +741,7 @@ impl<'a> Checker<'a> {
                         ty: self.field_type(&ty, index, span),
                         expr: ir::Expr::Field {
                             receiver: Box::new(receiver),
+                            group: ty.id,
                             index,
                         },
                     };

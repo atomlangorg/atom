@@ -315,7 +315,12 @@ impl<'a> Checker<'a> {
                     self.instantiate_expr(field, params, state)?;
                 }
             }
-            ir::Expr::Field { receiver, .. } => self.instantiate_expr(receiver, params, state)?,
+            ir::Expr::Field {
+                receiver, group, ..
+            } => {
+                *group = self.concrete(*group, params, state)?;
+                self.instantiate_expr(receiver, params, state)?;
+            }
         }
         Some(())
     }

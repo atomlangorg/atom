@@ -292,9 +292,11 @@ pub enum Expr {
         index: usize,
         ty: usize,
     },
-    /// Reads the field at `index` in the order its group declares them.
+    /// Reads the field at `index`, in the order they're declared, of
+    /// `receiver`, which is the group at `group` in `Program::types`.
     Field {
         receiver: Box<Expr>,
+        group: usize,
         index: usize,
     },
     /// Where the checker found a mistake. A program with mistakes is never

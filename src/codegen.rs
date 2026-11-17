@@ -20,7 +20,9 @@
 //! The primitive integer types are LLVM integers of their width, such as `i8`
 //! for `IntU8` and `IntS8`, since LLVM leaves signedness to the operations
 //! used on them. `Bool` is `i1`. Every group is an
-//! LLVM struct of its fields, so `Unit` is `{}`. A choice is a struct of its
+//! LLVM struct of its fields, so `Unit` is `{}`. Its fields are ordered from
+//! most to least aligned, rather than as they're declared, so there's no
+//! padding between them. A choice is a struct of its
 //! tag, the index of its option, then space for the largest of its options'
 //! values, which they share. The tag is the narrowest integer that can number
 //! every option, as `ir::tag_width` says, and a choice with at most one
@@ -229,6 +231,10 @@ struct Codegen<'a, 'ctx> {
     target_data: TargetData,
     /// For each type in `program`, the LLVM type it's represented by.
     types: Vec<BasicTypeEnum<'ctx>>,
+    /// For each type in `program`, where each of its fields is among its
+    /// struct's fields, in the order they're declared, which is empty for
+    /// types other than groups.
+    slots: Vec<Vec<u32>>,
     /// For each function in `program`, the LLVM function it compiles to.
     functions: Vec<FunctionValue<'ctx>>,
     /// For each top-level value in `program`, the LLVM global holding it.
@@ -254,6 +260,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             program,
             target_data,
             types: vec![],
+            slots: vec![],
             functions: vec![],
             globals: vec![],
             locals: vec![],
@@ -315,6 +322,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             };
             self.types.push(ty);
         }
+        self.slots = vec![vec![]; self.types.len()];
         let mut defined = vec![false; self.types.len()];
         for id in 0..self.types.len() {
             self.define_type(id, &mut defined);
@@ -323,13 +331,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     /// Gives the type with `id` its fields, once the types it holds have
     /// theirs, since a choice's size depends on the sizes of its options'
-    /// values. `defined` records which types have been done. Types can't hold
-    /// themselves, so this always finishes.
-    fn define_type(&self, id: usize, defined: &mut [bool]) {
+    /// values, and a group's order depends on their alignments. `defined`
+    /// records which types have been done. Types can't hold themselves, so
+    /// this always finishes.
+    fn define_type(&mut self, id: usize, defined: &mut [bool]) {
         if std::mem::replace(&mut defined[id], true) {
             return;
         }
-        let held = match &self.program.types[id] {
+        let program = self.program;
+        let held = match &program.types[id] {
             TypeDef::Primitive(_) => return,
             TypeDef::Group { fields, .. } => fields,
             TypeDef::Choice { options, .. } => options,
@@ -338,7 +348,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             self.define_type(ty, defined);
         }
 
-        let body = match &self.program.types[id] {
+        let body = match &program.types[id] {
             TypeDef::Choice { .. } => {
                 // LLVM has no unions, so the options' values share an array
                 // of integers that's big enough, and aligned enough, for
@@ -357,7 +367,23 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 let tag = self.tag_type(id).map(BasicTypeEnum::from);
                 tag.into_iter().chain([payload.into()]).collect::<Vec<_>>()
             }
-            _ => held.iter().map(|&ty| self.types[ty]).collect(),
+            TypeDef::Group { .. } => {
+                // Every type's ABI size is a multiple of its alignment, which
+                // is a power of 2, so each field after a more aligned one
+                // starts aligned. Fields that are as aligned as each other
+                // stay in the order they're declared.
+                let mut order: Vec<_> = (0..held.len()).collect();
+                order.sort_by_key(|&index| {
+                    std::cmp::Reverse(self.target_data.get_abi_alignment(&self.types[held[index]]))
+                });
+                let mut slots = vec![0; held.len()];
+                for (slot, &index) in order.iter().enumerate() {
+                    slots[index] = slot as u32;
+                }
+                self.slots[id] = slots;
+                order.iter().map(|&index| self.types[held[index]]).collect()
+            }
+            TypeDef::Primitive(_) => unreachable!("primitives have no fields"),
         };
         self.types[id].into_struct_type().set_body(&body, false);
     }
@@ -390,6 +416,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// it has one.
     fn payload_index(&self, choice: usize) -> u32 {
         u32::from(self.tag_type(choice).is_some())
+    }
+
+    /// Where the field at `index`, in the order they're declared, of the
+    /// group at `group` in `program.types` is among its struct's fields.
+    fn slot(&self, group: usize, index: usize) -> u32 {
+        self.slots[group][index]
     }
 
     /// The tag of the option at `index` of the choice at `choice` in
@@ -458,7 +490,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             &Body::Primitive(primitive) => {
                 let returns = function.returns;
                 let result = self
-                    .primitive_instruction(primitive, &value.get_params(), returns)?
+                    .primitive_instruction(
+                        primitive,
+                        &value.get_params(),
+                        &function.locals[..function.params],
+                        returns,
+                    )?
                     .expect("only `exit` isn't built in place");
                 self.builder.build_return(Some(&result))?;
             }
@@ -469,11 +506,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Builds the instructions that `primitive` is, on `args`, where a
     /// method's `self` comes first, returning a value of the type at
     /// `returns` in `program.types`, or `None` for `exit`, which isn't built
-    /// in place.
+    /// in place. `params` are the types of `args`, as indexes into
+    /// `program.types`.
     fn primitive_instruction(
         &mut self,
         primitive: PrimitiveFn,
         args: &[BasicValueEnum<'ctx>],
+        params: &[usize],
         returns: usize,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BuilderError> {
         let int = |index: usize| args[index].into_int_value();
@@ -515,7 +554,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             PrimitiveFn::NewChoice => self.choose(returns, args[0], args[1])?,
             // A `ChoiceOption` is already the tag of its option.
             PrimitiveFn::OptionTag => args[0],
-            PrimitiveFn::CallFn => self.call_function_value(args[0], args[1], returns)?,
+            PrimitiveFn::CallFn => {
+                self.call_function_value(args[0], (args[1], params[1]), returns)?
+            }
             PrimitiveFn::ConvertInt { from_signed } => {
                 let to = self.types[returns].into_int_type();
                 self.builder
@@ -544,7 +585,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// How many bytes a value of the type at `ty` in `program.types` takes
     /// up, without the padding LLVM puts after it to keep the next one
     /// aligned, which its ABI size includes. That's up to the end of its last
-    /// field, or of the largest of a choice's options' values.
+    /// field in memory, or of the largest of a choice's options' values.
     fn size(&self, ty: usize) -> u64 {
         let llvm = self.types[ty];
         let end_of = |index: u32, held: usize| {
@@ -558,10 +599,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             TypeDef::Primitive(Primitive::Int { .. } | Primitive::Bool | Primitive::Tag { .. }) => {
                 self.target_data.get_store_size(&llvm)
             }
-            TypeDef::Group { fields, .. } => match fields.last() {
-                Some(&last) => end_of(fields.len() as u32 - 1, last),
-                None => 0,
-            },
+            TypeDef::Group { fields, .. } => fields
+                .iter()
+                .enumerate()
+                .map(|(index, &field)| end_of(self.slot(ty, index), field))
+                .max()
+                .unwrap_or(0),
             // The tag comes first, if it has one, then the payload the
             // options share.
             TypeDef::Choice { options, .. } => {
@@ -629,12 +672,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     /// Calls the function that `function`, an `Fn`, holds the address of in
     /// its `RawPointer`. Its parameters are the elements of the tuple
-    /// `input`, and it returns a value of the type at `returns` in
-    /// `program.types`.
+    /// `input`, in the order they're declared, where `input_ty` is the
+    /// tuple's type in `program.types`. It returns a value of the type at
+    /// `returns` in `program.types`.
     fn call_function_value(
         &mut self,
         function: BasicValueEnum<'ctx>,
-        input: BasicValueEnum<'ctx>,
+        (input, input_ty): (BasicValueEnum<'ctx>, usize),
         returns: usize,
     ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
         let pointer = self
@@ -650,11 +694,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         )?;
         // A function's `Input` is always a tuple, but an `Fn` with any other
         // `Input` can still be called, though it never has a value.
-        let args = match input {
-            BasicValueEnum::StructValue(input) => (0..input.get_type().count_fields())
-                .map(|index| self.builder.build_extract_value(input, index, ""))
+        let args = match &self.program.types[input_ty] {
+            TypeDef::Group { fields, .. } => (0..fields.len())
+                .map(|index| {
+                    let slot = self.slot(input_ty, index);
+                    self.builder
+                        .build_extract_value(input.into_struct_value(), slot, "")
+                })
                 .collect::<Result<Vec<_>, _>>()?,
-            input => vec![input],
+            TypeDef::Primitive(_) | TypeDef::Choice { .. } => vec![input],
         };
         let params: Vec<_> = args.iter().map(|arg| arg.get_type().into()).collect();
         let fn_type = self.types[returns].fn_type(&params, false);
@@ -845,8 +893,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // rather than called.
                 let callee = &self.program.functions[*function];
                 if let Body::Primitive(primitive) = callee.body
-                    && let Some(result) =
-                        self.primitive_instruction(primitive, &args, callee.returns)?
+                    && let Some(result) = self.primitive_instruction(
+                        primitive,
+                        &args,
+                        &callee.locals[..callee.params],
+                        callee.returns,
+                    )?
                 {
                     return Ok(result);
                 }
@@ -871,16 +923,20 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     let field = self.expr(field)?;
                     value = self
                         .builder
-                        .build_insert_value(value, field, index as u32, "")?
+                        .build_insert_value(value, field, self.slot(*group, index), "")?
                         .into_struct_value();
                 }
                 value.as_basic_value_enum()
             }
             &Expr::Tag { index, ty } => self.tag(self.tagged_choice(ty), index),
-            Expr::Field { receiver, index } => {
+            &Expr::Field {
+                ref receiver,
+                group,
+                index,
+            } => {
                 let receiver = self.expr(receiver)?.into_struct_value();
                 self.builder
-                    .build_extract_value(receiver, *index as u32, "")?
+                    .build_extract_value(receiver, self.slot(group, index), "")?
             }
             Expr::Error => unreachable!("programs with mistakes aren't compiled"),
         })
@@ -974,9 +1030,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 };
                 let tuple = self.types[ty].into_struct_type();
                 for (index, (element, &field)) in elements.iter().zip(fields).enumerate() {
-                    let ptr = self
-                        .builder
-                        .build_struct_gep(tuple, ptr, index as u32, "")?;
+                    let slot = self.slot(ty, index);
+                    let ptr = self.builder.build_struct_gep(tuple, ptr, slot, "")?;
                     self.test(element, ptr, field, unmatched)?;
                 }
                 return Ok(());
@@ -1578,28 +1633,116 @@ mod tests {
                 narrow: IntU8
             }
 
-            group Spaced {
-                narrow: IntU8
-                wide: IntU16
-            }
-
             alias Pair = (wide: IntS64, narrow: IntU8)
 
             fn main() -> Int {
                 let a = bit(MemoryLayout<Padded>.size() == 9, at: 1)
                 let b = bit(MemoryLayout<Padded>.stride() == 16, at: 2)
                 let c = bit(MemoryLayout<Padded>.alignment() == 8, at: 4)
-                // Padding between fields is still counted.
-                let d = bit(MemoryLayout<Spaced>.size() == 4, at: 8)
-                let e = bit(MemoryLayout<Spaced>.stride() == 4, at: 16)
-                let f = bit(MemoryLayout<Spaced>.alignment() == 2, at: 32)
                 // Tuples are laid out like groups.
-                let g = bit(MemoryLayout<Pair>.size() == 9, at: 64)
-                let h = bit(MemoryLayout<Pair>.stride() == 16, at: 128)
-                return a + b + c + d + e + f + g + h
+                let d = bit(MemoryLayout<Pair>.size() == 9, at: 8)
+                let e = bit(MemoryLayout<Pair>.stride() == 16, at: 16)
+                return a + b + c + d + e
             }
             ";
-        assert_eq!(run(src), 255);
+        assert_eq!(run(src), 31);
+    }
+
+    #[test]
+    fn memory_layouts_put_more_aligned_fields_first() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            group Spaced {
+                narrow: IntU8
+                wide: IntU16
+            }
+
+            group Scattered {
+                first: IntU8
+                wide: IntS64
+                last: IntU8
+            }
+
+            alias Mixed = (a: IntU8, b: IntS32, c: IntU16)
+
+            fn main() -> Int {
+                // `wide` comes first, so there's no padding before it.
+                let a = bit(MemoryLayout<Spaced>.size() == 3, at: 1)
+                let b = bit(MemoryLayout<Spaced>.stride() == 4, at: 2)
+                let c = bit(MemoryLayout<Spaced>.alignment() == 2, at: 4)
+                // In the order they're declared, these would be 17 and 24.
+                let d = bit(MemoryLayout<Scattered>.size() == 10, at: 8)
+                let e = bit(MemoryLayout<Scattered>.stride() == 16, at: 16)
+                // Tuples are ordered like groups.
+                let f = bit(MemoryLayout<Mixed>.size() == 7, at: 32)
+                let g = bit(MemoryLayout<Mixed>.stride() == 8, at: 64)
+                return a + b + c + d + e + f + g
+            }
+            ";
+        assert_eq!(run(src), 127);
+    }
+
+    #[test]
+    fn reordered_fields_keep_their_values() {
+        // Each check is one bit of the result.
+        let src = "
+            fn bit(_ value: Bool, at place: Int) -> Int {
+                if value {
+                    return place
+                }
+                return 0
+            }
+
+            group Scattered {
+                first: IntU8
+                wide: IntS64
+                last: IntU8
+            }
+
+            impl Scattered {
+                static fn new(first: IntU8, wide: IntS64, last: IntU8) -> Scattered {
+                    return Self { first: first, wide: wide, last: last }
+                }
+            }
+
+            fn combined(first: IntU8, wide: IntS64, last: IntU8) -> Int {
+                let digits = IntS64.new(first) * 100 + wide * 10 + IntS64.new(last)
+                return Int.new(digits).unwrap()
+            }
+
+            alias Elements = (first: IntU8, wide: IntS64, last: IntU8)
+
+            fn matched(_ elements: Elements) -> Int {
+                match elements {
+                    (first: let first, wide: let wide, last: let last) => {
+                        return combined(first: first, wide: wide, last: last)
+                    }
+                }
+            }
+
+            fn main() -> Int {
+                let s = Scattered.new(first: 1, wide: 2, last: 3)
+                let a = bit(combined(first: s.first, wide: s.wide, last: s.last) == 123, at: 1)
+
+                let t: Elements = (first: 4, wide: 5, last: 6)
+                let b = bit(combined(first: t.first, wide: t.wide, last: t.last) == 456, at: 2)
+
+                // Patterns and functions as values take elements in the order
+                // they're declared.
+                let c = bit(matched((first: 7, wide: 8, last: 9)) == 789, at: 4)
+                let function: Fn<Elements, Int> = combined
+                let d = bit(function(first: 1, wide: 2, last: 4) == 124, at: 8)
+                return a + b + c + d
+            }
+            ";
+        assert_eq!(run(src), 15);
     }
 
     #[test]

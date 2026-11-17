@@ -391,6 +391,7 @@ impl<'a> Checker<'a> {
                     let field_ty = self.field_type(&ty, index, span);
                     let value = ir::Expr::Field {
                         receiver: Box::new(lowered),
+                        group: ty.id,
                         index,
                     };
                     return self.call_value(field_ty, value, method, args, span);
