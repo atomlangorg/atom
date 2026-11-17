@@ -276,9 +276,21 @@ pub enum CheckError {
     /// A constraint in a generic type's `where` is on a type that isn't one
     /// of its parameters.
     TypeConstrainedNotParam { generic: String, ty: Type },
-    /// A constraint in a generic type's `where` says what one of its
-    /// parameters is, rather than which trait it implements.
+    /// A constraint in a generic type's or trait's `where` says what a type
+    /// is, rather than which trait it implements.
     TypeConstraintNotTrait(String),
+    /// A constraint in a trait's `where` is on a type that isn't one of its
+    /// aliases.
+    TraitConstrainedNotAlias { trait_name: String, ty: Type },
+    /// `ty` implements `trait_name`, but the type it gives the trait's
+    /// `alias`, `arg`, doesn't meet the trait's `constraint`.
+    UnmetTraitConstraint {
+        ty: Type,
+        trait_name: String,
+        constraint: String,
+        alias: String,
+        arg: Type,
+    },
     /// An `impl` implements the standard library's `Tuple`, which only
     /// tuples implement, without one.
     ImplementedTuple,
@@ -748,8 +760,23 @@ impl fmt::Display for CheckError {
             ),
             Self::TypeConstraintNotTrait(constraint) => write!(
                 f,
-                "a generic type's constraints can only say which traits its parameters implement, \
-                 as in `T == some Equal`, not `{constraint}`"
+                "only an `impl`'s constraints can say exactly what a type is, so this must say \
+                 which trait it implements, as in `T == some Equal`, not `{constraint}`"
+            ),
+            Self::TraitConstrainedNotAlias { trait_name, ty } => write!(
+                f,
+                "only the aliases of `{trait_name}` can be constrained, not `{ty}`"
+            ),
+            Self::UnmetTraitConstraint {
+                ty,
+                trait_name,
+                constraint,
+                alias,
+                arg,
+            } => write!(
+                f,
+                "`{ty}` can only implement `{trait_name}` where `{constraint}`, but its `{alias}` \
+                 is `{arg}`"
             ),
             Self::ImplementedTuple => write!(
                 f,

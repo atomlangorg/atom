@@ -7814,6 +7814,204 @@ fn calls_need_call_and_its_input() {
 }
 
 #[test]
+fn call_inputs_implement_tuple() {
+    // `Box` and `Wrapper` can only implement `Call` with a `T` that's known
+    // to implement `Tuple`, which `Runner`'s `Input` is in `Runner`.
+    let src = "
+        alias Pair = (a: Int, b: Int)
+
+        group Adder {}
+
+        impl Adder with Call {
+            alias Input = Pair
+
+            fn call(input: Pair) -> Int {
+                return input.a + input.b
+            }
+        }
+
+        group Box<T> where T == some Tuple {
+            value: T
+        }
+
+        impl Box with Call {
+            fn call(input: Self.T) -> Self.T {
+                return input
+            }
+        }
+
+        group Wrapper<T> {
+            value: T
+        }
+
+        impl Wrapper with Call where Self.T == some Tuple {
+            fn call(input: Self.T) -> Self.T {
+                return input
+            }
+        }
+
+        trait Runner where Input == some Tuple {
+            alias Input
+
+            fn function() -> Fn<Input, Int>
+        }
+
+        fn add(a: Int, b: Int) -> Int {
+            return a + b
+        }
+
+        impl Adder with Runner {
+            fn function() -> Fn<(a: Int, b: Int), Int> {
+                return add
+            }
+        }
+
+        fn f(adder: Adder) -> Int {
+            let function = adder.function()
+            return adder(a: 1, b: 2) + function(a: 3, b: 4)
+        }
+        ";
+    assert_eq!(check_top(src), Ok(()));
+}
+
+#[test]
+fn call_inputs_must_implement_tuple() {
+    let src = "
+        alias ID = Int
+
+        group Doubler {}
+
+        impl Doubler with Call {
+            fn call(input: Int) -> Int {
+                return input * 2
+            }
+        }
+
+        group Named {}
+
+        impl Named with Call {
+            alias Input = ID
+
+            fn call(input: ID) -> Int {
+                return input
+            }
+        }
+
+        group Box<T> {
+            value: T
+        }
+
+        impl Box with Call {
+            fn call(input: Self.T) -> Self.T {
+                return input
+            }
+        }
+
+        trait Runner {
+            alias Input
+
+            fn function() -> Fn<Input, Int>
+        }
+        ";
+    assert_eq!(pointed_at_top(src), ["Call", "Call", "Call", "Fn"]);
+    assert_eq!(
+        messages_top(src),
+        [
+            "`Doubler` can only implement `Call` where `Input == some Tuple`, but its `Input` is \
+             `Int`",
+            "`Named` can only implement `Call` where `Input == some Tuple`, but its `Input` is \
+             `ID`",
+            "`Box<T>` can only implement `Call` where `Input == some Tuple`, but its `Input` is \
+             `T`",
+            "`Fn<Input, Int>` can only be used where `Input == some Tuple`, but its `Input` is \
+             `Input`",
+        ]
+    );
+}
+
+#[test]
+fn trait_constraints_give_aliases_of_their_traits() {
+    // `Odd` can only be compared with an `Int`, not with itself.
+    let src = "
+        trait First where Item == some Equal<Rhs = Item> {
+            alias Item
+
+            fn first() -> Item
+        }
+
+        group Odd {}
+
+        impl Odd {
+            static fn new() -> Self {
+                return Self {}
+            }
+        }
+
+        impl Odd with Equal {
+            fn isEqual(to rhs: Int) -> Bool {
+                return true
+            }
+        }
+
+        group Numbers {}
+
+        impl Numbers with First {
+            fn first() -> Int {
+                return 1
+            }
+        }
+
+        group Odds {}
+
+        impl Odds with First {
+            fn first() -> Odd {
+                return Odd.new()
+            }
+        }
+        ";
+    assert_eq!(
+        messages_top(src),
+        [
+            "`Odds` can only implement `First` where `Item == some Equal<Rhs = Item>`, but its \
+             `Item` is `Odd`"
+        ]
+    );
+}
+
+#[test]
+fn trait_constraints_are_on_their_aliases() {
+    assert_eq!(
+        messages_top(
+            "
+            trait A where Self == some Equal {}
+
+            trait B where Missing == some Equal {}
+
+            trait C where Input == Int {
+                alias Input
+            }
+
+            trait D where Input == some Equal<Missing = Int> {
+                alias Input
+            }
+
+            trait E where Input == some Missing {
+                alias Input
+            }
+            "
+        ),
+        [
+            "only the aliases of `A` can be constrained, not `Self`",
+            "unknown type `Missing`",
+            "only an `impl`'s constraints can say exactly what a type is, so this must say \
+             which trait it implements, as in `T == some Equal`, not `Input == Int`",
+            "`Missing` is not declared by trait `Equal`",
+            "unknown trait `Missing`",
+        ]
+    );
+}
+
+#[test]
 fn functions_are_values_of_type_fn() {
     // The `Input` is a tuple of the parameters, by their labels.
     let src = "
@@ -9122,8 +9320,8 @@ fn generic_type_constraints_are_on_their_parameters() {
         ),
         [
             "only the generic parameters of `A` can be constrained, not `Int`",
-            "a generic type's constraints can only say which traits its parameters implement, \
-             as in `T == some Equal`, not `T == Int`",
+            "only an `impl`'s constraints can say exactly what a type is, so this must say \
+             which trait it implements, as in `T == some Equal`, not `T == Int`",
             "unknown trait `Missing`",
             "unknown type `U`",
         ]

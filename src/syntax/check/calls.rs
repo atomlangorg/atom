@@ -22,7 +22,7 @@ impl<'a> Checker<'a> {
     /// Checks calling `value`, of type `ty`, called `name`, with `args`, at
     /// `span`, which calls its `call` from the standard library's `Call`
     /// trait, as in `adder(a: 3)` for `adder.call(input: (a: 3))`. The
-    /// arguments always build its `Input`, which must be a tuple.
+    /// arguments always build its `Input`, which implements `Tuple`.
     pub(super) fn call_value(
         &mut self,
         ty: Option<Type>,
@@ -57,8 +57,9 @@ impl<'a> Checker<'a> {
                 };
                 self.call_callee(callee, name.to_string(), args, span)
             }
-            // Its input is unknown, which has already been reported, or isn't
-            // a tuple, so the arguments can't build it.
+            // Its input is unknown, which has already been reported, or is
+            // only known to implement `Tuple`, as a generic type's parameter
+            // can be, so the arguments can't build it.
             input => {
                 let found = self.tuple(args, None).ty;
                 if let (Some(expected), Some(found)) = (input, found) {

@@ -497,8 +497,16 @@ pub enum StmtKind {
     /// `trait Name { alias ... fn ... }`: functions that a type can
     /// implement, declared without bodies, and aliases, such as `alias Rhs`,
     /// whose types each implementation gives. Only allowed at the top level.
+    ///
+    /// It can have a `where`, as in `trait Call where Input == some Tuple {
+    /// ... }`, so that each implementation must give its aliases types that
+    /// meet its constraints. In the trait, the aliases they constrain
+    /// implement their traits.
     Trait {
         name: String,
+        /// Its `where` clause's constraints, separated by commas, which can
+        /// only be on its aliases.
+        constraints: Vec<Constraint>,
         aliases: Vec<Alias>,
         functions: Vec<Function>,
     },
@@ -594,7 +602,8 @@ pub struct Alias {
 /// A constraint in an `impl`'s `where`, such as `Self.T == some Equal<Rhs =
 /// Self.T>` or `Self.T == Unit`, which the generic parameter `ty` must meet.
 /// A generic type's own `where` names its parameters without `Self.`, as in
-/// `Input == some Tuple`, and can only constrain them to implement traits.
+/// `Input == some Tuple`, and a trait's names its aliases, and they can only
+/// constrain them to implement traits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constraint {
     pub ty: TypeName,

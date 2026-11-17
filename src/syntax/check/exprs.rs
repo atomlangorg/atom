@@ -608,12 +608,20 @@ impl<'a> Checker<'a> {
     /// constraints of the `impl` that implements it. A parameter that the
     /// current `impl` constrains implements the traits it's constrained to.
     /// A generic type's parameter implements the traits its generic type
-    /// constrains it to.
+    /// constrains it to, and so does a trait's alias, in the trait.
     ///
     /// The standard library's `Tuple` is implemented by every tuple, and
     /// nothing else, without an `impl`.
     pub(super) fn implements(&self, ty: &Type, trait_index: usize) -> bool {
         if self.constraint_on(ty, trait_index).is_some() {
+            return true;
+        }
+        let constrained_alias = self
+            .traits
+            .iter()
+            .flat_map(|trait_| &trait_.constraints)
+            .any(|constraint| constraint.alias == *ty && constraint.trait_index == trait_index);
+        if constrained_alias {
             return true;
         }
         if trait_index == self.std_trait("Tuple") {

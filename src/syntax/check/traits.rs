@@ -148,6 +148,18 @@ impl<'a> Checker<'a> {
             };
             self.implementations
                 .insert((owner.id, trait_index), implementation);
+            if !self.traits[trait_index].decls.is_empty()
+                && let Some(aliases) = impl_aliases
+            {
+                self.unchecked_impls.push(UncheckedImpl {
+                    file: self.cx.file,
+                    trait_name: with.clone(),
+                    self_ty: self_ty.clone(),
+                    trait_index,
+                    aliases,
+                    constraints,
+                });
+            }
             let implemented = functions.iter().zip(indexes).collect();
             self.check_implements(
                 Implementation {
@@ -163,14 +175,15 @@ impl<'a> Checker<'a> {
         }
         pending
     }
-    /// Declares the trait called `name` in the current file. Its signatures
-    /// are worked out by `define_trait`, once types are defined.
+    /// Declares the trait called `name` in the current file, with the
+    /// constraints `decls`. Its signatures and constraints are worked out by
+    /// `define_trait`, once types are defined.
     pub(super) fn declare_trait(
         &mut self,
         name: &'a str,
         span: Span,
-        aliases: &'a [ast::Alias],
-        functions: &'a [Function],
+        decls: &'a [ast::Constraint],
+        (aliases, functions): (&'a [ast::Alias], &'a [Function]),
     ) {
         self.traits.push(TraitInfo {
             name,
@@ -180,6 +193,8 @@ impl<'a> Checker<'a> {
             functions,
             stand_ins: vec![],
             signatures: vec![],
+            decls,
+            constraints: vec![],
         });
         self.declare(name, span, Binding::Trait(self.traits.len() - 1));
     }
@@ -193,6 +208,7 @@ impl<'a> Checker<'a> {
             file,
             aliases,
             functions,
+            decls,
             ..
         } = self.traits[index];
         self.cx.file = file;
@@ -238,20 +254,139 @@ impl<'a> Checker<'a> {
         self.impl_aliases.push(alias_types.collect());
         let alias_types = Some(self.impl_aliases.len() - 1);
         let impl_ = (alias_types, None);
-        let signatures = self.in_impl(Some(stand_ins[0].clone()), impl_, |checker| {
-            let mut signatures = vec![];
-            for function in functions {
-                let params = function
-                    .params
-                    .iter()
-                    .map(|param| checker.resolve_type(&param.ty))
-                    .collect();
-                signatures.push((params, checker.resolve_type(&function.ret)));
-            }
-            signatures
-        });
+        let (signatures, constraints) =
+            self.in_impl(Some(stand_ins[0].clone()), impl_, |checker| {
+                let mut signatures = vec![];
+                for function in functions {
+                    let params = function
+                        .params
+                        .iter()
+                        .map(|param| checker.resolve_type(&param.ty))
+                        .collect();
+                    signatures.push((params, checker.resolve_type(&function.ret)));
+                }
+                let constraints = checker.trait_constraints(name, decls, &stand_ins[1..]);
+                (signatures, constraints)
+            });
         self.traits[index].stand_ins = stand_ins;
         self.traits[index].signatures = signatures;
+        self.traits[index].constraints = constraints;
+    }
+    /// Works out `decls`, the constraints of the trait called `trait_name`,
+    /// whose aliases are `alias_stand_ins` in the trait. Each must be that
+    /// one of them implements a trait.
+    fn trait_constraints(
+        &mut self,
+        trait_name: &str,
+        decls: &'a [ast::Constraint],
+        alias_stand_ins: &[Type],
+    ) -> Vec<TraitConstraint<'a>> {
+        let mut constraints = vec![];
+        for decl in decls {
+            // Everything is resolved, so each part's errors are found.
+            let alias = self.resolve_type(&decl.ty);
+            let (name, aliases) = match &decl.bound {
+                ast::Bound::Trait { name, aliases } => (name, aliases),
+                ast::Bound::Type(ty) => {
+                    self.resolve_type(ty);
+                    let error = CheckError::TypeConstraintNotTrait(decl.to_string());
+                    self.error(decl.span, error);
+                    continue;
+                }
+            };
+            let trait_index = self.resolve_trait(name);
+            let alias = match alias {
+                Some(alias) if alias_stand_ins.contains(&alias) => Some(alias),
+                Some(ty) => {
+                    let error = CheckError::TraitConstrainedNotAlias {
+                        trait_name: trait_name.to_string(),
+                        ty,
+                    };
+                    self.error(decl.span, error);
+                    None
+                }
+                None => None,
+            };
+            let mut given: Vec<(&str, _)> = vec![];
+            for alias in aliases {
+                let ty = alias.ty.as_ref().and_then(|ty| self.resolve_type(ty));
+                if let Some(trait_index) = trait_index
+                    && !self.traits[trait_index]
+                        .aliases
+                        .iter()
+                        .any(|declared| declared.name == alias.name)
+                {
+                    let error = CheckError::NotInTrait {
+                        trait_name: name.to_string(),
+                        member: alias.name.clone(),
+                    };
+                    self.error(alias.span, error);
+                } else if given.iter().any(|(found, _)| *found == alias.name) {
+                    self.error(alias.span, CheckError::Redeclared(alias.name.clone()));
+                } else {
+                    given.push((&alias.name, ty));
+                }
+            }
+            if let (Some(alias), Some(trait_index)) = (alias, trait_index) {
+                constraints.push(TraitConstraint {
+                    decl,
+                    alias,
+                    trait_index,
+                    given,
+                });
+            }
+        }
+        constraints
+    }
+    /// Checks that the aliases of `unchecked` meet its trait's constraints,
+    /// reporting the first they don't.
+    pub(super) fn check_impl_constraints(&mut self, unchecked: UncheckedImpl) {
+        let UncheckedImpl {
+            file,
+            trait_name,
+            self_ty,
+            trait_index,
+            aliases,
+            constraints,
+        } = unchecked;
+        let trait_ = self.traits[trait_index].clone();
+        // What the trait's `Self` and aliases stand for in the `impl`. An
+        // alias whose type is unknown has already been reported.
+        let mut params = HashMap::from([(trait_.stand_ins[0].id, self_ty.clone())]);
+        for (alias, stand_in) in trait_.aliases.iter().zip(&trait_.stand_ins[1..]) {
+            if let Some(ImplAliasType::Known(Some(ty))) =
+                self.impl_aliases[aliases].get(alias.name.as_str())
+            {
+                params.insert(stand_in.id, ty.clone());
+            }
+        }
+        let outer = std::mem::replace(&mut self.cx.constraints, constraints);
+        let unmet = trait_.constraints.iter().find_map(|constraint| {
+            let arg = params.get(&constraint.alias.id)?;
+            let given_match = constraint.given.iter().all(|(name, given)| {
+                let Some(given) = given else {
+                    return true;
+                };
+                // An unknown type has already been reported.
+                self.alias_of(arg, constraint.trait_index, name).is_none_or(
+                    |(found, found_params)| self.same_type(given, &params, &found, &found_params),
+                )
+            });
+            let met = self.implements(arg, constraint.trait_index) && given_match;
+            (!met).then(|| (constraint.decl, &constraint.alias, arg.clone()))
+        });
+        self.cx.constraints = outer;
+        let Some((decl, alias, arg)) = unmet else {
+            return;
+        };
+        let error = CheckError::UnmetTraitConstraint {
+            ty: self_ty,
+            trait_name: trait_name.to_string(),
+            constraint: decl.to_string(),
+            alias: alias.name.clone(),
+            arg,
+        };
+        self.error_in(file, trait_name.span, error);
     }
     /// Works out the types of an `impl`'s `aliases`, which can use `Self`
     /// and the aliases before them, returning their index in `impl_aliases`

@@ -704,8 +704,8 @@ where
             bound,
             span: Span::from(e.span()),
         });
-    // `where` is only special after an `impl`'s type and trait, or a
-    // generic type's parameters, so it can still be a label.
+    // `where` is only special after an `impl`'s type and trait, a generic
+    // type's parameters, or a trait's name, so it can still be a label.
     let where_ = just(Token::Ident("where"))
         .ignore_then(
             constraint
@@ -1061,7 +1061,7 @@ where
                 .ignore_then(type_path.clone().labelled("trait"))
                 .or_not(),
         )
-        .then(where_)
+        .then(where_.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(impl_member))
         .map(|((((ty, with), constraints), span), members)| {
@@ -1086,13 +1086,15 @@ where
         .or(function_in(Place::Trait).map(Member::Function));
     let trait_ = just(Token::Trait)
         .ignore_then(type_ident.clone())
-        .map_with(|name, e| (name, Span::from(e.span())))
+        .then(where_)
+        .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(trait_member))
-        .map(|((name, span), members)| {
+        .map(|(((name, constraints), span), members)| {
             let (aliases, functions) = split(members);
             Stmt {
                 kind: StmtKind::Trait {
                     name,
+                    constraints,
                     aliases,
                     functions,
                 },
@@ -4599,6 +4601,7 @@ mod tests {
             Ok(vec![
                 stmt_node(StmtKind::Trait {
                     name: "And".to_string(),
+                    constraints: vec![],
                     aliases: vec![],
                     functions: vec![
                         Function {
@@ -4629,6 +4632,7 @@ mod tests {
                 }),
                 stmt_node(StmtKind::Trait {
                     name: "Marker".to_string(),
+                    constraints: vec![],
                     aliases: vec![],
                     functions: vec![],
                 }),
@@ -4739,8 +4743,9 @@ mod tests {
                 }),
             ])
         );
-        // `where` and `some` are only special in an `impl` or after a generic
-        // type's parameters, so they can still be names.
+        // `where` and `some` are only special in an `impl`, after a generic
+        // type's parameters, or after a trait's name, so they can still be
+        // names.
         assert!(parse("fn f(where: Int, some: Int) {}\nlet x = f(where: 1, some: 2)").is_ok());
         // `some` is a keyword anywhere in a constraint, as
         // `rejects_some_as_a_type_or_trait` tests.
@@ -4807,6 +4812,49 @@ mod tests {
             );
         }
         assert!(parse("group Pair<A> where {}").is_err());
+    }
+
+    #[test]
+    fn parses_traits_with_constraints() {
+        let src = "
+            trait Call where Input == some Tuple, Output == some Equal<Rhs = Output> {
+                alias Input
+                alias Output
+            }
+            ";
+        let Ok(program) = parse(src) else {
+            panic!("should parse");
+        };
+        let [
+            Stmt {
+                kind: StmtKind::Trait { constraints, .. },
+                ..
+            },
+        ] = &program[..]
+        else {
+            panic!("should be one trait, found {program:?}");
+        };
+        let rhs = Alias {
+            name: "Rhs".to_string(),
+            ty: Some(TypeName::new("Output")),
+            span: Span::default(),
+        };
+        let constraint = |ty, name, aliases| Constraint {
+            ty: TypeName::new(ty),
+            bound: Bound::Trait {
+                name: Name::new(name),
+                aliases,
+            },
+            span: Span::default(),
+        };
+        assert_eq!(
+            constraints,
+            &[
+                constraint("Input", "Tuple", vec![]),
+                constraint("Output", "Equal", vec![rhs]),
+            ]
+        );
+        assert!(parse("trait Call where {}").is_err());
     }
 
     #[test]

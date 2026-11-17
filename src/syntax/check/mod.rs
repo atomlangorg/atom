@@ -478,6 +478,42 @@ struct TraitInfo<'a> {
     /// are `None` if they're unknown, and use `stand_ins`. Worked out once
     /// types are defined.
     signatures: Vec<(Vec<Option<Type>>, Option<Type>)>,
+    /// The constraints of its `where`, which each implementation's aliases
+    /// must meet.
+    decls: &'a [ast::Constraint],
+    /// `decls`, worked out with `signatures`.
+    constraints: Vec<TraitConstraint<'a>>,
+}
+
+/// A constraint in a trait's `where`, that the type each implementation
+/// gives one of its aliases must implement the trait at `trait_index` in
+/// `Checker::traits`. In the trait, the alias implements it.
+#[derive(Clone)]
+struct TraitConstraint<'a> {
+    decl: &'a ast::Constraint,
+    /// The trait's stand-in for the alias it constrains.
+    alias: Type,
+    trait_index: usize,
+    /// The types the constraint gives the aliases of `trait_index`, as in
+    /// `some Equal<Rhs = Output>`, by name, which use the trait's
+    /// stand-ins, and are `None` if they're unknown.
+    given: Vec<(&'a str, Option<Type>)>,
+}
+
+/// An `impl` of `self_ty` with the trait at `trait_index` in
+/// `Checker::traits`, whose aliases are still to be checked against the
+/// trait's constraints.
+struct UncheckedImpl {
+    file: usize,
+    /// The trait's name, as the `impl` writes it.
+    trait_name: Name,
+    self_ty: Type,
+    trait_index: usize,
+    /// The index in `Checker::impl_aliases` of the types of its aliases.
+    aliases: usize,
+    /// Its own constraints, as an index into `Checker::constraints`, if it
+    /// has any, which its aliases can rely on.
+    constraints: Option<usize>,
 }
 
 /// An `impl ty with trait_name`, whose functions are checked against the
@@ -793,6 +829,9 @@ struct Checker<'a> {
     /// The types made from generic types with constraints before
     /// `impls_declared`, whose arguments are checked against them once it is.
     unchecked_instances: Vec<UncheckedInstance>,
+    /// The `impl`s of traits with constraints, which are checked once
+    /// `impls_declared`.
+    unchecked_impls: Vec<UncheckedImpl>,
     /// The functions in `functions` that stand for a constraint's trait's
     /// methods, by their indexes.
     fn_stand_ins: HashMap<usize, FnStandIn<'a>>,
@@ -932,9 +971,10 @@ impl<'a> Checker<'a> {
                     }
                     StmtKind::Trait {
                         name,
+                        constraints,
                         aliases,
                         functions,
-                    } => self.declare_trait(name, stmt.span, aliases, functions),
+                    } => self.declare_trait(name, stmt.span, constraints, (aliases, functions)),
                     _ => {}
                 }
             }
@@ -1062,6 +1102,9 @@ impl<'a> Checker<'a> {
         self.impls_declared = true;
         for unchecked in std::mem::take(&mut self.unchecked_instances) {
             self.check_instance(unchecked);
+        }
+        for unchecked in std::mem::take(&mut self.unchecked_impls) {
+            self.check_impl_constraints(unchecked);
         }
 
         for (file, pending) in std::mem::take(&mut self.pending) {

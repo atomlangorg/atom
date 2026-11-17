@@ -16,9 +16,9 @@
 
 // Types whose values can be called like functions, which calls `call`, as in
 // `adder(a: 3, b: 5)` for `adder.call(input: (a: 3, b: 5))`. The arguments
-// are always built into a tuple, which must be the `Input`, so a tuple is
-// never unpacked into them.
-trait Call {
+// are always built into a tuple, which is the `Input`, so it must implement
+// `Tuple`, and a tuple is never unpacked into them.
+trait Call where Input == some Tuple {
     alias Input
     alias Output
 
