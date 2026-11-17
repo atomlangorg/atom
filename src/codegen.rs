@@ -22,7 +22,8 @@
 //! used on them. `Bool` is `i1`. Every group is an
 //! LLVM struct of its fields, so `Unit` is `{}`. Its fields are ordered from
 //! most to least aligned, rather than as they're declared, so there's no
-//! padding between them. A choice is a struct of its
+//! padding between them. A function's parameters are ordered the same way,
+//! so they're in the same order as a tuple of them. A choice is a struct of its
 //! tag, the index of its option, then space for the largest of its options'
 //! values, which they share. The tag is the narrowest integer that can number
 //! every option, as `ir::tag_width` says, and a choice with at most one
@@ -237,6 +238,9 @@ struct Codegen<'a, 'ctx> {
     slots: Vec<Vec<u32>>,
     /// For each function in `program`, the LLVM function it compiles to.
     functions: Vec<FunctionValue<'ctx>>,
+    /// For each function in `program`, the indexes of its parameters, in the
+    /// order they're declared, in the order its LLVM function takes them.
+    param_orders: Vec<Vec<usize>>,
     /// For each top-level value in `program`, the LLVM global holding it.
     globals: Vec<GlobalValue<'ctx>>,
     /// Where each local of the function being built is stored, along with its
@@ -262,6 +266,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             types: vec![],
             slots: vec![],
             functions: vec![],
+            param_orders: vec![],
             globals: vec![],
             locals: vec![],
             trap: None,
@@ -275,15 +280,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.declare_types();
 
         for function in &self.program.functions {
-            let params: Vec<_> = function.locals[..function.params]
+            let declared = &function.locals[..function.params];
+            let order = self.packed_order(declared);
+            let params: Vec<_> = order
                 .iter()
-                .map(|&ty| self.types[ty].into())
+                .map(|&index| self.types[declared[index]].into())
                 .collect();
             let fn_type = self.types[function.returns].fn_type(&params, false);
             let value = self
                 .module
                 .add_function(&function.name, fn_type, Some(Linkage::Internal));
             self.functions.push(value);
+            self.param_orders.push(order);
         }
 
         for global in &self.program.globals {
@@ -368,14 +376,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 tag.into_iter().chain([payload.into()]).collect::<Vec<_>>()
             }
             TypeDef::Group { .. } => {
-                // Every type's ABI size is a multiple of its alignment, which
-                // is a power of 2, so each field after a more aligned one
-                // starts aligned. Fields that are as aligned as each other
-                // stay in the order they're declared.
-                let mut order: Vec<_> = (0..held.len()).collect();
-                order.sort_by_key(|&index| {
-                    std::cmp::Reverse(self.target_data.get_abi_alignment(&self.types[held[index]]))
-                });
+                let order = self.packed_order(held);
                 let mut slots = vec![0; held.len()];
                 for (slot, &index) in order.iter().enumerate() {
                     slots[index] = slot as u32;
@@ -386,6 +387,24 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             TypeDef::Primitive(_) => unreachable!("primitives have no fields"),
         };
         self.types[id].into_struct_type().set_body(&body, false);
+    }
+
+    /// The indexes of `types`, which are indexes into `program.types`, in the
+    /// order that packs them most tightly, which is from most to least
+    /// aligned. Every type's ABI size is a multiple of its alignment, which
+    /// is a power of 2, so each one after a more aligned one starts aligned.
+    /// Types that are as aligned as each other stay in the order they're in.
+    /// Groups' fields and functions' parameters are both ordered by this, so
+    /// a tuple of a function's parameters holds them in the order it takes
+    /// them.
+    fn packed_order(&self, types: &[usize]) -> Vec<usize> {
+        let mut order: Vec<_> = (0..types.len()).collect();
+        let alignment = |index: &usize| {
+            let ty = &self.types[types[*index]];
+            std::cmp::Reverse(self.target_data.get_abi_alignment(ty))
+        };
+        order.sort_by_key(alignment);
+        order
     }
 
     /// The LLVM integer that's `width` wide.
@@ -460,8 +479,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 Ok((self.builder.build_alloca(ty, "")?, ty))
             })
             .collect::<Result<_, BuilderError>>()?;
-        for (&(slot, _), param) in self.locals.iter().zip(value.get_param_iter()) {
-            self.builder.build_store(slot, param)?;
+        // The parameters, in the order they're declared.
+        let mut args = value.get_params();
+        for (param, &declared) in value.get_param_iter().zip(&self.param_orders[index]) {
+            args[declared] = param;
+        }
+        for (&(slot, _), &arg) in self.locals.iter().zip(&args) {
+            self.builder.build_store(slot, arg)?;
         }
 
         match &function.body {
@@ -490,12 +514,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             &Body::Primitive(primitive) => {
                 let returns = function.returns;
                 let result = self
-                    .primitive_instruction(
-                        primitive,
-                        &value.get_params(),
-                        &function.locals[..function.params],
-                        returns,
-                    )?
+                    .primitive_instruction(primitive, &args, returns)?
                     .expect("only `exit` isn't built in place");
                 self.builder.build_return(Some(&result))?;
             }
@@ -506,13 +525,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Builds the instructions that `primitive` is, on `args`, where a
     /// method's `self` comes first, returning a value of the type at
     /// `returns` in `program.types`, or `None` for `exit`, which isn't built
-    /// in place. `params` are the types of `args`, as indexes into
-    /// `program.types`.
+    /// in place.
     fn primitive_instruction(
         &mut self,
         primitive: PrimitiveFn,
         args: &[BasicValueEnum<'ctx>],
-        params: &[usize],
         returns: usize,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BuilderError> {
         let int = |index: usize| args[index].into_int_value();
@@ -554,9 +571,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             PrimitiveFn::NewChoice => self.choose(returns, args[0], args[1])?,
             // A `ChoiceOption` is already the tag of its option.
             PrimitiveFn::OptionTag => args[0],
-            PrimitiveFn::CallFn => {
-                self.call_function_value(args[0], (args[1], params[1]), returns)?
-            }
+            PrimitiveFn::CallFn => self.call_function_value(args[0], args[1], returns)?,
             PrimitiveFn::ConvertInt { from_signed } => {
                 let to = self.types[returns].into_int_type();
                 self.builder
@@ -672,13 +687,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     /// Calls the function that `function`, an `Fn`, holds the address of in
     /// its `RawPointer`. Its parameters are the elements of the tuple
-    /// `input`, in the order they're declared, where `input_ty` is the
-    /// tuple's type in `program.types`. It returns a value of the type at
-    /// `returns` in `program.types`.
+    /// `input`, in the order they're stored, which is the order the function
+    /// takes them, and it returns a value of the type at `returns` in
+    /// `program.types`.
     fn call_function_value(
         &mut self,
         function: BasicValueEnum<'ctx>,
-        (input, input_ty): (BasicValueEnum<'ctx>, usize),
+        input: BasicValueEnum<'ctx>,
         returns: usize,
     ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
         let pointer = self
@@ -694,15 +709,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         )?;
         // A function's `Input` is always a tuple, but an `Fn` with any other
         // `Input` can still be called, though it never has a value.
-        let args = match &self.program.types[input_ty] {
-            TypeDef::Group { fields, .. } => (0..fields.len())
-                .map(|index| {
-                    let slot = self.slot(input_ty, index);
-                    self.builder
-                        .build_extract_value(input.into_struct_value(), slot, "")
-                })
+        let args = match input {
+            BasicValueEnum::StructValue(input) => (0..input.get_type().count_fields())
+                .map(|index| self.builder.build_extract_value(input, index, ""))
                 .collect::<Result<Vec<_>, _>>()?,
-            TypeDef::Primitive(_) | TypeDef::Choice { .. } => vec![input],
+            input => vec![input],
         };
         let params: Vec<_> = args.iter().map(|arg| arg.get_type().into()).collect();
         let fn_type = self.types[returns].fn_type(&params, false);
@@ -893,16 +904,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // rather than called.
                 let callee = &self.program.functions[*function];
                 if let Body::Primitive(primitive) = callee.body
-                    && let Some(result) = self.primitive_instruction(
-                        primitive,
-                        &args,
-                        &callee.locals[..callee.params],
-                        callee.returns,
-                    )?
+                    && let Some(result) =
+                        self.primitive_instruction(primitive, &args, callee.returns)?
                 {
                     return Ok(result);
                 }
-                let args: Vec<_> = args.into_iter().map(Into::into).collect();
+                let args: Vec<_> = self.param_orders[*function]
+                    .iter()
+                    .map(|&declared| args[declared].into())
+                    .collect();
                 self.builder
                     .build_call(self.functions[*function], &args, "")?
                     .try_as_basic_value()
@@ -1743,6 +1753,42 @@ mod tests {
             }
             ";
         assert_eq!(run(src), 15);
+    }
+
+    #[test]
+    fn parameters_are_ordered_like_a_tuple_of_them() {
+        let src = "
+            fn combined(first: IntU8, wide: IntS64, last: IntU8) -> Int {
+                return 0
+            }
+
+            impl IntU8 {
+                fn widened(by amount: IntS32) -> Int {
+                    return 0
+                }
+            }
+
+            fn main() -> Int {
+                let byte: IntU8 = 4
+                return combined(first: 1, wide: 2, last: 3) + byte.widened(by: 5)
+            }
+            ";
+        let context = Context::create();
+        let module = compile_files(&context, &machine(), &[("/main", src)]);
+        let params = |name: &str| -> Vec<String> {
+            let function = module
+                .get_function(name)
+                .unwrap_or_else(|| panic!("should compile `{name}`"));
+            function
+                .get_type()
+                .get_param_types()
+                .iter()
+                .map(|ty| ty.print_to_string().to_string())
+                .collect()
+        };
+        assert_eq!(params("/main::combined"), ["i64", "i8", "i8"]);
+        // A method's `self` is ordered with the rest of its parameters.
+        assert_eq!(params("/main::IntU8.widened"), ["i32", "i8"]);
     }
 
     #[test]
