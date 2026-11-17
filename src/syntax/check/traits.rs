@@ -71,7 +71,7 @@ impl<'a> Checker<'a> {
         // Signatures can use `Self` and the `impl`'s aliases, just like
         // bodies, and the parameters it constrains implement their traits.
         let constraints = self.in_impl(self_ty.clone(), (None, None), |checker| {
-            checker.define_constraints(constraints)
+            checker.define_constraints(constraints, None)
         });
         // The functions are the generic type's, but in the `impl`, `Self` is
         // the type its constraints say it is, as in `ChoiceOption<Base, Unit>`

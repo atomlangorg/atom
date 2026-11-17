@@ -265,9 +265,20 @@ pub enum CheckError {
     CannotInferImplicitType(String),
     /// A generic type that's only for choices was given something else.
     NotAChoice { generic: String, found: Type },
-    /// `Fn`, called `generic` where it's used, was given an `Input` that
-    /// doesn't implement `Tuple`.
-    FnInputNotTuple { generic: String, found: Type },
+    /// A type made from a generic type, `ty`, has arguments that don't meet
+    /// the generic type's `constraint`, since its parameter `param` is `arg`.
+    UnmetTypeConstraint {
+        ty: String,
+        constraint: String,
+        param: String,
+        arg: Type,
+    },
+    /// A constraint in a generic type's `where` is on a type that isn't one
+    /// of its parameters.
+    TypeConstrainedNotParam { generic: String, ty: Type },
+    /// A constraint in a generic type's `where` says what one of its
+    /// parameters is, rather than which trait it implements.
+    TypeConstraintNotTrait(String),
     /// An `impl` implements the standard library's `Tuple`, which only
     /// tuples implement, without one.
     ImplementedTuple,
@@ -722,9 +733,23 @@ impl fmt::Display for CheckError {
                     "`{generic}` can only be used with a choice, found `{found}`"
                 )
             }
-            Self::FnInputNotTuple { generic, found } => write!(
+            Self::UnmetTypeConstraint {
+                ty,
+                constraint,
+                param,
+                arg,
+            } => write!(
                 f,
-                "the `Input` of `{generic}` must implement `Tuple`, found `{found}`"
+                "`{ty}` can only be used where `{constraint}`, but its `{param}` is `{arg}`"
+            ),
+            Self::TypeConstrainedNotParam { generic, ty } => write!(
+                f,
+                "only the generic parameters of `{generic}` can be constrained, not `{ty}`"
+            ),
+            Self::TypeConstraintNotTrait(constraint) => write!(
+                f,
+                "a generic type's constraints can only say which traits its parameters implement, \
+                 as in `T == some Equal`, not `{constraint}`"
             ),
             Self::ImplementedTuple => write!(
                 f,

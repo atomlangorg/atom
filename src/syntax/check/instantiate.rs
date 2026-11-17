@@ -188,8 +188,13 @@ impl<'a> Checker<'a> {
                 None => HashMap::new(),
             };
             state.site = site;
-            // The aliases its constraints don't give are its arguments'.
-            if let Some(constraints) = self.functions[function.index].constraints {
+            // The aliases its constraints, and its generic type's, don't give
+            // are its arguments'.
+            let signature = &self.functions[function.index];
+            let own = signature
+                .template
+                .and_then(|template| self.templates[template].constraints);
+            for constraints in signature.constraints.into_iter().chain(own) {
                 let (file, span) = site;
                 self.cx.file = file;
                 self.add_alias_params(constraints, &mut params, span)?;

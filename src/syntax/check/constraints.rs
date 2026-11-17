@@ -17,6 +17,11 @@
 //! The constraints of an `impl`'s `where`, as in `impl Optional with Equal
 //! where Self.T == some Equal<Rhs = Self.T>`.
 //!
+//! A generic type can have constraints too, as in `group Fn<Input, Output>
+//! where Input == some Tuple`, which every type made from it must meet, so
+//! its parameters implement their traits in its fields and all of its
+//! `impl`s.
+//!
 //! An `impl` with constraints is only for the types made from its generic
 //! type whose arguments meet them. Its functions are checked once, like any
 //! other generic type's, where each parameter it constrains implements its
@@ -27,14 +32,65 @@
 use super::*;
 
 impl<'a> Checker<'a> {
-    /// Works out the `constraints` of the `impl` being declared, returning
-    /// their index in `constraints` if there are any. Each must be on one of
-    /// the parameters of the `impl`'s generic type.
-    pub(super) fn define_constraints(&mut self, decls: &'a [ast::Constraint]) -> Option<usize> {
+    /// Works out the constraints of the generic type at `template` in
+    /// `templates`, once it and every trait has been defined.
+    pub(super) fn define_type_constraints(&mut self, template: usize) {
+        let Template {
+            file,
+            decls,
+            ref stand_ins,
+            ..
+        } = self.templates[template];
+        let type_params = Some((template, stand_ins.clone()));
+        let constraints = self.at_top_level(file, type_params, |checker| {
+            checker.define_constraints(decls, Some(template))
+        });
+        self.templates[template].constraints = constraints;
+    }
+    /// Checks that the arguments of `unchecked` meet its generic type's
+    /// constraints, reporting the first they don't. Returns whether they do.
+    pub(super) fn check_instance(&mut self, unchecked: UncheckedInstance) -> bool {
+        let UncheckedInstance {
+            file,
+            name,
+            template,
+            args,
+            constraints,
+        } = unchecked;
+        let outer = std::mem::replace(&mut self.cx.constraints, constraints);
+        let unmet = self
+            .unmet_constraint(self.templates[template].constraints, &args)
+            .map(|(decl, param)| {
+                let arg = self.params(template, &args)[&param.id].clone();
+                (decl.to_string(), param.name.clone(), arg)
+            });
+        self.cx.constraints = outer;
+        let Some((constraint, param, arg)) = unmet else {
+            return true;
+        };
+        let error = CheckError::UnmetTypeConstraint {
+            ty: self.instance_name(template, &args),
+            constraint,
+            param,
+            arg,
+        };
+        self.error_in(file, name.span, error);
+        false
+    }
+    /// Works out `decls`, returning their index in `constraints` if there
+    /// are any. They're the constraints of the generic type at `of_type` in
+    /// `templates` if it's given, which can only be that its parameters
+    /// implement traits, and otherwise of the `impl` being declared. Each
+    /// must be on one of the parameters of the generic type.
+    pub(super) fn define_constraints(
+        &mut self,
+        decls: &'a [ast::Constraint],
+        of_type: Option<usize>,
+    ) -> Option<usize> {
         if decls.is_empty() {
             return None;
         }
-        let template = self.generic_context();
+        let template = of_type.or_else(|| self.generic_context());
         let mut constraints = vec![];
         let mut equal = vec![];
         for decl in decls {
@@ -44,7 +100,11 @@ impl<'a> Checker<'a> {
                 ast::Bound::Trait { name, aliases } => (name, aliases),
                 ast::Bound::Type(ty) => {
                     let ty = self.resolve_type(ty);
-                    if let Some(param) = self.constrained_param(param, template, decl)
+                    if of_type.is_some() {
+                        let error = CheckError::TypeConstraintNotTrait(decl.to_string());
+                        self.error(decl.span, error);
+                    } else if let Some(param) =
+                        self.constrained_param(param, (template, of_type), decl)
                         && let Some(ty) = ty
                     {
                         equal.push(EqualConstraint { decl, param, ty });
@@ -53,7 +113,7 @@ impl<'a> Checker<'a> {
                 }
             };
             let trait_index = self.resolve_trait(trait_name);
-            let param = self.constrained_param(param, template, decl);
+            let param = self.constrained_param(param, (template, of_type), decl);
             let mut given = HashMap::new();
             for alias in aliases {
                 let ty = alias.ty.as_ref().and_then(|ty| self.resolve_type(ty));
@@ -120,11 +180,12 @@ impl<'a> Checker<'a> {
     }
     /// `param`, which `decl` constrains, if it's one of the parameters of the
     /// generic type at `template` in `templates`, reporting an error if it
-    /// isn't. `None` if it's unknown.
+    /// isn't. `None` if it's unknown. `of_type` is given if they're the
+    /// generic type's own constraints, as in `define_constraints`.
     fn constrained_param(
         &mut self,
         param: Option<Type>,
-        template: Option<usize>,
+        (template, of_type): (Option<usize>, Option<usize>),
         decl: &ast::Constraint,
     ) -> Option<Type> {
         match (param, template) {
@@ -133,8 +194,15 @@ impl<'a> Checker<'a> {
             {
                 Some(param)
             }
-            (Some(param), _) => {
-                self.error(decl.span, CheckError::ConstrainedNotParam(param));
+            (Some(ty), _) => {
+                let error = match of_type {
+                    Some(template) => CheckError::TypeConstrainedNotParam {
+                        generic: self.templates[template].name.to_string(),
+                        ty,
+                    },
+                    None => CheckError::ConstrainedNotParam(ty),
+                };
+                self.error(decl.span, error);
                 None
             }
             (None, _) => None,
@@ -223,44 +291,62 @@ impl<'a> Checker<'a> {
                 .insert(&declared.name, function);
         }
     }
-    /// The constraint of the current `impl` that `ty` implements the trait
-    /// at `trait_index` in `traits`, if it has one.
+    /// The constraints on `ty` where the code being checked is, along with
+    /// the generic type whose parameter it constrains, as an index into
+    /// `templates`. They're those of the current `impl`, and if `ty` is a
+    /// generic type's parameter, its generic type's own, which hold
+    /// wherever it can be used.
+    fn constraints_on(&self, ty: &Type) -> impl Iterator<Item = (usize, &ConstraintInfo<'a>)> {
+        let own = self
+            .templates
+            .iter()
+            .find(|template| template.stand_ins.contains(ty))
+            .and_then(|template| template.constraints);
+        self.cx
+            .constraints
+            .into_iter()
+            .chain(own)
+            .flat_map(move |index| {
+                let Constraints {
+                    template,
+                    constraints,
+                    ..
+                } = &self.constraints[index];
+                constraints
+                    .iter()
+                    .filter(move |constraint| constraint.param == *ty)
+                    .map(move |constraint| (*template, constraint))
+            })
+    }
+    /// The constraint where the code being checked is that `ty` implements
+    /// the trait at `trait_index` in `traits`, if there is one, along with
+    /// the generic type whose parameter it constrains, as `constraints_on`
+    /// says.
     pub(super) fn constraint_on(
         &self,
         ty: &Type,
         trait_index: usize,
-    ) -> Option<&ConstraintInfo<'a>> {
-        let index = self.cx.constraints?;
-        self.constraints[index]
-            .constraints
-            .iter()
-            .find(|constraint| constraint.param == *ty && constraint.trait_index == trait_index)
+    ) -> Option<(usize, &ConstraintInfo<'a>)> {
+        self.constraints_on(ty)
+            .find(|(_, constraint)| constraint.trait_index == trait_index)
     }
-    /// The method called `name` that `ty` has from the traits the current
-    /// `impl` constrains it to.
+    /// The method called `name` that `ty` has from the traits it's
+    /// constrained to where the code being checked is.
     pub(super) fn constrained_method(&self, ty: &Type, name: &str) -> Option<FnRef> {
-        let index = self.cx.constraints?;
-        let Constraints {
-            template,
-            constraints,
-            ..
-        } = &self.constraints[index];
-        let index = constraints
-            .iter()
-            .filter(|constraint| constraint.param == *ty)
-            .find_map(|constraint| constraint.functions.get(name).copied())?;
-        let args = self.templates[*template].stand_ins.clone();
+        let (template, index) = self.constraints_on(ty).find_map(|(template, constraint)| {
+            Some((template, *constraint.functions.get(name)?))
+        })?;
+        let args = self.templates[template].stand_ins.clone();
         Some(FnRef { index, args })
     }
     /// The function of `ty` that implements the function called `name` of
     /// the trait at `trait_index` in `traits`, if it has an implementation of
     /// the trait, whether or not it meets that implementation's constraints.
-    /// A parameter that the current `impl` constrains to implement the trait
-    /// has the function standing for it.
+    /// A parameter constrained to implement the trait, by the current `impl`
+    /// or its own generic type, has the function standing for it.
     pub(super) fn trait_fn(&self, ty: &Type, trait_index: usize, name: &str) -> Option<FnRef> {
-        if let Some(constraint) = self.constraint_on(ty, trait_index) {
+        if let Some((template, constraint)) = self.constraint_on(ty, trait_index) {
             let index = *constraint.functions.get(name)?;
-            let template = self.constraints[self.cx.constraints?].template;
             let args = self.templates[template].stand_ins.clone();
             return Some(FnRef { index, args });
         }
@@ -340,7 +426,7 @@ impl<'a> Checker<'a> {
         trait_index: usize,
         alias: &str,
     ) -> Option<(Type, HashMap<usize, Type>)> {
-        if let Some(constraint) = self.constraint_on(ty, trait_index) {
+        if let Some((_, constraint)) = self.constraint_on(ty, trait_index) {
             let (_, found) = constraint.aliases.iter().find(|(name, _)| *name == alias)?;
             let found = match found {
                 ConstraintAlias::Given(ty) => ty.clone()?,

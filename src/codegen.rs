@@ -2034,6 +2034,73 @@ mod tests {
     }
 
     #[test]
+    fn generic_types_call_their_constrained_arguments_functions() {
+        // `made` is whatever `T`'s `Output` is, which is only known once
+        // `total` is made for a `T`.
+        let src = "
+            trait Maker {
+                alias Output
+
+                fn make() -> Output
+                fn count(of output: Output) -> Int
+            }
+
+            group Factory<T> where T == some Maker {
+                maker: T
+            }
+
+            impl Factory {
+                static fn of(_ maker: Self.T) -> Self {
+                    return Self { maker: maker }
+                }
+
+                fn total() -> Int {
+                    let made = self.maker.make()
+                    return self.maker.count(of: made)
+                }
+            }
+
+            group Pair {
+                value: Int
+            }
+
+            impl Pair {
+                static fn of(_ value: Int) -> Self {
+                    return Self { value: value }
+                }
+            }
+
+            impl Pair with Maker {
+                fn make() -> (first: Int, second: Int) {
+                    return (first: self.value, second: self.value + 1)
+                }
+
+                fn count(of output: (first: Int, second: Int)) -> Int {
+                    return output.first * 10 + output.second
+                }
+            }
+
+            impl Bool with Maker {
+                fn make() -> Int {
+                    if self {
+                        return 1
+                    }
+                    return 0
+                }
+
+                fn count(of output: Int) -> Int {
+                    return output * 100
+                }
+            }
+
+            fn main() -> Int {
+                return Factory.of(Pair.of(4)).total() + Factory.of(true).total()
+            }
+            ";
+        assert_eq!(run(src), 145);
+    }
+
+    #[test]
     fn compare_on_integers_gives_their_comparison() {
         // Each check is one bit of the result.
         let src = "

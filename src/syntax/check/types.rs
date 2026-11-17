@@ -211,7 +211,9 @@ impl<'a> Checker<'a> {
     }
     /// The type made from the generic type called `name`, at `template` in
     /// `templates`, with `args`, which must suit it: a tag or option needs a
-    /// choice, and an `Fn` needs an `Input` that implements `Tuple`.
+    /// choice, and they must meet its constraints. Those are checked once
+    /// every `impl` has been declared, so until then, the type is made
+    /// whether or not they meet them.
     pub(super) fn named_instance(
         &mut self,
         template: usize,
@@ -226,15 +228,19 @@ impl<'a> Checker<'a> {
             self.error(name.span, error);
             return None;
         }
-        if template == self.std_template("Fn")
-            && !self.implements(&args[0], self.std_trait("Tuple"))
-        {
-            let error = CheckError::FnInputNotTuple {
-                generic: name.to_string(),
-                found: args[0].clone(),
+        if !self.templates[template].decls.is_empty() {
+            let unchecked = UncheckedInstance {
+                file: self.cx.file,
+                name: name.clone(),
+                template,
+                args: args.clone(),
+                constraints: self.cx.constraints,
             };
-            self.error(name.span, error);
-            return None;
+            if !self.impls_declared {
+                self.unchecked_instances.push(unchecked);
+            } else if !self.check_instance(unchecked) {
+                return None;
+            }
         }
         self.instance(template, args, name.span)
     }
@@ -307,8 +313,14 @@ impl<'a> Checker<'a> {
         self.resolve_type(type_name)
     }
     /// Declares the generic group, choice or primitive called `name`, with
-    /// `params`, which `stmt` declares.
-    pub(super) fn declare_template(&mut self, name: &'a str, params: &'a [String], stmt: &'a Stmt) {
+    /// `params` and the constraints `decls`, which `stmt` declares.
+    pub(super) fn declare_template(
+        &mut self,
+        name: &'a str,
+        params: &'a [String],
+        decls: &'a [ast::Constraint],
+        stmt: &'a Stmt,
+    ) {
         let mut seen = HashSet::new();
         for param in params {
             if !seen.insert(param) {
@@ -320,6 +332,8 @@ impl<'a> Checker<'a> {
             file: self.cx.file,
             params,
             stmt,
+            decls,
+            constraints: None,
             stand_ins: vec![],
             generic: None,
         });

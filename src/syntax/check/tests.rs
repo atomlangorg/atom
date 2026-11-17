@@ -7935,11 +7935,15 @@ fn function_inputs_must_implement_tuple() {
             "
         ),
         [
-            "the `Input` of `Fn` must implement `Tuple`, found `Bool`",
-            "the `Input` of `Fn` must implement `Tuple`, found `T`",
-            "the `Input` of `Fn` must implement `Tuple`, found `Point`",
-            "the `Input` of `Fn` must implement `Tuple`, found `Int`",
-            "the `Input` of `Fn` must implement `Tuple`, found `Fn<(), Int>`",
+            "`Fn<Bool, Int>` can only be used where `Input == some Tuple`, but its `Input` is \
+             `Bool`",
+            "`Fn<T, Int>` can only be used where `Input == some Tuple`, but its `Input` is `T`",
+            "`Fn<Point, Int>` can only be used where `Input == some Tuple`, but its `Input` is \
+             `Point`",
+            "`Fn<Int, Int>` can only be used where `Input == some Tuple`, but its `Input` is \
+             `Int`",
+            "`Fn<Fn<(), Int>, Int>` can only be used where `Input == some Tuple`, but its \
+             `Input` is `Fn<(), Int>`",
         ]
     );
 }
@@ -9001,6 +9005,129 @@ fn aliases_left_out_of_constraints_are_their_arguments_once_made() {
             signed: true
         })
     ));
+}
+
+/// A generic type whose parameter must implement a trait, for the tests of
+/// generic types' own constraints.
+const LABELLED: &str = "
+    trait Named {
+        fn code() -> Int
+    }
+
+    group Labelled<T> where T == some Named {
+        value: T
+    }
+
+    impl Labelled {
+        static fn of(_ value: Self.T) -> Self {
+            return Self { value: value }
+        }
+    }
+    ";
+
+#[test]
+fn generic_type_constraints_hold_in_its_fields_and_impls() {
+    // `Labels` is made before `Point` implements `Named`.
+    let src = format!(
+        "
+        {LABELLED}
+        alias Labels = Labelled<Point>
+
+        group Pair<T> where T == some Named {{
+            first: Labelled<T>
+            second: Labelled<T>
+        }}
+
+        impl Labelled {{
+            fn valueCode() -> Int {{
+                return self.value.code()
+            }}
+
+            fn relabelled() -> Labelled<Self.T> {{
+                return Labelled.of(self.value)
+            }}
+        }}
+
+        impl Labelled with Named {{
+            fn code() -> Int {{
+                return self.value.code() + 1
+            }}
+        }}
+
+        group Point {{}}
+
+        impl Point with Named {{
+            fn code() -> Int {{
+                return 1
+            }}
+        }}
+
+        fn f(point: Point, pair: Pair<Labelled<Point>>) -> Int {{
+            let labels: Labels = Labelled.of(point)
+            return labels.relabelled().code() + pair.first.valueCode()
+        }}
+        "
+    );
+    assert_eq!(check_top(&src), Ok(()));
+}
+
+#[test]
+fn generic_type_constraints_must_be_met() {
+    let src = format!(
+        "
+        {LABELLED}
+        alias Broken = Labelled<Int>
+
+        group Holder<T> {{
+            labelled: Labelled<T>
+        }}
+
+        impl Holder {{
+            fn get() -> Labelled<Self.T> {{
+                return self.labelled
+            }}
+        }}
+
+        fn f(labelled: Labelled<Bool>) {{
+            let a = Labelled.of(1)
+            let b: Labelled<Int> = 1
+        }}
+        "
+    );
+    assert_eq!(
+        messages_top(&src),
+        [
+            "`Labelled<Int>` can only be used where `T == some Named`, but its `T` is `Int`",
+            "`Labelled<T>` can only be used where `T == some Named`, but its `T` is `T`",
+            "`Labelled<T>` can only be used where `T == some Named`, but its `T` is `T`",
+            "`Labelled<Bool>` can only be used where `T == some Named`, but its `T` is `Bool`",
+            "`Labelled<Int>` can only be used where `T == some Named`, but its `T` is `Int`",
+            "`Labelled<Int>` can only be used where `T == some Named`, but its `T` is `Int`",
+        ]
+    );
+}
+
+#[test]
+fn generic_type_constraints_are_on_their_parameters() {
+    assert_eq!(
+        messages_top(
+            "
+            group A<T> where Int == some Equal {}
+            group B<T> where T == Int {}
+            group C<T> where T == some Missing {}
+            choice D<T> where U == some Equal {
+                only: T
+            }
+            "
+        ),
+        [
+            "only the generic parameters of `A` can be constrained, not `Int`",
+            "a generic type's constraints can only say which traits its parameters implement, \
+             as in `T == some Equal`, not `T == Int`",
+            "unknown trait `Missing`",
+            "unknown type `U`",
+        ]
+    );
 }
 
 #[test]

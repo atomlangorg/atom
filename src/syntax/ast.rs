@@ -505,10 +505,18 @@ pub enum StmtKind {
     /// `group Name { field: Type ... }`, or `group Name<T, ...> { ... }`
     /// for a generic group, whose fields can use its generic parameters as
     /// types.
+    ///
+    /// A generic type can have a `where`, as in `group Fn<Input, Output>
+    /// where Input == some Tuple { ... }`, so that it can only be made with
+    /// arguments that meet its constraints. In its fields and every `impl` of
+    /// it, the parameters they constrain implement their traits.
     Group {
         name: String,
         /// The names of its generic parameters, if it's generic.
         params: Vec<String>,
+        /// Its `where` clause's constraints, separated by commas, which only
+        /// a generic type can have.
+        constraints: Vec<Constraint>,
         fields: Vec<Field>,
     },
     /// `alias Name = Type`: another name for a type, which can be used in
@@ -516,19 +524,24 @@ pub enum StmtKind {
     Alias(Alias),
     /// `primitive Name`: a type that the compiler represents itself, such as
     /// `Int`, which can be generic, as in `primitive ChoiceOption<Base, Value>`. Only
-    /// allowed at the top level of the standard library.
+    /// allowed at the top level of the standard library. Like a group, a
+    /// generic one can have a `where`.
     Primitive {
         name: String,
         /// The names of its generic parameters, if it's generic.
         params: Vec<String>,
+        /// Its `where` clause's constraints, as a group's are.
+        constraints: Vec<Constraint>,
     },
     /// `choice Name { option: Type ... }`: a value that's exactly one of its
     /// options, each holding a value of its own type. Like a group, it can be
-    /// generic, as in `choice Optional<T> { ... }`.
+    /// generic, as in `choice Optional<T> { ... }`, and have a `where`.
     Choice {
         name: String,
         /// The names of its generic parameters, if it's generic.
         params: Vec<String>,
+        /// Its `where` clause's constraints, as a group's are.
+        constraints: Vec<Constraint>,
         options: Vec<ChoiceOption>,
     },
     /// `match value { pattern => { ... } ... }`: runs the block of the first
@@ -580,6 +593,8 @@ pub struct Alias {
 
 /// A constraint in an `impl`'s `where`, such as `Self.T == some Equal<Rhs =
 /// Self.T>` or `Self.T == Unit`, which the generic parameter `ty` must meet.
+/// A generic type's own `where` names its parameters without `Self.`, as in
+/// `Input == some Tuple`, and can only constrain them to implement traits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constraint {
     pub ty: TypeName,

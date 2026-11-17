@@ -445,6 +445,13 @@ struct Template<'a> {
     params: &'a [String],
     /// The group, choice or primitive declaring it.
     stmt: &'a Stmt,
+    /// The constraints of its `where`, which every type made from it must
+    /// meet.
+    decls: &'a [ast::Constraint],
+    /// `decls`, as an index into `Checker::constraints`, once they've been
+    /// worked out, if it has any. Its parameters implement their traits in
+    /// its fields, options and `impl`s.
+    constraints: Option<usize>,
     /// A type for each of `params`, which can't be used as anything else.
     stand_ins: Vec<Type>,
     /// The type made from it with `stand_ins` as its arguments, once it's
@@ -501,14 +508,29 @@ struct ImplInfo<'a> {
     functions: HashMap<&'a str, usize>,
 }
 
-/// The constraints of an `impl`'s `where`, on the parameters of the generic
-/// type at `template` in `Checker::templates`.
+/// The constraints of an `impl`'s `where`, or of a generic type's own, on
+/// the parameters of the generic type at `template` in `Checker::templates`.
 struct Constraints<'a> {
     template: usize,
     /// Those that a parameter implements a trait.
     constraints: Vec<ConstraintInfo<'a>>,
-    /// Those that a parameter is a type.
+    /// Those that a parameter is a type, which a generic type's own
+    /// constraints never are.
     equal: Vec<EqualConstraint<'a>>,
+}
+
+/// A type made from the generic type at `template` in `Checker::templates`
+/// with `args`, written `name`, whose arguments are still to be checked
+/// against its constraints.
+struct UncheckedInstance {
+    file: usize,
+    name: Name,
+    template: usize,
+    args: Vec<Type>,
+    /// The constraints of the `impl` it's written in, as an index into
+    /// `Checker::constraints`, if it has any, which its arguments can rely
+    /// on.
+    constraints: Option<usize>,
 }
 
 /// A constraint in an `impl`'s `where`, that what `param` stands for must be
@@ -762,8 +784,15 @@ struct Checker<'a> {
     /// Which types implement which traits, as a type `id` and an index into
     /// `traits`, and the `impl` that implements each.
     implementations: HashMap<(usize, usize), ImplInfo<'a>>,
-    /// The constraints of each `impl` with a `where`.
+    /// The constraints of each `impl` with a `where`, and of each generic
+    /// type with one.
     constraints: Vec<Constraints<'a>>,
+    /// Whether every `impl` has been declared, so it's known which types
+    /// implement which traits.
+    impls_declared: bool,
+    /// The types made from generic types with constraints before
+    /// `impls_declared`, whose arguments are checked against them once it is.
+    unchecked_instances: Vec<UncheckedInstance>,
     /// The functions in `functions` that stand for a constraint's trait's
     /// methods, by their indexes.
     fn_stand_ins: HashMap<usize, FnStandIn<'a>>,
@@ -871,12 +900,24 @@ impl<'a> Checker<'a> {
             self.cx.file = file;
             for stmt in self.files[file].program {
                 match &stmt.kind {
-                    StmtKind::Group { name, params, .. }
-                    | StmtKind::Choice { name, params, .. }
-                    | StmtKind::Primitive { name, params }
-                        if !params.is_empty() =>
-                    {
-                        self.declare_template(name, params, stmt);
+                    StmtKind::Group {
+                        name,
+                        params,
+                        constraints,
+                        ..
+                    }
+                    | StmtKind::Choice {
+                        name,
+                        params,
+                        constraints,
+                        ..
+                    }
+                    | StmtKind::Primitive {
+                        name,
+                        params,
+                        constraints,
+                    } if !params.is_empty() => {
+                        self.declare_template(name, params, constraints, stmt);
                     }
                     StmtKind::Group { name, .. }
                     | StmtKind::Choice { name, .. }
@@ -914,6 +955,10 @@ impl<'a> Checker<'a> {
         }
         for index in 0..self.traits.len() {
             self.define_trait(index);
+        }
+        // A generic type's constraints need the signatures of their traits.
+        for template in 0..self.templates.len() {
+            self.define_type_constraints(template);
         }
         for &(file, id, stmt) in &types {
             self.cx.file = file;
@@ -1009,6 +1054,14 @@ impl<'a> Checker<'a> {
                     _ => unreachable!("the parser only allows declarations at the top level"),
                 }
             }
+        }
+
+        // Whether a type's arguments meet its generic type's constraints
+        // depends on which traits they implement, so it's only known once
+        // every `impl` has been declared.
+        self.impls_declared = true;
+        for unchecked in std::mem::take(&mut self.unchecked_instances) {
+            self.check_instance(unchecked);
         }
 
         for (file, pending) in std::mem::take(&mut self.pending) {

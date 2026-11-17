@@ -665,6 +665,57 @@ where
             }
         });
 
+    // `Self.T == some Equal`, optionally giving the trait's aliases types, as
+    // in `some Equal<Rhs = Self.T>`, or `Self.T == Unit`, for exactly that
+    // type. A generic type's own constraints are written the same way, but
+    // name its parameters without `Self.`, as in `T == some Equal`. `some` is
+    // a keyword anywhere in a constraint, as it is in types, so it always
+    // starts a trait, but it can still be a name outside them, such as an
+    // option's.
+    let constraint_alias = type_ident
+        .clone()
+        .then_ignore(just(Token::Eq))
+        .then(type_name.clone())
+        .map_with(|(name, ty), e| Alias {
+            name,
+            ty: Some(ty),
+            span: Span::from(e.span()),
+        });
+    let trait_bound = just(Token::Ident("some"))
+        .ignore_then(type_path.clone().labelled("trait"))
+        .then(
+            constraint_alias
+                .separated_by(just(Token::Comma))
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Lt), just(Token::Gt))
+                .or_not(),
+        )
+        .map(|(name, aliases)| Bound::Trait {
+            name,
+            aliases: aliases.unwrap_or_default(),
+        });
+    let constraint = type_name
+        .clone()
+        .then_ignore(just(Token::EqEq))
+        .then(trait_bound.or(type_name.clone().map(Bound::Type)))
+        .map_with(|(ty, bound), e| Constraint {
+            ty,
+            bound,
+            span: Span::from(e.span()),
+        });
+    // `where` is only special after an `impl`'s type and trait, or a
+    // generic type's parameters, so it can still be a label.
+    let where_ = just(Token::Ident("where"))
+        .ignore_then(
+            constraint
+                .separated_by(just(Token::Comma))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .or_not()
+        .map(Option::unwrap_or_default);
+
     // `<T, U>` after a type's name, naming its generic parameters.
     let generic_params = type_ident
         .clone()
@@ -675,16 +726,34 @@ where
         .or_not()
         .map(Option::unwrap_or_default);
 
+    // `<T, U>`, then optionally a `where`, after a generic type's name.
+    // Only a generic type can have a `where`, since it constrains the type's
+    // parameters.
+    let type_params = generic_params
+        .clone()
+        .then(where_.clone())
+        .validate(|(params, constraints), e, emitter| {
+            if params.is_empty() && !constraints.is_empty() {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    "only a generic type can have a `where`",
+                ));
+            }
+            (params, constraints)
+        })
+        .boxed();
+
     // Like a block, one field per line.
     let group_ = just(Token::Group)
         .ignore_then(type_ident.clone())
-        .then(generic_params.clone())
+        .then(type_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(field))
-        .map(|(((name, params), span), fields)| Stmt {
+        .map(|(((name, (params, constraints)), span), fields)| Stmt {
             kind: StmtKind::Group {
                 name,
                 params,
+                constraints,
                 fields,
             },
             span,
@@ -725,13 +794,14 @@ where
     // Laid out like a group, with one option per line.
     let choice_ = just(Token::Choice)
         .ignore_then(type_ident.clone())
-        .then(generic_params.clone())
+        .then(type_params.clone())
         .map_with(|head, e| (head, Span::from(e.span())))
         .then(braced_lines(option))
-        .map(|(((name, params), span), options)| Stmt {
+        .map(|(((name, (params, constraints)), span), options)| Stmt {
             kind: StmtKind::Choice {
                 name,
                 params,
+                constraints,
                 options,
             },
             span,
@@ -981,55 +1051,8 @@ where
     let impl_member = alias_in(Place::Impl)
         .map(Member::Alias)
         .or(function_in(Place::Impl).map(Member::Function));
-    // `Self.T == some Equal`, optionally giving the trait's aliases types, as
-    // in `some Equal<Rhs = Self.T>`, or `Self.T == Unit`, for exactly that
-    // type. `some` is a keyword anywhere in a constraint, as it is in types,
-    // so it always starts a trait, but it can still be a name outside them,
-    // such as an option's.
-    let constraint_alias = type_ident
-        .clone()
-        .then_ignore(just(Token::Eq))
-        .then(type_name.clone())
-        .map_with(|(name, ty), e| Alias {
-            name,
-            ty: Some(ty),
-            span: Span::from(e.span()),
-        });
-    let trait_bound = just(Token::Ident("some"))
-        .ignore_then(type_path.clone().labelled("trait"))
-        .then(
-            constraint_alias
-                .separated_by(just(Token::Comma))
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::Lt), just(Token::Gt))
-                .or_not(),
-        )
-        .map(|(name, aliases)| Bound::Trait {
-            name,
-            aliases: aliases.unwrap_or_default(),
-        });
-    let constraint = type_name
-        .clone()
-        .then_ignore(just(Token::EqEq))
-        .then(trait_bound.or(type_name.clone().map(Bound::Type)))
-        .map_with(|(ty, bound), e| Constraint {
-            ty,
-            bound,
-            span: Span::from(e.span()),
-        });
-    let where_ = just(Token::Ident("where"))
-        .ignore_then(
-            constraint
-                .separated_by(just(Token::Comma))
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .or_not()
-        .map(Option::unwrap_or_default);
-
-    // `with` and `where` are only special here, so they can still be labels.
-    // Only a named type can have an `impl`, and only a trait can follow
+    // `with` is only special here, so it can still be a label. Only a named
+    // type can have an `impl`, and only a trait can follow
     // `with`.
     let impl_ = just(Token::Impl)
         .ignore_then(type_path.clone().labelled("type"))
@@ -1081,9 +1104,13 @@ where
     // allows in the standard library, like a `primitive fn`.
     let primitive = just(Token::Primitive)
         .ignore_then(type_ident.clone())
-        .then(generic_params)
-        .map_with(|(name, params), e| Stmt {
-            kind: StmtKind::Primitive { name, params },
+        .then(type_params)
+        .map_with(|(name, (params, constraints)), e| Stmt {
+            kind: StmtKind::Primitive {
+                name,
+                params,
+                constraints,
+            },
             span: Span::from(e.span()),
         });
 
@@ -1650,6 +1677,7 @@ mod tests {
                 stmt_node(StmtKind::Choice {
                     name: "Optional".to_string(),
                     params: vec!["T".to_string()],
+                    constraints: vec![],
                     options: vec![
                         option("none", TypeName::new("Unit")),
                         option("some", TypeName::new("T")),
@@ -1658,6 +1686,7 @@ mod tests {
                 stmt_node(StmtKind::Group {
                     name: "Pair".to_string(),
                     params: vec!["A".to_string(), "B".to_string()],
+                    constraints: vec![],
                     fields: vec![],
                 }),
             ])
@@ -3109,6 +3138,7 @@ mod tests {
         stmt_node(StmtKind::Group {
             name: name.to_string(),
             params: vec![],
+            constraints: vec![],
             fields,
         })
     }
@@ -3238,6 +3268,7 @@ mod tests {
         stmt_node(StmtKind::Choice {
             name: name.to_string(),
             params: vec![],
+            constraints: vec![],
             options,
         })
     }
@@ -3691,10 +3722,12 @@ mod tests {
                 stmt_node(StmtKind::Primitive {
                     name: "Int".to_string(),
                     params: vec![],
+                    constraints: vec![],
                 }),
                 stmt_node(StmtKind::Primitive {
                     name: "Bool".to_string(),
                     params: vec![],
+                    constraints: vec![],
                 }),
             ])
         );
@@ -3703,6 +3736,7 @@ mod tests {
             Ok(vec![stmt_node(StmtKind::Primitive {
                 name: "ChoiceOption".to_string(),
                 params: vec!["Base".to_string(), "Value".to_string()],
+                constraints: vec![],
             })])
         );
         for src in [
@@ -4705,13 +4739,74 @@ mod tests {
                 }),
             ])
         );
-        // `where` and `some` are only special in an `impl`, so they can still
-        // be names.
+        // `where` and `some` are only special in an `impl` or after a generic
+        // type's parameters, so they can still be names.
         assert!(parse("fn f(where: Int, some: Int) {}\nlet x = f(where: 1, some: 2)").is_ok());
         // `some` is a keyword anywhere in a constraint, as
         // `rejects_some_as_a_type_or_trait` tests.
         assert!(parse("impl Pair where Self.A == {}").is_err());
         assert!(parse("impl Pair where {}").is_err());
+    }
+
+    #[test]
+    fn parses_generic_types_with_constraints() {
+        let param = |name: &str| TypeName::new(name);
+        let constraint = |ty, name, aliases| Constraint {
+            ty,
+            bound: Bound::Trait { name, aliases },
+            span: Span::default(),
+        };
+        let rhs = Alias {
+            name: "Rhs".to_string(),
+            ty: Some(param("A")),
+            span: Span::default(),
+        };
+        let src = "
+            group Pair<A, B> where A == some Equal<Rhs = A>, B == some other::Compare {
+                first: A
+            }
+            choice Either<A> where A == some Tuple {
+                left: A
+            }
+            primitive Raw<A> where A == some Add
+            ";
+        let Ok(program) = parse(src) else {
+            panic!("should parse");
+        };
+        let constraints: Vec<_> = program
+            .iter()
+            .map(|stmt| match &stmt.kind {
+                StmtKind::Group { constraints, .. }
+                | StmtKind::Choice { constraints, .. }
+                | StmtKind::Primitive { constraints, .. } => constraints.clone(),
+                _ => panic!("should only declare types"),
+            })
+            .collect();
+        assert_eq!(
+            constraints,
+            [
+                vec![
+                    constraint(param("A"), Name::new("Equal"), vec![rhs]),
+                    constraint(param("B"), qualified("other", "Compare"), vec![]),
+                ],
+                vec![constraint(param("A"), Name::new("Tuple"), vec![])],
+                vec![constraint(param("A"), Name::new("Add"), vec![])],
+            ]
+        );
+        // Only a generic type can have a `where`.
+        for src in [
+            "group Point where A == some Equal {}",
+            "choice Shape where A == some Equal {}",
+            "primitive Raw where A == some Equal",
+        ] {
+            let errs = parse(src).unwrap_err();
+            assert_eq!(
+                errs[0].to_string(),
+                "only a generic type can have a `where`",
+                "{src:?}"
+            );
+        }
+        assert!(parse("group Pair<A> where {}").is_err());
     }
 
     #[test]
