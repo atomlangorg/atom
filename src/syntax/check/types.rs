@@ -220,14 +220,6 @@ impl<'a> Checker<'a> {
         args: Vec<Type>,
         name: &Name,
     ) -> Option<Type> {
-        if self.is_only_for_choices(template) && self.options(args[0].id).is_none() {
-            let error = CheckError::NotAChoice {
-                generic: name.to_string(),
-                found: args[0].clone(),
-            };
-            self.error(name.span, error);
-            return None;
-        }
         if !self.templates[template].decls.is_empty() {
             let unchecked = UncheckedInstance {
                 file: self.cx.file,
@@ -251,11 +243,6 @@ impl<'a> Checker<'a> {
             .instance
             .as_ref()
             .is_some_and(|(found, _)| *found == template)
-    }
-    /// Whether the generic type at `template` in `templates` has values only
-    /// when its first argument is a choice.
-    pub(super) fn is_only_for_choices(&self, template: usize) -> bool {
-        template == self.std_template("ChoiceTag") || template == self.std_template("ChoiceOption")
     }
     /// What `Self.param` stands for in the `impl` of a type made from a
     /// generic type.
@@ -347,22 +334,12 @@ impl<'a> Checker<'a> {
         let Template {
             file, params, stmt, ..
         } = self.templates[template];
-        // Its first parameter stands for a choice if its arguments must be.
-        let only_for_choices = self.is_only_for_choices(template);
         let stand_ins = params
             .iter()
-            .enumerate()
-            .map(|(index, param)| {
-                let kind = if only_for_choices && index == 0 {
-                    TypeKind::Choice(vec![])
-                } else {
-                    TypeKind::Group(vec![])
-                };
-                Type {
-                    id: self.add_type(param.clone(), file, kind),
-                    name: param.clone(),
-                    parts: None,
-                }
+            .map(|param| Type {
+                id: self.add_type(param.clone(), file, TypeKind::Group(vec![])),
+                name: param.clone(),
+                parts: None,
             })
             .collect::<Vec<_>>();
         self.templates[template].stand_ins = stand_ins.clone();

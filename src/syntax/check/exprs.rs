@@ -611,7 +611,7 @@ impl<'a> Checker<'a> {
     /// constrains it to, and so does a trait's alias, in the trait.
     ///
     /// The standard library's `Tuple` is implemented by every tuple, and
-    /// nothing else, without an `impl`.
+    /// its `Choice` by every choice, and nothing else, without an `impl`.
     pub(super) fn implements(&self, ty: &Type, trait_index: usize) -> bool {
         if self.constraint_on(ty, trait_index).is_some() {
             return true;
@@ -626,6 +626,9 @@ impl<'a> Checker<'a> {
         }
         if trait_index == self.std_trait("Tuple") {
             return self.elements(ty.id).is_some();
+        }
+        if trait_index == self.std_trait("Choice") {
+            return self.options(ty.id).is_some();
         }
         let (owner, args) = self.owner(ty);
         self.implementations

@@ -2165,6 +2165,42 @@ mod tests {
     }
 
     #[test]
+    fn generic_types_can_hold_tags_of_any_choice() {
+        let src = "
+            choice Shape {
+                circle: Int
+                empty
+            }
+
+            group Holder<T> where T == some Choice {
+                tag: ChoiceTag<T>
+            }
+
+            impl Holder {
+                static fn of(_ value: Self.T) -> Self {
+                    return Self { tag: ChoiceTag.new(value) }
+                }
+
+                fn isSame(as value: Self.T) -> Bool {
+                    return self.tag == ChoiceTag.new(value)
+                }
+            }
+
+            fn main() -> Int {
+                let circle = Holder.of(Shape.circle.new(3))
+                let a = circle.isSame(as: Shape.circle.new(4))
+                let b = circle.isSame(as: Shape.empty.new())
+                let c = Holder.of(Comparison.less.new()).isSame(as: .less.new())
+                if a & !b & c {
+                    return 1
+                }
+                return 0
+            }
+            ";
+        assert_eq!(run(src), 1);
+    }
+
+    #[test]
     fn compare_on_integers_gives_their_comparison() {
         // Each check is one bit of the result.
         let src = "

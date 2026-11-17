@@ -14,9 +14,14 @@
  * limitations under the License.
  */
 
+// Choices, such as `Comparison` and `Optional<Int>`. Every choice implements
+// it, and nothing else can, so no `impl` can implement it. It's what the
+// `Base` of a `ChoiceTag` or `ChoiceOption` must implement.
+trait Choice {}
+
 // Which option of the choice `Base` something is, as in `ChoiceTag<Shape>`.
-// `Base` must be a choice. Tags are equal if they're for the same option.
-primitive ChoiceTag<Base>
+// Tags are equal if they're for the same option.
+primitive ChoiceTag<Base> where Base == some Choice
 
 impl ChoiceTag {
     // Creates the tag of the option that `value` is.
@@ -29,10 +34,9 @@ impl ChoiceTag with Equal {
 }
 
 // An option of the choice `Base` that holds a `Value`, which is what naming an
-// option refers to, as in `Shape.circle`. `Base` must be a choice, and `Value`
-// is the type the option is declared with. `new` creates the choice, as in
-// `Shape.circle.new(3)`.
-primitive ChoiceOption<Base, Value>
+// option refers to, as in `Shape.circle`. `Value` is the type the option is
+// declared with. `new` creates the choice, as in `Shape.circle.new(3)`.
+primitive ChoiceOption<Base, Value> where Base == some Choice
 
 impl ChoiceOption {
     // Creates the choice as this option, holding `value`.

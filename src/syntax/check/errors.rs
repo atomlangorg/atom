@@ -263,8 +263,6 @@ pub enum CheckError {
     /// A member was written without a type, as in `.none`, where the type
     /// can't be inferred.
     CannotInferImplicitType(String),
-    /// A generic type that's only for choices was given something else.
-    NotAChoice { generic: String, found: Type },
     /// A type made from a generic type, `ty`, has arguments that don't meet
     /// the generic type's `constraint`, since its parameter `param` is `arg`.
     UnmetTypeConstraint {
@@ -291,9 +289,13 @@ pub enum CheckError {
         alias: String,
         arg: Type,
     },
-    /// An `impl` implements the standard library's `Tuple`, which only
-    /// tuples implement, without one.
-    ImplementedTuple,
+    /// An `impl` implements one of the standard library's traits that only
+    /// the `implementors` it's named after implement, without one, such as
+    /// `Tuple`.
+    ImplementedBuiltIn {
+        trait_name: &'static str,
+        implementors: &'static str,
+    },
     /// `Self.T` was used outside the `impl` of a generic type.
     SelfParamOutsideGeneric(String),
     /// `Self.T` names a parameter the `impl`'s generic type doesn't have.
@@ -739,12 +741,6 @@ impl fmt::Display for CheckError {
                 f,
                 "the type of `.{member}` can't be inferred here, so it must be given, as in `Type.{member}`"
             ),
-            Self::NotAChoice { generic, found } => {
-                write!(
-                    f,
-                    "`{generic}` can only be used with a choice, found `{found}`"
-                )
-            }
             Self::UnmetTypeConstraint {
                 ty,
                 constraint,
@@ -778,9 +774,13 @@ impl fmt::Display for CheckError {
                 "`{ty}` can only implement `{trait_name}` where `{constraint}`, but its `{alias}` \
                  is `{arg}`"
             ),
-            Self::ImplementedTuple => write!(
+            Self::ImplementedBuiltIn {
+                trait_name,
+                implementors,
+            } => write!(
                 f,
-                "`Tuple` can't be implemented, since every tuple implements it, and nothing else can"
+                "`{trait_name}` can't be implemented, since every {implementors} implements it, \
+                 and nothing else can"
             ),
             Self::SelfParamOutsideGeneric(param) => write!(
                 f,

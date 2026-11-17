@@ -7001,13 +7001,65 @@ fn tags_and_options_are_only_for_choices() {
             "
         ),
         [
-            "`ChoiceTag` can only be used with a choice, found `Int`",
-            // Generic types are checked before top-level values.
-            "`ChoiceOption` can only be used with a choice, found `Point`",
-            "`ChoiceTag` can only be used with a choice, found `Int`",
+            "`ChoiceTag<Int>` can only be used where `Base == some Choice`, but its `Base` is \
+             `Int`",
+            "`ChoiceOption<Point, Int>` can only be used where `Base == some Choice`, but its \
+             `Base` is `Point`",
+            "`ChoiceTag<Int>` can only be used where `Base == some Choice`, but its `Base` is \
+             `Int`",
             "unknown type `Missing`",
-            "`ChoiceTag` can only be used with a choice, found `Bool`",
-            "`ChoiceTag` can only be used with a choice, found `T`",
+            "`ChoiceTag<Bool>` can only be used where `Base == some Choice`, but its `Base` is \
+             `Bool`",
+            "`ChoiceTag<T>` can only be used where `Base == some Choice`, but its `Base` is `T`",
+        ]
+    );
+}
+
+#[test]
+fn choices_implement_choice() {
+    // `Holder` can hold a tag of any choice, since `T` is one.
+    let src = format!(
+        "
+        {SHAPE}
+        {GENERICS}
+        group Holder<T> where T == some Choice {{
+            tag: ChoiceTag<T>
+            option: ChoiceOption<T, Unit>
+        }}
+
+        impl Holder {{
+            fn same(as value: Self.T) -> Bool {{
+                return self.tag == ChoiceTag.new(value)
+            }}
+        }}
+
+        fn f(shape: Holder<Shape>, optional: Holder<Optional<Int>>) -> Bool {{
+            let tag: ChoiceTag<Optional<Bool>> = Optional.some.tag()
+            return shape.same(as: Shape.empty.new()) & optional.same(as: .none.new())
+        }}
+        "
+    );
+    assert_eq!(check_top(&src), Ok(()));
+}
+
+#[test]
+fn choice_cannot_be_implemented() {
+    let src = format!(
+        "
+        {SHAPE}
+        group Point {{}}
+        impl Point with Choice {{}}
+        impl Shape with Choice {{}}
+        "
+    );
+    assert_eq!(pointed_at_top(&src), ["Choice", "Choice"]);
+    assert_eq!(
+        messages_top(&src),
+        [
+            "`Choice` can't be implemented, since every choice implements it, and nothing else \
+             can",
+            "`Choice` can't be implemented, since every choice implements it, and nothing else \
+             can",
         ]
     );
 }
@@ -8734,7 +8786,8 @@ fn rejects_calls_whose_generic_arguments_cannot_be_inferred() {
             "argument `value` of `Box<Bool>.of` expects `Bool`, found `Int`",
             "cannot assign `Box<Int>` to `l`, which has type `Int`",
             "operator `==` expects a type that implements `Equal`, found `Box<Bool>`",
-            "`ChoiceTag` can only be used with a choice, found `Int`",
+            "`ChoiceTag<Int>` can only be used where `Base == some Choice`, but its `Base` is \
+             `Int`",
             "the arguments of `Box` can't be inferred here, so they must be given, as in `Box<...>`",
             "the arguments of `Optional` can't be inferred here, so they must be given, as in `Optional<...>`",
         ]
