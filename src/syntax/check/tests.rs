@@ -7978,6 +7978,128 @@ fn trait_constraints_give_aliases_of_their_traits() {
     );
 }
 
+/// Generic types for the tests of implied constraints, one of which can
+/// only hold a tuple, and a trait whose alias must be one.
+const IMPLIED: &str = "
+    group Pair<T, U> {
+        first: T
+        second: U
+    }
+
+    group Tupled<T> where T == some Tuple {
+        value: T
+    }
+
+    impl Tupled {
+        static fn of(_ value: Self.T) -> Self {
+            return Self { value: value }
+        }
+    }
+
+    trait Maker where Made == some Tuple {
+        alias Made
+
+        fn make() -> Made
+    }
+    ";
+
+#[test]
+fn constraints_imply_their_traits_constraints() {
+    // `T.Made` and `T.Input` are tuples, since `T` implements `Maker` and
+    // `Call`, and so is `U`, since it's the `Input` of `T`'s `Call`.
+    let src = format!(
+        "
+        {IMPLIED}
+        impl Pair where Self.T == some Maker {{
+            fn made() -> Int {{
+                let made = Tupled.of(self.first.make())
+                return 1
+            }}
+        }}
+
+        impl Pair where Self.T == some Call {{
+            fn calls() -> Int {{
+                return 1
+            }}
+        }}
+
+        impl Pair where Self.T == some Call<Input = Self.U> {{
+            fn call(with function: Fn<Self.U, Int>) -> Tupled<Self.U> {{
+                let a = function.call(input: self.second)
+                let b = self.first.call(input: self.second)
+                return Tupled.of(self.second)
+            }}
+        }}
+
+        group Holder<T, U> where T == some Call<Input = U> {{
+            input: Tupled<U>
+        }}
+        "
+    );
+    assert_eq!(check_top(&src), Ok(()));
+}
+
+#[test]
+fn implied_constraints_are_only_on_stand_ins() {
+    // `T` can't implement `Maker` with `Made` as `Int`, so `cannot` is
+    // never available, but it isn't an error to say so. A tuple holding `U`
+    // says nothing about `U` itself.
+    let src = format!(
+        "
+        {IMPLIED}
+        impl Pair where Self.T == some Maker<Made = Int> {{
+            fn cannot() -> Int {{
+                let made = Tupled.of(self.first.make())
+                return 1
+            }}
+        }}
+
+        impl Pair where Self.T == some Maker<Made = (value: Self.U)> {{
+            fn wrapped() -> Tupled<Self.U> {{
+                return Tupled.of(self.second)
+            }}
+        }}
+        "
+    );
+    assert_eq!(
+        messages_top(&src),
+        [
+            "`Tupled<Int>` can only be used where `T == some Tuple`, but its `T` is `Int`",
+            "`Tupled<U>` can only be used where `T == some Tuple`, but its `T` is `U`",
+            "`Tupled<U>` can only be used where `T == some Tuple`, but its `T` is `U`",
+        ]
+    );
+}
+
+#[test]
+fn implied_constraints_stop_at_traits_already_implied() {
+    // `T.Next` would implement `Node`, so would `T.Next.Next`, and so on
+    // forever, so it's only implied for traits not already on the way.
+    let src = "
+        trait Node where Next == some Node {
+            alias Next
+
+            fn next() -> Next
+        }
+
+        group Box<T> {
+            value: T
+        }
+
+        impl Box where Self.T == some Node {
+            fn second() -> Int {
+                let next = self.value.next()
+                let after = next.next()
+                return 1
+            }
+        }
+        ";
+    assert_eq!(
+        messages_top(src),
+        ["`T.Next` has no field or method `next`"]
+    );
+}
+
 #[test]
 fn trait_constraints_are_on_their_aliases() {
     assert_eq!(

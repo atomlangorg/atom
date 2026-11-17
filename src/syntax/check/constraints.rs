@@ -135,37 +135,19 @@ impl<'a> Checker<'a> {
             let (Some(param), Some(trait_index)) = (param, trait_index) else {
                 continue;
             };
-            let file = self.cx.file;
-            let aliases = self.traits[trait_index]
-                .aliases
-                .iter()
-                .map(|declared| {
-                    let name = declared.name.as_str();
-                    let alias = match given.remove(name) {
-                        Some(ty) => ConstraintAlias::Given(ty),
-                        None => {
-                            let shown = format!("{param}.{name}");
-                            let id = self.add_type(shown.clone(), file, TypeKind::Group(vec![]));
-                            ConstraintAlias::Any(Type {
-                                id,
-                                name: shown,
-                                parts: None,
-                            })
-                        }
-                    };
-                    (name, alias)
-                })
-                .collect();
+            let aliases = self.constraint_aliases(&param, trait_index, given);
             constraints.push(ConstraintInfo {
                 decl,
                 param,
                 trait_index,
                 aliases,
                 functions: HashMap::new(),
+                implied: false,
             });
         }
         // Without a generic type, every constraint has been reported.
         let template = template?;
+        let constraints = self.with_implied(template, constraints);
         let count = constraints.len();
         self.constraints.push(Constraints {
             template,
@@ -177,6 +159,127 @@ impl<'a> Checker<'a> {
             self.declare_constraint_fns(index, constraint);
         }
         Some(index)
+    }
+    /// What each alias of the trait at `trait_index` in `traits` is for
+    /// `param`, which a constraint says implements it, in order: the types
+    /// it gives in `given`, by name, and otherwise a stand-in for whatever
+    /// the implementation gives, as in `T.Rhs`.
+    fn constraint_aliases(
+        &mut self,
+        param: &Type,
+        trait_index: usize,
+        mut given: HashMap<&str, Option<Type>>,
+    ) -> Vec<(&'a str, ConstraintAlias)> {
+        let file = self.cx.file;
+        self.traits[trait_index]
+            .aliases
+            .iter()
+            .map(|declared| {
+                let name = declared.name.as_str();
+                let alias = match given.remove(name) {
+                    Some(ty) => ConstraintAlias::Given(ty),
+                    None => {
+                        let shown = format!("{param}.{name}");
+                        let id = self.add_type(shown.clone(), file, TypeKind::Group(vec![]));
+                        ConstraintAlias::Any(Type {
+                            id,
+                            name: shown,
+                            parts: None,
+                        })
+                    }
+                };
+                (name, alias)
+            })
+            .collect()
+    }
+    /// `constraints`, on the parameters of the generic type at `template` in
+    /// `templates`, followed by the constraints they imply. A type that
+    /// implements a trait gives its aliases types that meet the trait's own
+    /// constraints, so `T == some Call` implies `T.Input == some Tuple`, and
+    /// `T == some Call<Input = U>` implies `U == some Tuple`. Only those on a
+    /// parameter, or on a stand-in for an alias, are implied, since any
+    /// other type either meets them or makes the constraint impossible.
+    ///
+    /// They're implied through each alias as deeply as they go, except
+    /// through a trait that's already been implied on the way there, since a
+    /// trait whose alias implements the trait itself would never end.
+    fn with_implied(
+        &mut self,
+        template: usize,
+        mut constraints: Vec<ConstraintInfo<'a>>,
+    ) -> Vec<ConstraintInfo<'a>> {
+        // The traits each constraint was implied through, including its own.
+        let mut traits: Vec<_> = constraints
+            .iter()
+            .map(|constraint| vec![constraint.trait_index])
+            .collect();
+        let mut next = 0;
+        while next < constraints.len() {
+            let ConstraintInfo {
+                decl,
+                ref param,
+                trait_index,
+                ref aliases,
+                ..
+            } = constraints[next];
+            let trait_ = self.traits[trait_index].clone();
+            // What the trait's `Self` and aliases are for `param`. An alias
+            // whose type is unknown has been reported.
+            let mut params = HashMap::from([(trait_.stand_ins[0].id, param.clone())]);
+            let mut unknown = vec![];
+            for ((_, alias), stand_in) in aliases.iter().zip(&trait_.stand_ins[1..]) {
+                match alias {
+                    ConstraintAlias::Given(Some(ty)) | ConstraintAlias::Any(ty) => {
+                        params.insert(stand_in.id, ty.clone());
+                    }
+                    ConstraintAlias::Given(None) => unknown.push(stand_in.clone()),
+                }
+            }
+            for implied in &trait_.constraints {
+                let Some(ty) = params.get(&implied.alias.id).cloned() else {
+                    continue;
+                };
+                let is_stand_in = self.templates[template].stand_ins.contains(&ty)
+                    || constraints.iter().any(|constraint| {
+                        constraint.aliases.iter().any(
+                            |(_, alias)| matches!(alias, ConstraintAlias::Any(any) if *any == ty),
+                        )
+                    });
+                let known = constraints.iter().any(|constraint| {
+                    constraint.param == ty && constraint.trait_index == implied.trait_index
+                });
+                if !is_stand_in || known || traits[next].contains(&implied.trait_index) {
+                    continue;
+                }
+                let mut given = HashMap::new();
+                for (name, alias) in &implied.given {
+                    let alias = alias.as_ref().and_then(|alias| {
+                        if unknown
+                            .iter()
+                            .any(|stand_in| self.mentions(alias, stand_in))
+                        {
+                            return None;
+                        }
+                        self.substitute(alias, &params, decl.span)
+                    });
+                    given.insert(*name, alias);
+                }
+                let aliases = self.constraint_aliases(&ty, implied.trait_index, given);
+                constraints.push(ConstraintInfo {
+                    decl,
+                    param: ty,
+                    trait_index: implied.trait_index,
+                    aliases,
+                    functions: HashMap::new(),
+                    implied: true,
+                });
+                let mut through = traits[next].clone();
+                through.push(implied.trait_index);
+                traits.push(through);
+            }
+            next += 1;
+        }
+        constraints
     }
     /// `param`, which `decl` constrains, if it's one of the parameters of the
     /// generic type at `template` in `templates`, reporting an error if it
@@ -294,14 +397,19 @@ impl<'a> Checker<'a> {
     /// The constraints on `ty` where the code being checked is, along with
     /// the generic type whose parameter it constrains, as an index into
     /// `templates`. They're those of the current `impl`, and if `ty` is a
-    /// generic type's parameter, its generic type's own, which hold
-    /// wherever it can be used.
+    /// generic type's parameter, or an alias its constraints imply something
+    /// of, its generic type's own, which hold wherever it can be used.
     fn constraints_on(&self, ty: &Type) -> impl Iterator<Item = (usize, &ConstraintInfo<'a>)> {
         let own = self
             .templates
             .iter()
-            .find(|template| template.stand_ins.contains(ty))
-            .and_then(|template| template.constraints);
+            .filter_map(|template| template.constraints)
+            .find(|&index| {
+                self.constraints[index]
+                    .constraints
+                    .iter()
+                    .any(|constraint| constraint.param == *ty)
+            });
         self.cx
             .constraints
             .into_iter()
@@ -382,22 +490,26 @@ impl<'a> Checker<'a> {
             .iter()
             .find(|equal| !self.same_type(&equal.ty, &params, &params[&equal.param.id], &none))
             .map(|equal| (equal.decl, &equal.param));
+        // The implied constraints are met whenever the others are.
         let unimplemented = || {
-            let constraint = constraints.iter().find(|constraint| {
-                let arg = &params[&constraint.param.id];
-                let given_match = constraint.aliases.iter().all(|(name, alias)| {
-                    let ConstraintAlias::Given(Some(given)) = alias else {
-                        return true;
-                    };
-                    // An unknown type has already been reported.
-                    self.alias_of(arg, constraint.trait_index, name).is_none_or(
-                        |(found, found_params)| {
-                            self.same_type(given, &params, &found, &found_params)
-                        },
-                    )
-                });
-                !(self.implements(arg, constraint.trait_index) && given_match)
-            })?;
+            let constraint = constraints
+                .iter()
+                .filter(|c| !c.implied)
+                .find(|constraint| {
+                    let arg = &params[&constraint.param.id];
+                    let given_match = constraint.aliases.iter().all(|(name, alias)| {
+                        let ConstraintAlias::Given(Some(given)) = alias else {
+                            return true;
+                        };
+                        // An unknown type has already been reported.
+                        self.alias_of(arg, constraint.trait_index, name).is_none_or(
+                            |(found, found_params)| {
+                                self.same_type(given, &params, &found, &found_params)
+                            },
+                        )
+                    });
+                    !(self.implements(arg, constraint.trait_index) && given_match)
+                })?;
             Some((constraint.decl, &constraint.param))
         };
         unequal.or_else(unimplemented)
@@ -505,11 +617,14 @@ impl<'a> Checker<'a> {
         params: &mut HashMap<usize, Type>,
         span: Span,
     ) -> Option<()> {
-        let mut found = vec![];
-        for constraint in &self.constraints[constraints].constraints {
+        // An implied constraint comes after those it's implied by, so what
+        // its parameter stands for has been found by the time it's needed.
+        for index in 0..self.constraints[constraints].constraints.len() {
+            let constraint = &self.constraints[constraints].constraints[index];
             let Some(arg) = params.get(&constraint.param.id) else {
                 continue;
             };
+            let mut found = vec![];
             for (name, alias) in &constraint.aliases {
                 if let ConstraintAlias::Any(stand_in) = alias {
                     let (ty, ty_params) = self
@@ -518,30 +633,44 @@ impl<'a> Checker<'a> {
                     found.push((stand_in.id, ty, ty_params));
                 }
             }
-        }
-        for (id, ty, ty_params) in found {
-            let ty = self.substitute(&ty, &ty_params, span)?;
-            params.insert(id, ty);
+            for (id, ty, ty_params) in found {
+                let ty = self.substitute(&ty, &ty_params, span)?;
+                params.insert(id, ty);
+            }
         }
         Some(())
     }
     /// The function that `function` calls, which is itself unless it stands
     /// for a function of a constraint's trait, when it's the function of the
-    /// type its parameter stands for in `function`'s arguments.
-    pub(super) fn constrained_callee(&self, function: FnRef) -> FnRef {
+    /// type its parameter stands for in `function`'s arguments, which is
+    /// made for the code at `span`. An implied constraint's parameter can be
+    /// an alias, which is found from those arguments. Returns `None` if that
+    /// makes a generic type nested too deeply, which has been reported.
+    pub(super) fn constrained_callee(&mut self, function: FnRef, span: Span) -> Option<FnRef> {
         let Some(&FnStandIn {
             ref param,
             trait_index,
             name,
         }) = self.fn_stand_ins.get(&function.index)
         else {
-            return function;
+            return Some(function);
         };
-        let template = self.functions[function.index]
-            .template
-            .expect("only generic types have constraints");
-        let ty = &self.params(template, &function.args)[&param.id];
+        let param = param.clone();
+        let Signature {
+            template,
+            constraints,
+            ..
+        } = self.functions[function.index];
+        let template = template.expect("only generic types have constraints");
+        let mut params = self.params(template, &function.args);
+        if !params.contains_key(&param.id) {
+            let constraints = constraints.expect("only constraints have stand-ins");
+            self.add_alias_params(constraints, &mut params, span)?;
+        }
         // The constraint was met where the function was used.
-        self.trait_fn(ty, trait_index, name).expect(NO_ERRORS)
+        Some(
+            self.trait_fn(&params[&param.id], trait_index, name)
+                .expect(NO_ERRORS),
+        )
     }
 }

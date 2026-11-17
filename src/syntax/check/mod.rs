@@ -593,6 +593,10 @@ struct ConstraintInfo<'a> {
     /// `Checker::functions`. Each calls the function of whatever `param`
     /// stands for, which `Checker::fn_stand_ins` says.
     functions: HashMap<&'a str, usize>,
+    /// Whether it isn't written, but follows from the constraint `decl`
+    /// through the constraints of a trait, as `Checker::with_implied` says.
+    /// It can then be on a stand-in for an alias, as in `T.Input`.
+    implied: bool,
 }
 
 /// What an alias of a constraint's trait is, for the type it constrains.

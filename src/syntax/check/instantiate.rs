@@ -346,10 +346,13 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|arg| self.substitute(arg, params, span))
             .collect::<Option<_>>()?;
-        let function = self.constrained_callee(FnRef {
-            index: function.index,
-            args,
-        });
+        let function = self.constrained_callee(
+            FnRef {
+                index: function.index,
+                args,
+            },
+            span,
+        )?;
         Some(state.index(function, (file, span)))
     }
 }

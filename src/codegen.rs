@@ -2101,6 +2101,70 @@ mod tests {
     }
 
     #[test]
+    fn implied_constraints_call_their_aliases_functions() {
+        // `T.Inner` implements `Maker`, and so `T.Inner.Made` implements
+        // `Named`, since `T` implements `Outer`. What they are is only known
+        // once `code` is made for a `T`.
+        let src = "
+            trait Named {
+                fn code() -> Int
+            }
+
+            trait Maker where Made == some Named {
+                alias Made
+
+                fn make() -> Made
+            }
+
+            trait Outer where Inner == some Maker {
+                alias Inner
+
+                fn inner() -> Inner
+            }
+
+            group Factory<T> where T == some Outer {
+                outer: T
+            }
+
+            impl Factory {
+                static fn of(_ outer: Self.T) -> Self {
+                    return Self { outer: outer }
+                }
+
+                fn code() -> Int {
+                    return self.outer.inner().make().code()
+                }
+            }
+
+            impl Int with Named {
+                fn code() -> Int {
+                    return self * 10
+                }
+            }
+
+            impl Bool with Maker {
+                fn make() -> Int {
+                    if self {
+                        return 7
+                    }
+                    return 3
+                }
+            }
+
+            impl Int with Outer {
+                fn inner() -> Bool {
+                    return self > 0
+                }
+            }
+
+            fn main() -> Int {
+                return Factory.of(1).code() + Factory.of(-1).code()
+            }
+            ";
+        assert_eq!(run(src), 100);
+    }
+
+    #[test]
     fn compare_on_integers_gives_their_comparison() {
         // Each check is one bit of the result.
         let src = "
