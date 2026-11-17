@@ -7864,7 +7864,7 @@ fn functions_as_values_are_checked_like_other_values() {
         }
 
         fn f() {
-            let a: Fn<Int, Int> = add
+            let a: Fn<(_: Int), Int> = add
             let b: Fn<Int> = add
             let c = add.missing
             let g = add
@@ -7875,13 +7875,98 @@ fn functions_as_values_are_checked_like_other_values() {
     assert_eq!(
         messages_top(src),
         [
-            "cannot assign `Fn<(a: Int, b: Int), Int>` to `a`, which has type `Fn<Int, Int>`",
+            "cannot assign `Fn<(a: Int, b: Int), Int>` to `a`, which has type `Fn<(_: Int), Int>`",
             "`Fn` has 2 generic parameters, but was given 1",
             "`Fn<(a: Int, b: Int), Int>` has no field or method `missing`",
             "cannot assign `Int` to `h`, which has type `Bool`",
             "`g` takes 2 arguments, found 1",
         ]
     );
+}
+
+#[test]
+fn function_inputs_implement_tuple() {
+    let src = "
+        alias Pair = (a: Int, b: Int)
+
+        fn add(a: Int, b: Int) -> Int {
+            return a + b
+        }
+
+        fn nothing() {}
+
+        group Holder<T> {}
+
+        impl Holder where Self.T == some Tuple {
+            fn run(function: Fn<Self.T, Int>) {}
+        }
+
+        impl Fn {
+            fn same() -> Fn<Self.Input, Self.Output> {
+                return self
+            }
+        }
+
+        fn f() {
+            let a: Fn<Pair, Int> = add
+            let b: Fn<Unit, Unit> = nothing
+            let c: Fn<(), Unit> = nothing.same()
+        }
+        ";
+    assert_eq!(check_top(src), Ok(()));
+}
+
+#[test]
+fn function_inputs_must_implement_tuple() {
+    assert_eq!(
+        messages_top(
+            "
+            group Point {}
+            alias Broken = Fn<Bool, Int>
+
+            group Holder<T> {
+                function: Fn<T, Int>
+            }
+
+            fn f(function: Fn<Point, Int>) {
+                let a: Fn<Int, Int> = 1
+                let b: Fn<Fn<(), Int>, Int> = 1
+            }
+            "
+        ),
+        [
+            "the `Input` of `Fn` must implement `Tuple`, found `Bool`",
+            "the `Input` of `Fn` must implement `Tuple`, found `T`",
+            "the `Input` of `Fn` must implement `Tuple`, found `Point`",
+            "the `Input` of `Fn` must implement `Tuple`, found `Int`",
+            "the `Input` of `Fn` must implement `Tuple`, found `Fn<(), Int>`",
+        ]
+    );
+}
+
+#[test]
+fn tuple_cannot_be_implemented() {
+    let src = "
+        alias Pair = (a: Int, b: Int)
+        group Point {}
+        impl Point with Tuple {}
+        impl Pair with Tuple {}
+        ";
+    assert_eq!(pointed_at_top(src), ["Tuple", "Tuple"]);
+    assert_eq!(
+        messages_top(src),
+        [
+            "`Tuple` can't be implemented, since every tuple implements it, and nothing else can",
+            "`Tuple` can't be implemented, since every tuple implements it, and nothing else can",
+        ]
+    );
+    // Only the standard library's `Tuple` can't be.
+    let src = "
+        trait Tuple {}
+        group Point {}
+        impl Point with Tuple {}
+        ";
+    assert_eq!(check_top(src), Ok(()));
 }
 
 #[test]
@@ -8046,7 +8131,7 @@ fn static_functions_are_called_like_other_functions() {
             Point.at(x: 1, z: 2)
             Point.at(x: 1)
             at(x: 1)
-            let a: Fn<Int, Point> = Point.at
+            let a: Fn<(_: Int), Point> = Point.at
             let b = Point.missing
             let c = point.at
         }
@@ -8059,7 +8144,7 @@ fn static_functions_are_called_like_other_functions() {
             "argument to `Point.at` should be labelled `y`, found `z`",
             "`Point.at` takes 2 arguments, found 1",
             "`at` takes 2 arguments, found 1",
-            "cannot assign `Fn<(x: Int, y: Int), Point>` to `a`, which has type `Fn<Int, Point>`",
+            "cannot assign `Fn<(x: Int, y: Int), Point>` to `a`, which has type `Fn<(_: Int), Point>`",
             "`Point` has no static function `missing`",
             "`Point.at` is a static function, so it must be used on `Point` itself rather than a value",
         ]

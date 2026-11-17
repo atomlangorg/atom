@@ -210,7 +210,8 @@ impl<'a> Checker<'a> {
         self.named_instance(template, args, name)
     }
     /// The type made from the generic type called `name`, at `template` in
-    /// `templates`, with `args`.
+    /// `templates`, with `args`, which must suit it: a tag or option needs a
+    /// choice, and an `Fn` needs an `Input` that implements `Tuple`.
     pub(super) fn named_instance(
         &mut self,
         template: usize,
@@ -219,6 +220,16 @@ impl<'a> Checker<'a> {
     ) -> Option<Type> {
         if self.is_only_for_choices(template) && self.options(args[0].id).is_none() {
             let error = CheckError::NotAChoice {
+                generic: name.to_string(),
+                found: args[0].clone(),
+            };
+            self.error(name.span, error);
+            return None;
+        }
+        if template == self.std_template("Fn")
+            && !self.implements(&args[0], self.std_trait("Tuple"))
+        {
+            let error = CheckError::FnInputNotTuple {
                 generic: name.to_string(),
                 found: args[0].clone(),
             };

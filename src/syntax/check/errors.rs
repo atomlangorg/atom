@@ -265,6 +265,12 @@ pub enum CheckError {
     CannotInferImplicitType(String),
     /// A generic type that's only for choices was given something else.
     NotAChoice { generic: String, found: Type },
+    /// `Fn`, called `generic` where it's used, was given an `Input` that
+    /// doesn't implement `Tuple`.
+    FnInputNotTuple { generic: String, found: Type },
+    /// An `impl` implements the standard library's `Tuple`, which only
+    /// tuples implement, without one.
+    ImplementedTuple,
     /// `Self.T` was used outside the `impl` of a generic type.
     SelfParamOutsideGeneric(String),
     /// `Self.T` names a parameter the `impl`'s generic type doesn't have.
@@ -716,6 +722,14 @@ impl fmt::Display for CheckError {
                     "`{generic}` can only be used with a choice, found `{found}`"
                 )
             }
+            Self::FnInputNotTuple { generic, found } => write!(
+                f,
+                "the `Input` of `{generic}` must implement `Tuple`, found `{found}`"
+            ),
+            Self::ImplementedTuple => write!(
+                f,
+                "`Tuple` can't be implemented, since every tuple implements it, and nothing else can"
+            ),
             Self::SelfParamOutsideGeneric(param) => write!(
                 f,
                 "`Self.{param}` can only be used in the `impl` of a generic type"

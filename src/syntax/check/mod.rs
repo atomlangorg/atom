@@ -94,7 +94,7 @@ const NO_ERRORS: &str = "the program has no errors";
 const STDLIB_PACKAGE: &str = "stdlib";
 
 /// The source of each file of the standard library, by its path within it.
-const STDLIB_FILES: [(&str, &str); 22] = [
+const STDLIB_FILES: [(&str, &str); 23] = [
     ("operators", include_str!("../../stdlib/operators.atom")),
     ("bool", include_str!("../../stdlib/bool.atom")),
     ("int", include_str!("../../stdlib/int.atom")),
@@ -112,6 +112,7 @@ const STDLIB_FILES: [(&str, &str); 22] = [
     ("never", include_str!("../../stdlib/never.atom")),
     ("exit", include_str!("../../stdlib/exit.atom")),
     ("call", include_str!("../../stdlib/call.atom")),
+    ("tuple", include_str!("../../stdlib/tuple.atom")),
     ("rawpointer", include_str!("../../stdlib/rawpointer.atom")),
     (
         "memorylayout",
@@ -1051,6 +1052,14 @@ impl<'a> Checker<'a> {
     fn std_template(&self, name: &str) -> usize {
         match self.std_binding(name) {
             Some(Binding::Generic(template)) => *template,
+            _ => panic!("the standard library should declare `{name}`"),
+        }
+    }
+    /// A trait from the standard library, such as `Call`, as an index into
+    /// `traits`.
+    fn std_trait(&self, name: &str) -> usize {
+        match self.std_binding(name) {
+            Some(Binding::Trait(index)) => *index,
             _ => panic!("the standard library should declare `{name}`"),
         }
     }

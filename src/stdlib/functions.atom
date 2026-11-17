@@ -16,7 +16,8 @@
 
 // A function, which is what naming a function or static function refers to
 // when it's used as a value, as in `add` or `Int.zero`. `Input` is a tuple of
-// its parameters, as in `Fn<(a: Int, b: Int), Int>` for
+// its parameters, so it must implement `Tuple`, as in
+// `Fn<(a: Int, b: Int), Int>` for
 // `fn add(a: Int, b: Int) -> Int`, or `Fn<(_: Int), Int>` for
 // `fn negate(_ value: Int) -> Int`. A function called by name is called
 // directly, and as a value it uses `Call`, so `adder(a: 3, b: 5)`, where

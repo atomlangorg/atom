@@ -323,10 +323,7 @@ impl<'a> Checker<'a> {
         span: Span,
         not_implemented: CheckError,
     ) -> Option<FnRef> {
-        let trait_index = match self.std_binding(trait_name) {
-            Some(Binding::Trait(index)) => *index,
-            _ => panic!("the standard library should declare `{trait_name}`"),
-        };
+        let trait_index = self.std_trait(trait_name);
         match self.trait_fn(ty, trait_index, method) {
             Some(found) if self.implements(ty, trait_index) => Some(found),
             found => {
@@ -610,9 +607,19 @@ impl<'a> Checker<'a> {
     /// a type made from a generic type only does if its arguments meet the
     /// constraints of the `impl` that implements it. A parameter that the
     /// current `impl` constrains implements the traits it's constrained to.
+    ///
+    /// The standard library's `Tuple` is implemented by every tuple, and
+    /// nothing else, without an `impl`, along with the `Input` of the `Fn`
+    /// made with its own parameters, since every `Fn`'s `Input` implements it.
     pub(super) fn implements(&self, ty: &Type, trait_index: usize) -> bool {
         if self.constraint_on(ty, trait_index).is_some() {
             return true;
+        }
+        if trait_index == self.std_trait("Tuple") {
+            // The stand-ins are only made once `Fn` is defined, which can be
+            // after an alias uses it.
+            let fn_input = self.templates[self.std_template("Fn")].stand_ins.first();
+            return self.elements(ty.id).is_some() || fn_input == Some(ty);
         }
         let (owner, args) = self.owner(ty);
         self.implementations

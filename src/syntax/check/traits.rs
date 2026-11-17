@@ -56,6 +56,12 @@ impl<'a> Checker<'a> {
         };
         let mut pending = vec![];
         let trait_index = with.and_then(|with| self.resolve_trait(with));
+        // `implements` knows which types implement `Tuple` without an `impl`.
+        if let Some(with) = with
+            && trait_index == Some(self.std_trait("Tuple"))
+        {
+            self.error(with.span, CheckError::ImplementedTuple);
+        }
         if with.is_none() {
             for alias in aliases {
                 let name = alias.name.clone();

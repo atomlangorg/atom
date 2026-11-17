@@ -4603,8 +4603,6 @@ mod tests {
 
     #[test]
     fn function_values_are_called_with_their_input_unpacked() {
-        // An `Fn` whose `Input` isn't a tuple never has a value, but it can
-        // still be called.
         let src = "
             fn subtract(_ a: Int, from b: Int) -> Int {
                 return b - a
@@ -4612,10 +4610,6 @@ mod tests {
 
             fn none() -> Int {
                 return 4
-            }
-
-            fn never(_ function: Fn<Int, Int>) -> Int {
-                return function.call(input: 1)
             }
 
             fn main() -> Int {
